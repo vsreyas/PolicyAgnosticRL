@@ -6,6 +6,8 @@ from absl import logging
 import gym
 import jax
 import numpy as np
+import imageio.v3 as iio
+import os
 
 
 def supply_rng(f, rng=jax.random.PRNGKey(0)):
@@ -261,3 +263,103 @@ def parallel_evaluate(policy_fn, eval_envs, num_eval, verbose=True):
             f"Evaluation using {len(eval_episode_rewards)} episodes: mean reward {np.mean(eval_episode_rewards):.5f} +- {bootstrap_std(eval_episode_rewards):.5f} \n"
         )
     return eval_episode_rewards, eval_episode_time_rewards
+
+
+def evaluate_with_trajectories_libero(
+    policy_fn,
+    env,
+    num_episodes: int,
+    save_video: bool = False,
+    max_episodes_for_video: int = 2,
+):
+    trajectories = [defaultdict(list)]
+    episode_count = 0
+
+    observations = env.reset()
+    if isinstance(observations, tuple) and len(observations) == 2:
+        observations, _ = observations
+    step_index = 0
+
+    while episode_count < num_episodes:
+        actions = policy_fn(observations)
+        if len(actions) == 1:
+            actions = actions[0]
+        step_variables = env.step(actions)
+        if len(step_variables) == 4:
+            next_observations, rewards, dones, infos = step_variables
+        else:
+            next_observations, rewards, dones, truncated, infos = step_variables
+            dones = np.logical_or(dones, truncated)
+
+        if save_video and episode_count < max_episodes_for_video:
+            images = env.render()
+
+        step_index += 1
+        log_progress = False
+        obs = observations
+        next_obs = next_observations
+        transition = dict(
+            observation=obs,
+            next_observation=next_obs,
+            action=actions,
+            reward=rewards,
+            done=dones,
+            info={},  # match vectorized (info dropped / empty)
+        )
+        if save_video and episode_count < max_episodes_for_video:
+            transition["image"] = images.copy()
+        add_to(trajectories[-1], transition)
+
+        if dones:
+            episode_count += 1
+            step_index = 0
+            log_progress = True
+
+            if episode_count < num_episodes:
+                # start a new episode: create a new trajectory and reset env
+                trajectories.append(defaultdict(list))
+                observations = env.reset()
+                if isinstance(observations, tuple) and len(observations) == 2:
+                    observations, _ = observations
+            else:
+                # don't reset if we're done with all episodes
+                observations = next_observations
+        else:
+            observations = next_observations
+
+        if log_progress:
+            logging.info(
+                f"Completed {episode_count} out of {num_episodes} eval episodes..."
+            )
+    return trajectories
+
+
+# --- utility ---
+def add_to(container, data):
+    for k, v in data.items():
+        container[k].append(v)
+
+
+def save_rollout_gif(frames, save_dir, step_i, rollout_j, fps=10):
+    """
+    Save rollout frames as a GIF in structure: save_dir/eval_gifs/step_{i}/rollout_{j}.gif
+
+    Args:
+        frames (list[np.ndarray]): list of RGB frames (H, W, 3)
+        save_dir (str): base directory
+        step_i (int): current training step
+        rollout_j (int): rollout index within step_i
+        fps (int): frames per second for the gif
+    """
+    # Construct full directory path
+    step_dir = os.path.join(save_dir, f"eval_gifs/step_{step_i}")
+    os.makedirs(step_dir, exist_ok=True)
+
+    # Ensure frames are uint8
+    frames_uint8 = [np.uint8(f) for f in frames]
+
+    # Save the gif
+    duration = 1 / fps
+    gif_path = os.path.join(step_dir, f"rollout_{rollout_j}.gif")
+    iio.imwrite(gif_path, frames_uint8, plugin="pillow", duration=duration)
+    print(f"Saved: {gif_path}")

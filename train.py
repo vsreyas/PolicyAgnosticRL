@@ -1,6 +1,8 @@
 """Script for offline to online RL."""
 
 import os
+os.environ["TMPDIR"] = "/data/hf_cache/datasets/LIBERO/robosuite_temp_dir"
+
 import time
 from typing import Any, Callable, Dict, List, Optional, Union
 
@@ -32,7 +34,7 @@ from jaxrl_m.agents.continuous.base_policy import BasePolicy, BasePolicyTypes
 from jaxrl_m.agents.continuous.ddpm_bc import DDPMBCAgent
 from jaxrl_m.agents.continuous.openvla import OpenVLAAgent
 from jaxrl_m.common.common import JaxRLTrainState, shard_batch
-from jaxrl_m.common.evaluation import evaluate_with_trajectories_vectorized, supply_rng
+from jaxrl_m.common.evaluation import evaluate_with_trajectories_vectorized, supply_rng, evaluate_with_trajectories_libero, save_rollout_gif
 from jaxrl_m.common.traj import TrajSampler, calc_return_to_go
 from jaxrl_m.common.typing import Batch, Data
 from jaxrl_m.common.wandb import WandBLogger
@@ -87,10 +89,10 @@ flags.DEFINE_integer(
 flags.DEFINE_float("reward_scale", 1.0, "Reward scale.")
 flags.DEFINE_float("reward_bias", 0.0, "Reward bias.")
 flags.DEFINE_float("clip_action", 0.99999, "Clip action.")
-flags.DEFINE_integer("num_parallel_envs", 10, "Number of parallel environments.")
+flags.DEFINE_integer("num_parallel_envs", 2, "Number of parallel environments.")
 flags.DEFINE_bool("debug", False, "Debug config")
 flags.DEFINE_string("resume_path", None, "Resume training from checkpoint.")
-flags.DEFINE_integer("max_episode_steps", 1000, "Maximum episode steps.")
+flags.DEFINE_integer("max_episode_steps", 360, "Maximum episode steps.")
 flags.DEFINE_string(
     "replay_buffer_path", "", "Path to replay buffer to load (Optional)."
 )
@@ -405,7 +407,7 @@ def set_batch_masks(
     batch: Batch, environment_name: str, reward_bias: float, reward_scale: float
 ) -> Batch:
     """Environment-specific mask setting."""
-    if "maze" in environment_name or environment_name == "real_robot":
+    if "maze" in environment_name or environment_name == "real_robot" or "libero" in environment_name:
         # Assumes sparse rewards, mask should be 0 only at success
         success_reward = 1.0 * reward_scale + reward_bias
     elif "kitchen" in environment_name or "calvin" in environment_name:
@@ -652,7 +654,41 @@ def train_agent(_):
                     )
                 ]
             )
+    elif FLAGS.environment_name=="libero":
+        assert FLAGS.config.image_observations
+        from jaxrl_m.envs.libero import (
+            get_libero_config,
+            get_libero_env,
+            get_libero_tfrecord_dataset,
+        )
 
+        dataset = get_libero_tfrecord_dataset(
+            tfrecord_regexp=FLAGS.config.libero_tfrecord_regexp,
+            **FLAGS.config.dataset_kwargs,
+        )
+        libero_config = get_libero_config()
+
+        train_env = get_libero_env(cfg=libero_config)
+        if FLAGS.num_parallel_envs > 1:
+            num_parallel_envs = FLAGS.num_parallel_envs
+            eval_env = gym.vector.AsyncVectorEnv(
+                [
+                    lambda: get_libero_env(
+                        cfg=libero_config, task_id = ind*num_parallel_envs
+                    )
+                    for ind in range(num_parallel_envs)
+                ],
+                context="forkserver",  # the default "fork" is incompatible with JAX
+            )
+        else:
+            # eval_env = gym.vector.SyncVectorEnv(
+            #     [
+            #         lambda: get_calvin_env(
+            #             cfg=calvin_config,
+            #         )
+            #     ]
+            # )
+            eval_env = get_libero_env(cfg=libero_config)
     else:
         train_env = TruncationWrapper(
             gym.wrappers.TimeLimit(
@@ -1299,11 +1335,25 @@ def train_agent(_):
                     pass
             if FLAGS.config.num_eval_episodes > 0:
                 print("Evaluating...")
-                trajectories = evaluate_with_trajectories_vectorized(
-                    eval_policy_fn,
-                    eval_env,
-                    FLAGS.config.num_eval_episodes,
-                )
+                if "libero" not in FLAGS.environment_name: 
+                    trajectories = evaluate_with_trajectories_vectorized(
+                        eval_policy_fn,
+                        eval_env,
+                        FLAGS.config.num_eval_episodes,
+                    )
+                else:
+                    if FLAGS.num_parallel_envs != 1:
+                        trajectories = evaluate_with_trajectories_vectorized(
+                        eval_policy_fn,
+                        eval_env,
+                        FLAGS.config.num_eval_episodes,
+                    )
+                    else:
+                        trajectories = evaluate_with_trajectories_libero(
+                        eval_policy_fn,
+                        eval_env,
+                        FLAGS.config.num_eval_episodes,
+                    )
 
                 # log Q - MC
                 if hasattr(agent, "forward_critic"):
@@ -1363,12 +1413,13 @@ def train_agent(_):
                         step=i,
                     )
 
-                if FLAGS.environment_name == "calvin" and FLAGS.config.save_video:
+                if (FLAGS.environment_name == "calvin" or FLAGS.environment_name =='libero') and FLAGS.config.save_video:
                     trajectories_to_save = trajectories[
                         : FLAGS.config.num_episodes_per_video
                     ]
                     frames = []
-                    for traj in trajectories_to_save:
+                    ind_traj = []
+                    for j, traj in enumerate(trajectories_to_save):
                         trajectory_return = 0
                         for transition, reward in zip(
                             traj["observation"], traj["reward"]
@@ -1379,6 +1430,8 @@ def train_agent(_):
                             image = transition["image"]  # .transpose(2, 0, 1)
                             # Add text for reward and return so far
                             trajectory_return += reward
+                            image = np.flipud(image)
+                            image = np.ascontiguousarray(image) 
                             frame = cv2.putText(
                                 image,
                                 f"reward: {reward}. return: {trajectory_return}",
@@ -1388,8 +1441,13 @@ def train_agent(_):
                                 (0, 0, 0),
                                 1,
                             )
+                            ind_traj.append(frame)
                             frame = frame.transpose(2, 0, 1)
                             frames.append(frame)
+                        
+                        save_rollout_gif(ind_traj, save_dir, step_i=i, rollout_j=j)
+                        ind_traj = []
+                        
                     frames = np.array(frames)
                     wandb.log(
                         {
@@ -1401,6 +1459,9 @@ def train_agent(_):
                         },
                         step=i,
                     )
+                    print("video logged")
+                    del ind_traj, frames
+                    import gc; gc.collect()
 
                 eval_metrics = {
                     "eval/average_return": np.mean(
@@ -1439,7 +1500,9 @@ def train_agent(_):
                 }
                 if wandb_logger is not None:
                     wandb_logger.log(eval_metrics, step=i)
-
+                
+                del trajectories
+                import gc; gc.collect()
             if FLAGS.config.save_video:
                 try:
                     eval_video = load_recorded_video(

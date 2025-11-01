@@ -179,3 +179,5 @@ install_jax_on_matrix.sh
 
 *.err
 *.out
+
+LIBERO/

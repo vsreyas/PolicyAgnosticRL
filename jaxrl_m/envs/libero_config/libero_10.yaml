@@ -1,0 +1,41 @@
+defaults:
+  - _self_
+
+# -----------------------------
+# General Settings
+# -----------------------------
+name: libero_10                # name of the benchmark suite (libero_10, libero_spatial, etc.)
+seed: 0                        # random seed
+max_episode_steps: 500         # total steps per episode
+action_repeat: 1               # number of simulator steps per action
+
+# -----------------------------
+# Observation Settings
+# -----------------------------
+pixel_ob: true                 # use RGB observations
+state_ob: true                 # include proprio state
+screen_size: [224, 224]        # height, width
+channels_first: false          # image format (HWC)
+camera_names: ["agentview", "robot0_eye_in_hand"]  # camera views to render
+
+# -----------------------------
+# Reward / Task Config
+# -----------------------------
+include_distractors_in_state_obs: false
+# -----------------------------
+# Simulation Settings
+# -----------------------------
+offscreen_render: true
+camera_widths: 224
+camera_heights: 224
+
+# -----------------------------
+# Data / Paths
+# -----------------------------
+save_dir: /data/hf_cache/datasets/LIBERO/robosuite_temp_dir # logs & outputs
+record: true                                    # record rendered videos
+libero_path: /home/sreyasv/Projects/PolicyAgnosticRL/LIBERO               # root LIBERO source path (for bddl, init files)
+
+return_state: false
+from_pixels: true
+from_state: true
