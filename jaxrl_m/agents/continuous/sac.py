@@ -11,7 +11,7 @@ import jax
 import jax.numpy as jnp
 
 from jaxrl_m.common.common import JaxRLTrainState, ModuleDict, nonpytree_field
-from jaxrl_m.common.encoding import EncodingWrapper, GCEncodingWrapper
+from jaxrl_m.common.encoding import EncodingWrapper, GCEncodingWrapper, MultiViewLCEncodingWrapper, MultiViewSingleLCEncodingWrapper
 from jaxrl_m.common.optimizers import make_optimizer
 from jaxrl_m.common.typing import Batch, Data, Params, PRNGKey
 from jaxrl_m.networks.actor_critic_nets import (
@@ -700,6 +700,8 @@ class SACAgent(flax.struct.PyTreeNode):
         shared_goal_encoder: bool,
         stop_gradient: bool = False,
         proprioceptive_dims: Optional[int] = None,
+        use_lang: bool = False,
+        use_wrist_view: bool = False,
     ):
         if goal_conditioned:
             if early_goal_concat:
@@ -717,13 +719,25 @@ class SACAgent(flax.struct.PyTreeNode):
             )
 
         else:
-            encoder_def = EncodingWrapper(
-                encoder_def,
-                use_proprio=use_proprio,
-                proprioceptive_dims=proprioceptive_dims,
-                stop_gradient=stop_gradient,
-                enable_stacking=enable_stacking,
-            )
+            if not use_lang and not use_wrist_view:
+                encoder_def = EncodingWrapper(
+                    encoder_def,
+                    use_proprio=use_proprio,
+                    proprioceptive_dims=proprioceptive_dims,
+                    stop_gradient=stop_gradient,
+                    enable_stacking=enable_stacking,
+                )
+            elif use_lang and use_wrist_view:
+                # encoder_def = MultiViewLCEncodingWrapper(
+                #     encoder_def[0], encoder_def[1],
+                #     use_proprio=use_proprio,
+                #     stop_gradient=stop_gradient,
+                # )
+                encoder_def = MultiViewSingleLCEncodingWrapper(
+                    encoder_def,
+                    use_proprio=use_proprio,
+                    stop_gradient=stop_gradient,
+                )
 
         return encoder_def
 

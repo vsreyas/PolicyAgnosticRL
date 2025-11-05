@@ -17,6 +17,33 @@ from jaxrl_m.data.bridge_dataset import glob_to_path_list
 import numpy as np
 from typing import Dict, Any
 import torch
+import clip
+
+import json
+from tqdm import tqdm
+
+
+def load_language_embeddings(path: str) -> dict[int, np.ndarray]:
+    """
+    Loads language embeddings from a JSON file and converts them to float32 numpy arrays.
+
+    Returns:
+        Dict[int, np.ndarray] mapping task_id → embedding (shape [512], dtype float32)
+    """
+    with open(path, "r") as f:
+        data = json.load(f)
+
+    # Convert keys to int and lists to np.float32 arrays
+    embeddings = {
+        int(k): np.array(v, dtype=np.float32)
+        for k, v in data.items()
+    }
+
+    # Optionally verify dimensions
+    for k, v in embeddings.items():
+        assert v.shape == (512,), f"Task {k} has wrong shape {v.shape}"
+
+    return embeddings
 
 def get_dataset(
     dataset: Dict[str, np.ndarray],
@@ -293,12 +320,13 @@ class LiberoEnvWrapper(gym.Wrapper):
             shape=(proprio_dim,),
             dtype=np.float32,
         )
-
+        lang_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(512,), dtype=np.float32)
         self.observation_space = gym.spaces.Dict(
             {
                 "image": image_space,
-                "images1": image_space,
+                "wrist_image": image_space,
                 "proprio": proprio_space,
+                "language": lang_space,
             }
         )
 
@@ -309,15 +337,19 @@ class LiberoEnvWrapper(gym.Wrapper):
         self.task_id = task_id
         self.num_envs = 10 if "10" in cfg.name else 90
         self.suite = suite
+        self.id2embedding = load_language_embeddings("data_info/libero_id2embeddings.json")
+        self.language_embedding = self.id2embedding[self.task_id]
+        self.reset()
+
 
 
     def reset(self):
         self.env.close()
-        del self.env
+        del self.env, self.language_embedding
         
         self.task_id = (self.task_id + 1) % self.num_envs
         task = self.suite.get_task(self.task_id)
-
+        self.language_embedding = self.id2embedding[self.task_id]
         # --- Paths for BDDL and init states ---
         bddl_file = os.path.join(
             f"{self.cfg.libero_path}/libero/libero/bddl_files",
@@ -388,12 +420,13 @@ class LiberoEnvWrapper(gym.Wrapper):
         # scene_obs = np.zeros(24, np.float32)
         # state = np.concatenate([robot_vec, scene_obs], axis=0)
         state = robot_vec
-        return {
+        obs = {
             "proprio": state,
             "image": img0,
-            "images1": img1,
+            "wrist_image": img1,
+            "language": self.language_embedding,
         }
-
+        return obs
 
 # # ======================================================
 # # === Dict and Goal Wrappers
@@ -435,38 +468,81 @@ class LiberoEnvWrapper(gym.Wrapper):
 #     def _render_goal(self):
 #         raise NotImplementedError("Goal rendering not implemented yet for Libero.")
 
+def save_all_task_language_embeddings(cfg=None, output_path="libero_language_embeddings.json", key_val="lang"):
+    """
+    Iterates over all tasks in the LIBERO benchmark suite and saves CLIP language embeddings.
+
+    Args:
+        cfg: Hydra config for the Libero benchmark (optional; defaults to get_libero_config()).
+        output_path (str): Path to save the JSON file.
+    """
+    if cfg is None:
+        cfg = get_libero_config()
+
+    benchmark_dict = benchmark.get_benchmark_dict()
+    suite = benchmark_dict[cfg.name]()
+
+    # Load CLIP once
+    clip_device = "cuda" if torch.cuda.is_available() else "cpu"
+    clip_model, _ = clip.load("ViT-B/32", device=clip_device)
+    clip_model.eval()
+
+    task_embeddings = {}
+
+    print(f"Encoding language for {len(suite.tasks)} tasks...")
+    for task_id, task in tqdm(enumerate(suite.tasks), total=len(suite.tasks)):
+        if hasattr(task, "language") and isinstance(task.language, str):
+            text = task.language
+            with torch.no_grad():
+                tokens = clip.tokenize([text]).to(clip_device)
+                text_features = clip_model.encode_text(tokens)
+                text_features = text_features[0].cpu().numpy().astype(float).tolist()
+            key = text if key_val is "lang" else task_id
+            task_embeddings[key] = text_features
+        else:
+            print(f"⚠️  Skipping task {task_id}: no valid language description.")
+            continue
+
+    # Save as JSON
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(task_embeddings, f, indent=2)
+
+    print(f"✅ Saved {len(task_embeddings)} language embeddings to {output_path}")
+    return task_embeddings
 
 def main():
-    import time
+    # import time
 
-    print("Initializing LIBERO environment...")
-    env = get_libero_env(goal_conditioned=False)
+    # print("Initializing LIBERO environment...")
+    # env = get_libero_env(goal_conditioned=False)
 
-    print("Resetting environment...")
-    obs = env.reset()
-    print("Initial observation keys:", obs.keys())
-    for k, v in obs.items():
-        print(f"  {k}: shape={np.array(v).shape}, dtype={np.array(v).dtype}")
+    # print("Resetting environment...")
+    # obs = env.reset()
+    # print("Initial observation keys:", obs.keys())
+    # for k, v in obs.items():
+    #     print(f"  {k}: shape={np.array(v).shape}, dtype={np.array(v).dtype}")
 
-    num_steps = 10
-    print(f"\nRunning {num_steps} random steps...")
-    done = False
-    step = 0
-    while not done:
-        action = env.action_space.sample()
-        next_obs, reward, done, info = env.step(action)
-        print(f"Step {step+1}: reward={reward:.3f}, done={done}")
+    # num_steps = 10
+    # print(f"\nRunning {num_steps} random steps...")
+    # done = False
+    # step = 0
+    # while not done:
+    #     action = env.action_space.sample()
+    #     next_obs, reward, done, info = env.step(action)
+    #     print(f"Step {step+1}: reward={reward:.3f}, done={done}")
 
-        # Show image sizes for quick sanity check
-        if step == 0:
-            print("Image0 shape:", np.array(next_obs['image']).shape)
-            print("Image1 shape:", np.array(next_obs['images1']).shape)
-            print("Proprio shape:", np.array(next_obs['proprio']).shape)
+    #     # Show image sizes for quick sanity check
+    #     if step == 0:
+    #         print("Image0 shape:", np.array(next_obs['image']).shape)
+    #         print("Image1 shape:", np.array(next_obs['images1']).shape)
+    #         print("Proprio shape:", np.array(next_obs['proprio']).shape)
 
-        if done:
-            break
-        step += 1
-        time.sleep(0.1)
+    #     if done:
+    #         break
+    #     step += 1
+    #     time.sleep(0.1)
+    save_all_task_language_embeddings()
     
 
 

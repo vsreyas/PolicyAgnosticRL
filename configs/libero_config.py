@@ -58,7 +58,7 @@ def get_config(config_string):
     ddpm_config = deepcopy(BASE_DDPM_CONFIG)
     ddpm_config["save_video"] = True
     ddpm_config["image_observations"] = True
-    ddpm_config["encoder"] = "resnetv1-18-bridge"
+    ddpm_config["encoder"] = "resnetv1-34-bridge-film"  # 'resnetv1-18-bridge-film'
     ddpm_config["encoder_kwargs"] = dict(
         pooling_method="avg",
         add_spatial_coordinates=False,
@@ -73,6 +73,7 @@ def get_config(config_string):
     )
     ddpm_config["agent_kwargs"]["image_observations"] = True
     ddpm_config["agent_kwargs"]["drq_padding"] = 4
+    ddpm_config["agent_kwargs"]["use_proprio"] = True
 
     gaussian_calql_config = deepcopy(BASE_GAUSSIAN_CALQL_CONFIG)
     gaussian_calql_config["save_video"] = True

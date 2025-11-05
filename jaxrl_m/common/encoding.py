@@ -5,6 +5,7 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 from einops import rearrange, repeat
+from typing import Dict, Tuple
 
 
 class EncodingWrapper(nn.Module):
@@ -192,3 +193,155 @@ class LCEncodingWrapper(nn.Module):
             encoding = jax.lax.stop_gradient(encoding)
 
         return encoding
+
+
+class MultiViewLCEncodingWrapper(nn.Module):
+    """
+    Encodes two camera views (main and wrist) and language embeddings into a single flat encoding.
+
+    Each camera view is passed through its own encoder, both conditioned on the language embedding.
+    Their encodings are fused (concatenated or averaged) to produce a single representation.
+
+    Args:
+        encoder_main: Encoder network for the main/front camera view.
+        encoder_wrist: Encoder network for the wrist camera view.
+        fusion: Fusion strategy between encoders ("concat" or "add").
+        use_proprio: Whether to concatenate proprioceptive features.
+        stop_gradient: Whether to stop the gradient on the final encoding.
+    """
+
+    encoder_main: nn.Module
+    encoder_wrist: nn.Module
+    fusion: str = "concat"          # ["concat", "add", "mean"]
+    use_proprio: bool = True
+    stop_gradient: bool = False
+
+    def __call__(
+        self,
+        observations: Dict[str, jnp.ndarray], train:bool,
+    ) -> jnp.ndarray:
+        img_main = observations["image"]          
+        img_wrist = observations["wrist_image"]
+        language = observations["language"]             
+
+        if len(img_main.shape) == 5:
+            batch_size, obs_horizon = img_main.shape[:2]
+            img_main = rearrange(img_main, "B T H W C -> (B T) H W C")
+            img_wrist = rearrange(img_wrist, "B T H W C -> (B T) H W C")
+        else:
+            batch_size, obs_horizon = img_main.shape[0], 1
+
+
+        enc_main = self.encoder_main(img_main, cond_var=language, train=train)
+        enc_wrist = self.encoder_wrist(img_wrist, cond_var=language, train=train)
+
+        if self.fusion == "concat":
+            fused = jnp.concatenate([enc_main, enc_wrist], axis=-1)
+        elif self.fusion in ["add", "sum"]:
+            fused = enc_main + enc_wrist
+        elif self.fusion == "mean":
+            fused = 0.5 * (enc_main + enc_wrist)
+        else:
+            raise ValueError(f"Unknown fusion strategy: {self.fusion}")
+
+        if obs_horizon > 1:
+            fused = rearrange(fused, "(B T) F -> B T F", B=batch_size, T=obs_horizon)
+        if self.use_proprio:
+            fused = jnp.concatenate([fused, observations["proprio"]], axis=-1)
+
+        # --- Optionally stop gradient ---
+        if self.stop_gradient:
+            fused = jax.lax.stop_gradient(fused)
+
+        return fused
+
+class MultiViewSingleLCEncodingWrapper(nn.Module):
+    """
+    Encodes two camera views (main and wrist) and language embeddings into a single flat encoding.
+
+    Each camera view is passed through its own encoder, both conditioned on the language embedding.
+    Their encodings are fused (concatenated or averaged) to produce a single representation.
+
+    Args:
+        encoder_main: Encoder network for the main/front camera view.
+        encoder_wrist: Encoder network for the wrist camera view.
+        fusion: Fusion strategy between encoders ("concat" or "add").
+        use_proprio: Whether to concatenate proprioceptive features.
+        stop_gradient: Whether to stop the gradient on the final encoding.
+    """
+
+    encoder: nn.Module
+    fusion: str = "concat"          # ["concat", "add", "mean"]
+    use_proprio: bool = True
+    stop_gradient: bool = False
+
+    def __call__(
+        self,
+        observations: Dict[str, jnp.ndarray], train:bool,
+    ) -> jnp.ndarray:
+        if (
+            isinstance(observations, flax.core.FrozenDict)
+            or isinstance(observations, dict)
+            and ("image" in observations or "encoding" in observations)
+        ):
+            if "encoding" in observations:
+                return observations["encoding"]
+        #     obs = observations["image"]
+        #     if self.enable_stacking:
+        #         # Combine stacking and channels into a single dimension
+        #         if len(obs.shape) == 4:
+        #             obs = rearrange(obs, "T H W C -> H W (T C)")
+        #         if len(obs.shape) == 5:
+        #             obs = rearrange(obs, "B T H W C -> B H W (T C)")
+        # else:
+        #     obs = observations
+        img_main = observations["image"]          
+        img_wrist = observations["wrist_image"]
+        language = observations["language"]             
+
+        if len(img_main.shape) == 5:
+            batch_size, obs_horizon = img_main.shape[:2]
+            img_main = rearrange(img_main, "B T H W C -> (B T) H W C")
+            img_wrist = rearrange(img_wrist, "B T H W C -> (B T) H W C")
+            language = rearrange(language, "B T F -> (B T) F")
+        else:
+            batch_size, obs_horizon = img_main.shape[0], 1
+
+        enc_main = self.encoder(img_main, cond_var=language, train=train)
+        enc_wrist = self.encoder(img_wrist, cond_var=language, train=train)
+
+        if self.fusion == "concat":
+            fused = jnp.concatenate([enc_main, enc_wrist], axis=-1)
+        elif self.fusion in ["add", "sum"]:
+            fused = enc_main + enc_wrist
+        elif self.fusion == "mean":
+            fused = 0.5 * (enc_main + enc_wrist)
+        else:
+            raise ValueError(f"Unknown fusion strategy: {self.fusion}")
+
+        if obs_horizon > 1:
+            fused = rearrange(fused, "(B T) F -> B T F", B=batch_size, T=obs_horizon)
+        else:
+            fused = fused[:, None, :]  # (B, F) → (B, 1, F)
+        # jax.debug.print("fused shape (before use_proprio): {x}", x=fused.shape)
+        # jax.debug.print("proprio shape (before use_proprio): {x}", x=observations['proprio'].shape)
+        if self.use_proprio:
+            proprio = observations["proprio"]
+            # if proprio.ndim == 3:  # (B, T, D)
+            #     proprio = rearrange(proprio, "B T D -> B (T D)")
+            # elif proprio.ndim == 2:  # (B, D)
+            #     # already flat, do nothing
+            #     pass
+            # else:
+            #     raise ValueError(f"Unexpected proprio shape: {proprio.shape}")
+            
+            fused = jnp.concatenate([fused, proprio], axis=-1)
+
+        if self.stop_gradient:
+            fused = jax.lax.stop_gradient(fused)
+        # jax.debug.print("final fused shape (before stop_gradient): {x}", x=fused.shape)
+        # if fused.ndim == 2:
+        #     # (B, F) -> (B, 1, F)
+        #     fused = fused[:, None, :]
+
+        return fused

@@ -84,6 +84,20 @@ class DDPMBCAgent(BasePolicy):
                 padding=self.config["drq_padding"],
                 num_batch_dims=2,
             )
+            if self.config.get("encoder_use_wrist_view"):
+                batch["observations"]["wrist_image"] = batched_random_crop(
+                batch["observations"]["image"],
+                key,
+                padding=self.config["drq_padding"],
+                num_batch_dims=2,
+                )
+                batch["next_observations"]["image"] = batched_random_crop(
+                    batch["next_observations"]["wrist_image"],
+                    key,
+                    padding=self.config["drq_padding"],
+                    num_batch_dims=2,
+                )
+
 
         def actor_loss_fn(params, rng):
             key, rng = jax.random.split(rng)
@@ -210,7 +224,8 @@ class DDPMBCAgent(BasePolicy):
                 ),
                 "proprio": observations["proprio"],
             }
-
+        # jax.debug.print("final fused shape (before stop_gradient): {x}", x=observations['encoding'].shape)
+        # print("obs shapes: ", observations['encoding'].shape, observations['proprio'].shape)
         observations = jax.tree_map(
             lambda x: jnp.repeat(x, repeat, axis=1).reshape(
                 batch_size * repeat, 1, *x.shape[2:]
@@ -260,6 +275,8 @@ class DDPMBCAgent(BasePolicy):
         actions: Optional[jnp.ndarray] = None,
         # agent config
         encoder_def: Optional[nn.Module] = None,
+        encoder_use_lang: Optional[bool] = False, 
+        encoder_use_wrist_view: Optional[bool] =  False,
         # other shared network config
         action_space_low: Optional[jnp.ndarray] = None,
         action_space_high: Optional[jnp.ndarray] = None,
@@ -318,6 +335,8 @@ class DDPMBCAgent(BasePolicy):
             goal_conditioned=False,
             early_goal_concat=False,
             shared_goal_encoder=False,
+            use_lang=encoder_use_lang,
+            use_wrist_view=encoder_use_wrist_view
         )
 
         networks = {
@@ -409,6 +428,8 @@ class DDPMBCAgent(BasePolicy):
                 action_samples=action_samples,
                 repeat_last_step=repeat_last_step,
                 image_observations=image_observations,
+                encoder_use_lang=encoder_use_lang,
+                encoder_use_wrist_view=encoder_use_wrist_view,
                 **kwargs,
             )
         )

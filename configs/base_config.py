@@ -10,7 +10,7 @@ from jaxrl_m.agents.continuous.diffusion_q_learning import (
     get_default_config as get_diffusion_q_learning_config,
 )
 
-SAVE_DIR_PREFIX = os.environ.get("SAVE_DIR_PREFIX", "/data/user_data/sreyasv/outputs/VLA_ft/libero_10")
+SAVE_DIR_PREFIX = os.environ.get("SAVE_DIR_PREFIX", "/data/user_data/sreyasv/outputs/VLA_ft/libero_10/ddpm_wrist_view_lang")
 DEFAULT_PARL_CONFIG = dict(
     num_base_policy_actions=32,
     num_actions_to_keep=10,

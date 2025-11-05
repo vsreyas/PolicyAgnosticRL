@@ -6,9 +6,34 @@ import numpy as np
 import tensorflow as tf
 from absl import logging
 
+import torch
+import clip
+
 from jaxrl_m.data.tf_augmentations import augment as augment_fn
 from jaxrl_m.data.tf_goal_relabeling import GOAL_RELABELING_FUNCTIONS
+import json
 
+def load_language_embeddings_str(path: str) -> dict[int, np.ndarray]:
+    """
+    Loads language embeddings from a JSON file and converts them to float32 numpy arrays.
+
+    Returns:
+        Dict[int, np.ndarray] mapping task_id → embedding (shape [512], dtype float32)
+    """
+    with open(path, "r") as f:
+        data = json.load(f)
+
+    # Convert keys to int and lists to np.float32 arrays
+    embeddings = {
+        str(k): np.array(v, dtype=np.float32)
+        for k, v in data.items()
+    }
+
+    # Optionally verify dimensions
+    for k, v in embeddings.items():
+        assert v.shape == (512,), f"Task {k} has wrong shape {v.shape}"
+
+    return embeddings
 
 class ImageReplayBuffer:
     def __init__(
@@ -25,6 +50,8 @@ class ImageReplayBuffer:
         augment: bool = False,
         augment_kwargs: dict = {},
         include_next_actions: bool = False,
+        use_language: bool = False,
+        use_wrist_view: bool = False,
     ):
         self.goal_relabeling_strategy = goal_relabeling_strategy
         self.goal_relabeling_kwargs = goal_relabeling_kwargs
@@ -35,7 +62,9 @@ class ImageReplayBuffer:
         self.augment = augment
         self.augment_kwargs = augment_kwargs
         self.include_next_actions = include_next_actions
-
+        self.use_language = use_language
+        self.use_wrist_view = use_wrist_view
+        self.lang2embedding = load_language_embeddings_str("data_info/libero_language2embeddings.json")
         dataset = self._construct_tf_dataset(data_paths, seed)
 
         if train:
@@ -123,15 +152,29 @@ class ImageReplayBuffer:
             self.PROTO_TYPE_SPEC.pop("observations/images0")
             if self.tfrecords_include_next_observations:
                 self.PROTO_TYPE_SPEC.pop("next_observations/images0")
+        if self.use_language:
+            self.PROTO_TYPE_SPEC["language"] = tf.string
+        if self.use_wrist_view:
+            self.PROTO_TYPE_SPEC["observations/images1"] = tf.uint8
+            if self.tfrecords_include_next_observations:
+                self.PROTO_TYPE_SPEC["next_observations/images1"] = tf.uint8
         features = {
             key: tf.io.FixedLenFeature([], tf.string)
             for key in self.PROTO_TYPE_SPEC.keys()
         }
         parsed_features = tf.io.parse_single_example(example_proto, features)
-        parsed_tensors = {
-            key: tf.io.parse_tensor(parsed_features[key], dtype)
-            for key, dtype in self.PROTO_TYPE_SPEC.items()
-        }
+        # parsed_tensors = {
+        #     key: tf.io.parse_tensor(parsed_features[key], dtype)
+        #     for key, dtype in self.PROTO_TYPE_SPEC.items()
+        # }
+        parsed_tensors = {}
+        for key, dtype in self.PROTO_TYPE_SPEC.items():
+            # If this feature is a plain string (like language text), don't parse it as a tensor
+            if dtype == tf.string:
+                parsed_tensors[key] = parsed_features[key]  # raw string bytes
+            else:
+                parsed_tensors[key] = tf.io.parse_tensor(parsed_features[key], dtype)
+
         if not self.tfrecords_include_next_observations:
             states = parsed_tensors["observations/state"]
             parsed_tensors["observations/state"] = states[:-1]
@@ -144,7 +187,30 @@ class ImageReplayBuffer:
                 images = parsed_tensors["observations/images0"]
                 parsed_tensors["observations/images0"] = images[:-1]
                 parsed_tensors["next_observations/images0"] = images[1:]
+                if self.use_wrist_view:
+                    wrist_images = parsed_tensors["observations/images1"]
+                    parsed_tensors["observations/images1"] = wrist_images[:-1]
+                    parsed_tensors["next_observations/images1"] = wrist_images[1:]
+        if self.use_language:
+            length = tf.shape(parsed_tensors["observations/state"])[0]
+            parsed_tensors["language"] = tf.repeat(
+                parsed_tensors["language"][None], length, axis=0
+            )
 
+            def _encode_clip(text_tensor):
+                """Compute frozen CLIP text embedding."""
+                text_str = text_tensor.numpy().decode("utf-8")
+                text_features = self.lang2embedding[text_str]
+                return text_features
+
+            clip_emb = tf.py_function(
+                func=_encode_clip,
+                inp=[parsed_tensors["language"][0]],
+                Tout=tf.float32,
+            )
+            clip_emb.set_shape([512])  # ViT-B/32 output dim
+            clip_emb = tf.repeat(clip_emb[None, :], length, axis=0)
+            parsed_tensors["language_embedding"] = clip_emb
         if self.include_next_actions:
             # add the next action as part of the observation
             actions = parsed_tensors["actions"]
@@ -161,6 +227,14 @@ class ImageReplayBuffer:
                 **(
                     {
                         "image": parsed_tensors["observations/images0"],
+                        **(
+                            {"wrist_image": parsed_tensors["observations/images1"]}
+                            if self.use_wrist_view else {}
+                        ),
+                         **(
+                            {"language": parsed_tensors["language_embedding"], }
+                            if "language_embedding" in parsed_tensors else {}
+                        ),
                     }
                     if not self.states_only
                     else {}
@@ -171,6 +245,10 @@ class ImageReplayBuffer:
                 **(
                     {
                         "image": parsed_tensors["next_observations/images0"],
+                        **(
+                            {"wrist_image": parsed_tensors["next_observations/images1"]}
+                            if self.use_wrist_view else {}
+                        ),
                     }
                     if not self.states_only
                     else {}
@@ -216,6 +294,10 @@ class ImageReplayBuffer:
         for key in keys_to_augment:
             image[key]["image"] = augment_fn(
                 image[key]["image"], [seed, seed], **self.augment_kwargs
+            )
+            if self.use_wrist_view:
+                image[key]["wrist_image"] = augment_fn(
+                image[key]["wrist_image"], [seed, seed], **self.augment_kwargs
             )
         return image
 

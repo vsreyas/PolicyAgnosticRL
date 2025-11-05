@@ -129,6 +129,17 @@ flags.DEFINE_bool(
     False,
     "Plot Q-values over trajectory time step.",
 )
+flags.DEFINE_bool(
+    "use_lang",
+    True,
+    "Use language conditioning."
+)
+
+flags.DEFINE_bool(
+    "use_wrist_view",
+    True,
+    "Use Wrist view camera."
+)
 
 BASE_POLICY_TYPE_TO_CLASS = {
     BasePolicyTypes.OpenVLA: OpenVLAAgent,
@@ -663,8 +674,8 @@ def train_agent(_):
         )
 
         dataset = get_libero_tfrecord_dataset(
-            tfrecord_regexp=FLAGS.config.libero_tfrecord_regexp,
-            **FLAGS.config.dataset_kwargs,
+            tfrecord_regexp=FLAGS.config.libero_tfrecord_regexp, use_wrist_view=FLAGS.use_wrist_view, 
+            use_language=FLAGS.use_lang, **FLAGS.config.dataset_kwargs,
         )
         libero_config = get_libero_config()
 
@@ -842,10 +853,23 @@ def train_agent(_):
         example_batch["next_observations"]["image"] = resize_images_to_100x100(
             example_batch["next_observations"]["image"]
         )
-
+        if FLAGS.use_wrist_view:
+            example_batch["observations"]["wrist_image"] = resize_images_to_100x100(
+                example_batch["observations"]["wrist_image"]
+            )
+            example_batch["next_observations"]["wrist_image"] = resize_images_to_100x100(
+                example_batch["next_observations"]["wrist_image"]
+            )
+    # print("parsed tensor keys:", example_batch.keys())
+    # print("shape of images:" , example_batch["observations"]['image'].shape, 
+    #       "\nwrist_view cam: ", example_batch["observations"]['wrist_image'].shape , 
+    #       "\n languages shape: ", example_batch["observations"]["language"].shape )
     # define encoder
     if FLAGS.config.image_observations:
         encoder_def = encoders[FLAGS.config.encoder](**FLAGS.config.encoder_kwargs)
+        # if FLAGS.use_wrist_view:
+        #     encoder_def = [encoders[FLAGS.config.encoder](**FLAGS.config.encoder_kwargs),
+        #                    encoders[FLAGS.config.encoder](**FLAGS.config.encoder_kwargs)]
 
     else:
 
@@ -872,6 +896,8 @@ def train_agent(_):
         encoder_def=encoder_def,
         action_space_low=action_space.low,
         action_space_high=action_space.high,
+        encoder_use_lang=FLAGS.use_lang,
+        encoder_use_wrist_view=FLAGS.use_wrist_view,
         **FLAGS.config.agent_kwargs,
     )
 
@@ -1263,6 +1289,13 @@ def train_agent(_):
                 batch["next_observations"]["image"] = resize_images_to_100x100(
                     batch["next_observations"]["image"]
                 )
+                if FLAGS.use_wrist_view:
+                    batch["observations"]["wrist_image"] = resize_images_to_100x100(
+                        batch["observations"]["wrist_image"]
+                    )
+                    batch["next_observations"]["wrist_image"] = resize_images_to_100x100(
+                        batch["next_observations"]["wrist_image"]
+                    )
 
                 timer.tock("critic_image_resize")
 
