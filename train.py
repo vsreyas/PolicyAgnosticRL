@@ -137,7 +137,7 @@ flags.DEFINE_bool(
 
 flags.DEFINE_bool(
     "use_wrist_view",
-    True,
+    False,
     "Use Wrist view camera."
 )
 
@@ -641,17 +641,17 @@ def train_agent(_):
 
         dataset = get_calvin_tfrecord_dataset(
             tfrecord_regexp=FLAGS.config.calvin_tfrecord_regexp,
-            **FLAGS.config.dataset_kwargs,
+            use_lang=FLAGS.use_lang, **FLAGS.config.dataset_kwargs,
         )
         calvin_config = get_calvin_config()
-
-        train_env = get_calvin_env(cfg=calvin_config)
+        use_lang=FLAGS.use_lang
+        train_env = get_calvin_env(cfg=calvin_config, use_lang=use_lang,)
         if FLAGS.num_parallel_envs > 1:
             num_parallel_envs = FLAGS.num_parallel_envs
             eval_env = gym.vector.AsyncVectorEnv(
                 [
                     lambda: get_calvin_env(
-                        cfg=calvin_config,
+                        cfg=calvin_config, use_lang=use_lang,
                     )
                     for _ in range(num_parallel_envs)
                 ],
@@ -661,7 +661,7 @@ def train_agent(_):
             eval_env = gym.vector.SyncVectorEnv(
                 [
                     lambda: get_calvin_env(
-                        cfg=calvin_config,
+                        cfg=calvin_config, use_lang=use_lang,
                     )
                 ]
             )
@@ -860,7 +860,7 @@ def train_agent(_):
             example_batch["next_observations"]["wrist_image"] = resize_images_to_100x100(
                 example_batch["next_observations"]["wrist_image"]
             )
-    # print("parsed tensor keys:", example_batch.keys())
+    print("parsed tensor keys:", example_batch.keys())
     # print("shape of images:" , example_batch["observations"]['image'].shape, 
     #       "\nwrist_view cam: ", example_batch["observations"]['wrist_image'].shape , 
     #       "\n languages shape: ", example_batch["observations"]["language"].shape )

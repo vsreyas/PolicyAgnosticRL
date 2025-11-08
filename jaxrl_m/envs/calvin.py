@@ -17,6 +17,10 @@ from jaxrl_m.data.dataset import Dataset
 from jaxrl_m.data.image_replay_buffer import ImageReplayBuffer
 from jaxrl_m.data.bridge_dataset import glob_to_path_list
 
+import argparse
+import pprint
+import torch
+import clip  
 
 def get_dataset(
     dataset,
@@ -65,7 +69,7 @@ def get_calvin_config():
     return cfg
 
 
-def get_calvin_env(cfg=None, goal_conditioned: bool = False, **kwargs):
+def get_calvin_env(cfg=None, goal_conditioned: bool = False, use_lang=False,**kwargs):
     if cfg is None:
         cfg = get_calvin_config()
     env = CalvinEnv(**cfg)
@@ -80,7 +84,7 @@ def get_calvin_env(cfg=None, goal_conditioned: bool = False, **kwargs):
         frame_skip=cfg.action_repeat,
         return_state=False,
     )
-    env = wrap_env(env, cfg)
+    env = wrap_env(env, cfg, use_lang)
     if goal_conditioned:
         env = GCCalvinWrapper(env, goal_image_size=cfg.screen_size[0], **kwargs)
     else:
@@ -95,6 +99,7 @@ def get_calvin_tfrecord_dataset(
     cache: bool = False,
     train: bool = True,
     seed: int = 0,
+    use_lang: bool = False,
     **kwargs,
 ) -> ImageReplayBuffer:
     assert tfrecord_regexp.endswith("?*.tfrecord")
@@ -106,6 +111,7 @@ def get_calvin_tfrecord_dataset(
         goal_relabeling_kwargs=goal_relabeling_kwargs,
         cache=cache,
         train=train,
+        use_language=use_lang,
         **kwargs,
     )
 
@@ -341,10 +347,11 @@ class GymWrapper(gym.Wrapper):
             self.observation_space = gym.spaces.Dict(
                 {"image": self.observation_space, "state": env.observation_space}
             )
+        self.language = " , ".join(t.replace("_", " ") for t in self.env.target_tasks)
 
     def reset(self):
         ob = self.env.reset()
-
+        self.language = " , ".join(t.replace("_", " ") for t in self.env.target_tasks)
         if self._return_state:
             return self._get_obs(ob, reset=True), ob
 
@@ -391,7 +398,7 @@ class GymWrapper(gym.Wrapper):
 
 
 class DictWrapper(gym.Wrapper):
-    def __init__(self, env, return_state=False):
+    def __init__(self, env, return_state=False, use_lang=False):
         super().__init__(env)
 
         self._return_state = return_state
@@ -399,15 +406,31 @@ class DictWrapper(gym.Wrapper):
         self._is_ob_dict = isinstance(env.observation_space, gym.spaces.Dict)
         if not self._is_ob_dict:
             self.key = "image" if len(env.observation_space.shape) == 3 else "ob"
-            self.observation_space = gym.spaces.Dict({self.key: env.observation_space})
+            obs_space = gym.spaces.Dict({self.key: env.observation_space})
         else:
-            self.observation_space = env.observation_space
-
+            obs_space = env.observation_space
+        
+        if use_lang:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            self._clip_model, self._clip_preprocess = clip.load("ViT-B/32", device=device)
+            self._clip_model.eval()
+            self._clip_device = device
+            # Define continuous embedding space for language
+            obs_space.spaces["language"] = gym.spaces.Box(
+                low=-np.inf, high=np.inf, shape=(512,), dtype=np.float32
+            )
+        self.observation_space = obs_space
         self._is_ac_dict = isinstance(env.action_space, gym.spaces.Dict)
         self.action_space = env.action_space
+        self.use_lang = use_lang
+        
+        self.language = self._encode_text(self.env.language)
+        
+
 
     def reset(self):
         ob = self.env.reset()
+        self.language = self._encode_text(self.env.language)
         return self._get_obs(ob)
 
     def step(self, ac):
@@ -420,7 +443,18 @@ class DictWrapper(gym.Wrapper):
                 ob = {self.key: ob[0], "state": ob[1]}
             else:
                 ob = {self.key: ob}
+        if self.use_lang:
+            ob["language"] = self.language
         return ob
+    
+    def _encode_text(self, text_str):
+        if text_str is None:
+            return np.zeros(512, dtype=np.float32)
+        tokens = clip.tokenize([text_str]).to(self._clip_device)
+        with torch.no_grad():
+            emb = self._clip_model.encode_text(tokens)
+            emb = emb / emb.norm(dim=-1, keepdim=True)
+        return emb.cpu().numpy().squeeze().astype("float32")
 
 
 def stacked_space(space, k):
@@ -526,8 +560,8 @@ class AbsorbingWrapper(gym.Wrapper):
         return get_absorbing_state(self.observation_space)
 
 
-def wrap_env(env, cfg):
-    env = DictWrapper(env, return_state=False)  # TODO: Do we need this?
+def wrap_env(env, cfg, use_lang):
+    env = DictWrapper(env, return_state=False, use_lang=use_lang)  # TODO: Do we need this?
 
     if cfg.pixel_ob and cfg.frame_stack > 1:
         env = FrameStackWrapper(
@@ -688,3 +722,73 @@ class AddProprioWrapper(gym.Wrapper):
         obs, reward, done, info = self.env.step(*args, **kwargs)
         obs["proprio"] = self.env.get_obs()
         return obs, reward, done, info
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--tfrecord_regexp",
+        type=str,
+        default="/data/hf_cache/datasets/CALVIN/task_D_D/training_tfrecords_rewards_float_masks/?*.tfrecord",
+        help="Glob pattern to TFRecord files, e.g. /path/to/data/*.tfrecord",
+    )
+    parser.add_argument(
+        "--use_lang",
+        action="store_true",
+        help="Whether to include language inputs in the dataset.",
+    )
+    parser.add_argument(
+        "--goal_conditioned",
+        action="store_true",
+        help="Whether to use goal-conditioned Calvin environment.",
+    )
+    args = parser.parse_args()
+
+    # 1️⃣ Get dataset
+    print("Loading Calvin dataset...")
+    dataset = get_calvin_tfrecord_dataset(
+        tfrecord_regexp=args.tfrecord_regexp,
+        use_lang=args.use_lang,
+        cache=False,
+        train=True,
+    )
+    print("✅ Dataset loaded successfully!")
+
+    # 2️⃣ Get config
+    print("Loading Calvin config...")
+    calvin_config = get_calvin_config()
+    print("✅ Config loaded!")
+
+    # 3️⃣ Create environment
+    print("Initializing Calvin environment...")
+    train_env = get_calvin_env(cfg=calvin_config, goal_conditioned=args.goal_conditioned, use_lang=args.use_lang)
+    print("✅ Environment initialized!")
+    print(train_env)
+    # breakpoint()
+
+    # 4️⃣ Interact with the environment
+    obs = train_env.reset()
+    obs = train_env.reset()
+    print("Initial observation keys:", list(obs.keys()))
+    print("Observation space:", train_env.observation_space)
+    print("Action space:", train_env.action_space)
+
+    print("\nRunning a short random rollout...")
+    total_reward = 0
+    print("Language instruction:  ", obs["language"].shape)
+    for step in range(10):
+        action = train_env.action_space.sample()
+        obs, reward, done, info = train_env.step(action)
+        total_reward += reward
+        print(f"Step {step}: reward={reward:.3f}, done={done}")
+        if done:
+            break
+
+    print("\nRollout finished.")
+    print("Total reward:", total_reward)
+    print("Final info:")
+    # pprint.pprint(info)
+
+
+if __name__ == "__main__":
+    main()

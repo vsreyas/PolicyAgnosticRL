@@ -10,7 +10,7 @@ from jaxrl_m.agents.continuous.diffusion_q_learning import (
     get_default_config as get_diffusion_q_learning_config,
 )
 
-SAVE_DIR_PREFIX = os.environ.get("SAVE_DIR_PREFIX", "/data/user_data/sreyasv/outputs/VLA_ft/libero_10/ddpm_wrist_view_lang")
+SAVE_DIR_PREFIX = os.environ.get("SAVE_DIR_PREFIX", "/data/user_data/sreyasv/outputs/VLA_ft/calvin/language_cond_concat")
 DEFAULT_PARL_CONFIG = dict(
     num_base_policy_actions=32,
     num_actions_to_keep=10,
@@ -29,7 +29,7 @@ BASE_DDPM_CONFIG = dict(
     save_interval=50,
     log_interval=10,
     deterministic_eval=True,
-    num_eval_episodes=10,
+    num_eval_episodes=6,
     num_episodes_per_video=5,
     num_episodes_per_row=5,
     save_video=False,

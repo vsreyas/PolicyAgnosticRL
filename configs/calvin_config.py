@@ -65,7 +65,7 @@ def get_config(config_string):
         act="swish",
     )
     ddpm_config["calvin_tfrecord_regexp"] = (
-        "./calvin/dataset/task_D_D/training_tfrecords_cpu_images_rewards_float_masks/?*.tfrecord"
+        "/data/hf_cache/datasets/CALVIN/task_D_D/training_tfrecords_rewards_float_masks/?*.tfrecord" #"./calvin/dataset/task_D_D/training_tfrecords_cpu_images_rewards_float_masks/?*.tfrecord"
     )
     ddpm_config["dataset_kwargs"] = dict(
         cache=False,
@@ -73,6 +73,7 @@ def get_config(config_string):
     )
     ddpm_config["agent_kwargs"]["image_observations"] = True
     ddpm_config["agent_kwargs"]["drq_padding"] = 4
+    ddpm_config["agent_kwargs"]["use_proprio"] = True
 
     gaussian_calql_config = deepcopy(BASE_GAUSSIAN_CALQL_CONFIG)
     gaussian_calql_config["save_video"] = True

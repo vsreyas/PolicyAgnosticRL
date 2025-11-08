@@ -69,6 +69,22 @@ CALVIN_EVAL_RESET_STATE = (
     ),
 )
 
+def find_language_for_chunk(start_idx, end_idx, ep_start_end_ids_lang, lang_ann, lang_emb):
+    """Finds language annotation and embedding matching episode window."""
+    for i, (st, ed) in enumerate(ep_start_end_ids_lang):
+        if st <= start_idx <= ed:
+            emb = np.asarray(lang_emb[i], dtype=np.float32)
+            # squeeze (1, 1024) → (1024,)
+            if emb.ndim == 2 and emb.shape[0] == 1:
+                emb = emb.squeeze(0)
+            # fallback if malformed
+            if emb.ndim != 1 or emb.shape[0] != 1024:
+                print(f"[WARN] Invalid emb shape {emb.shape} at {i}, replacing with zeros.")
+                emb = np.zeros((1024,), dtype=np.float32)
+            return lang_ann[i], emb
+
+    # If not found, return dummy string and 1024-D zeros
+    return "", np.zeros((1024,), dtype=np.float32)
 
 def convert_calvin_chunk_to_tfrecord(
     dataset_path: str,
@@ -89,6 +105,10 @@ def convert_calvin_chunk_to_tfrecord(
     rewards: Optional[np.ndarray] = None,
     masks: Optional[np.ndarray] = None,
     mc_returns: Optional[np.ndarray] = None,
+    #language related variables
+    ep_start_end_ids_lang=None,
+    lang_ann=None,
+    lang_emb=None,
 ):
     # prevent tensorflow from using GPUs
     tf.config.set_visible_devices([], "GPU")
@@ -133,6 +153,11 @@ def convert_calvin_chunk_to_tfrecord(
         print(f"Overwriting existing episode {episode_path}")
     tf.io.gfile.makedirs(os.path.dirname(episode_path))
 
+     # --- Find matching language annotation and embedding ---
+    lang_text, lang_vector = find_language_for_chunk(
+        start_index, end_index, ep_start_end_ids_lang, lang_ann, lang_emb
+    )
+
     observation_features = (
         {
             "observations/state": tensor_feature(states),
@@ -165,6 +190,10 @@ def convert_calvin_chunk_to_tfrecord(
                 feature={
                     **observation_features,
                     "actions": tensor_feature(actions[:-1]),
+                    "language":tf.train.Feature(
+                        bytes_list=tf.train.BytesList(value=[lang_text.encode("utf-8")])
+                    ),
+                    "language_embedding":tensor_feature(lang_vector.astype(np.float32)),
                 }
             )
         )
@@ -177,12 +206,12 @@ def convert_calvin_chunk_to_tfrecord(
 @click.option(
     "--dataset_path",
     type=str,
-    default="/iris/u/maxsobolmark/calvin/dataset/task_D_D/training/",
+    default="/data/hf_cache/datasets/CALVIN/task_D_D/training/",
 )
 @click.option(
     "--output_path",
     type=str,
-    default="/iris/u/maxsobolmark/calvin/dataset/task_D_D/training_tfrecords/",
+    default="/data/hf_cache/datasets/CALVIN/task_D_D/training_tfrecords_rewards_float_masks/",
 )
 @click.option("--image_key", type=str, default="rgb_static")
 @click.option("--action_key", type=str, default="rel_actions")
@@ -191,13 +220,13 @@ def convert_calvin_chunk_to_tfrecord(
 @click.option("--include_next_observations", type=bool, default=False)
 @click.option("--only_states", type=bool, default=False)
 @click.option("--states_with_distractors", type=bool, default=False)
-@click.option("--rerender_images_on_cpu", type=bool, default=False)
-@click.option("--include_rewards", type=bool, default=False)
+@click.option("--rerender_images_on_cpu", type=bool, default=True)
+@click.option("--include_rewards", type=bool, default=True)
 @click.option("--reward_bias", type=float, default=-4.0)
 @click.option("--only_process_episode_index", type=int, default=None)
 def convert_calvin_dataset_to_tfrecord(
-    dataset_path: str = "/iris/u/maxsobolmark/calvin/dataset/task_D_D/training/",
-    output_path: str = "/iris/u/maxsobolmark/calvin/dataset/task_D_D/training_tfrecords/",
+    dataset_path: str = "/data/hf_cache/datasets/CALVIN/task_D_D/training/",
+    output_path: str = "/data/hf_cache/datasets/CALVIN/task_D_D/training_tfrecords_rewards_float_masks/",
     image_key: str = "rgb_static",
     action_key: str = "rel_actions",
     image_size: int = 100,
@@ -216,6 +245,18 @@ def convert_calvin_dataset_to_tfrecord(
     start_end_ids = np.load(os.path.join(dataset_path, "ep_start_end_ids.npy"))
 
     episode_counter = 0  # To keep track of new episode indices
+
+     # --- Load language annotations and embeddings ---
+    lang_path = os.path.join(dataset_path, "lang_clip_resnet50", "auto_lang_ann.npy")
+    print(f"[INFO] Loading language embeddings from {lang_path}")
+    lang_data = np.load(lang_path, allow_pickle=True).item()
+    lang_ann = lang_data["language"]["ann"]
+    lang_emb = lang_data["language"]["emb"]
+    ep_start_end_ids_lang = lang_data["info"]["indx"]
+    print("language information: ", len(lang_ann), " ", lang_emb.shape, " ", lang_ann[0], " ", lang_emb[0])
+    exit()
+    print(f"[INFO] Found {len(lang_ann)} language entries with emb dim {lang_emb.shape[1]}")
+
 
     if rerender_images_on_cpu:
         calvin_config = get_calvin_config()
@@ -303,6 +344,9 @@ def convert_calvin_dataset_to_tfrecord(
                     rewards[chunk_start:chunk_end],
                     masks[chunk_start:chunk_end],
                     mc_returns[chunk_start:chunk_end],
+                    ep_start_end_ids_lang=ep_start_end_ids_lang,
+                    lang_ann=lang_ann,
+                    lang_emb=lang_emb,
                 )
 
             episode_counter += 1

@@ -11,7 +11,7 @@ import jax
 import jax.numpy as jnp
 
 from jaxrl_m.common.common import JaxRLTrainState, ModuleDict, nonpytree_field
-from jaxrl_m.common.encoding import EncodingWrapper, GCEncodingWrapper, MultiViewLCEncodingWrapper, MultiViewSingleLCEncodingWrapper
+from jaxrl_m.common.encoding import EncodingWrapper, GCEncodingWrapper, MultiViewLCEncodingWrapper, MultiViewSingleLCEncodingWrapper, LCEncodingWrapperM
 from jaxrl_m.common.optimizers import make_optimizer
 from jaxrl_m.common.typing import Batch, Data, Params, PRNGKey
 from jaxrl_m.networks.actor_critic_nets import (
@@ -734,6 +734,12 @@ class SACAgent(flax.struct.PyTreeNode):
                 #     stop_gradient=stop_gradient,
                 # )
                 encoder_def = MultiViewSingleLCEncodingWrapper(
+                    encoder_def,
+                    use_proprio=use_proprio,
+                    stop_gradient=stop_gradient,
+                )
+            elif use_lang and not use_wrist_view:
+                encoder_def = LCEncodingWrapperM(
                     encoder_def,
                     use_proprio=use_proprio,
                     stop_gradient=stop_gradient,

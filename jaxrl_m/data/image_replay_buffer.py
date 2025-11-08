@@ -64,7 +64,12 @@ class ImageReplayBuffer:
         self.include_next_actions = include_next_actions
         self.use_language = use_language
         self.use_wrist_view = use_wrist_view
-        self.lang2embedding = load_language_embeddings_str("data_info/libero_language2embeddings.json")
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._clip_model, self._clip_preprocess = clip.load("ViT-B/32", device=device)
+        self._clip_model.eval()
+        self._clip_device = device
+        
         dataset = self._construct_tf_dataset(data_paths, seed)
 
         if train:
@@ -154,6 +159,7 @@ class ImageReplayBuffer:
                 self.PROTO_TYPE_SPEC.pop("next_observations/images0")
         if self.use_language:
             self.PROTO_TYPE_SPEC["language"] = tf.string
+            self.PROTO_TYPE_SPEC["language_embedding"] = tf.float32
         if self.use_wrist_view:
             self.PROTO_TYPE_SPEC["observations/images1"] = tf.uint8
             if self.tfrecords_include_next_observations:
@@ -193,15 +199,25 @@ class ImageReplayBuffer:
                     parsed_tensors["next_observations/images1"] = wrist_images[1:]
         if self.use_language:
             length = tf.shape(parsed_tensors["observations/state"])[0]
+            
             parsed_tensors["language"] = tf.repeat(
                 parsed_tensors["language"][None], length, axis=0
             )
 
             def _encode_clip(text_tensor):
-                """Compute frozen CLIP text embedding."""
+                """Run CLIP text encoder and return a 512-D embedding."""
+                import torch
+                import clip
+
+                # Convert TF string to Python str
                 text_str = text_tensor.numpy().decode("utf-8")
-                text_features = self.lang2embedding[text_str]
-                return text_features
+                # print("Language: ", text_str)
+                # Tokenize and encode with CLIP
+                tokens = clip.tokenize([text_str]).to(self._clip_device)
+                with torch.no_grad():
+                    emb = self._clip_model.encode_text(tokens)
+                    emb = emb / emb.norm(dim=-1, keepdim=True)
+                return emb.cpu().numpy().squeeze().astype("float32")
 
             clip_emb = tf.py_function(
                 func=_encode_clip,
@@ -388,3 +404,51 @@ def save_trajectory_as_tfrecord(trajectory: Dict[str, np.ndarray], path: str):
             )
         )
         writer.write(example.SerializeToString())
+
+if __name__ == "__main__":
+    import glob
+    import numpy as np
+
+    # Path to your TFRecord directory
+    tfrecord_dir = "/data/hf_cache/datasets/CALVIN/task_D_D/training_tfrecords_rewards_float_masks"
+
+    # Find a few TFRecord files
+    data_paths = sorted(glob.glob(os.path.join(tfrecord_dir, "*.tfrecord")))
+    assert len(data_paths) > 0, f"No TFRecord files found in {tfrecord_dir}"
+    print(f"Found {len(data_paths)} TFRecord files.")
+
+    # Create replay buffer with language support
+    buffer = ImageReplayBuffer(
+        data_paths=data_paths[:5],   # just load a few for test speed
+        seed=42,
+        use_language=True,
+        cache=False,
+        tfrecords_include_next_observations=False,
+    )
+
+    # Get an iterator
+    iterator = buffer.iterator(batch_size=1)
+
+    print("\n[INFO] Fetching one batch from the dataset...\n")
+    batch = next(iterator)
+
+    # --- Inspect the structure ---
+    obs = batch["observations"]
+    next_obs = batch["next_observations"]
+    actions = batch["actions"]
+
+    print("Keys in observations:", obs.keys())
+    if "image" in obs:
+        print("Image shape:", obs["image"].shape)
+    print("Proprio shape:", obs["proprio"].shape)
+    if "language" in obs:
+        print("Language embedding shape:", obs["language"].shape)
+        # Verify the values look like embeddings
+        print("Language embedding example (first 5 dims):", obs["language"][0, :5])
+
+    print("\nActions shape:", actions.shape)
+    print("Next obs proprio shape:", next_obs["proprio"].shape)
+
+    # Sanity check
+    assert obs["language"].shape[-1] in [512, 384, 768], "Unexpected embedding dimension!"
+    print("\n✅ TFRecord + Buffer integration test passed.")
