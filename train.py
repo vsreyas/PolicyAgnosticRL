@@ -1529,8 +1529,14 @@ def train_agent(_):
                         [np.max(t["reward"]) for t in trajectories]
                     ),
                 }
+
+                debug_metrics = agent.get_debug_metrics(batch=batch, seed=eval_policy_fn_key)
                 if wandb_logger is not None:
                     wandb_logger.log(eval_metrics, step=i)
+                    wandb_logger.log(
+                        {f"debug/{k}": float(v) for k, v in debug_metrics.items()},
+                        step=i,
+                    )
                 
                 del trajectories
                 import gc; gc.collect()

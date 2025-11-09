@@ -261,6 +261,7 @@ class DDPMBCAgent(BasePolicy):
 
         metrics = {
             "mse": ((actions - batch["actions"]) ** 2).sum((-2, -1)).mean(),
+            "mae": (jnp.abs(actions - batch["actions"])).sum((-2, -1)).mean(),
         }
 
         return metrics

@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=ddpm_calvin_debug             # Job name
+#SBATCH --job-name=ddpm_libero_10_debug             # Job name
 #SBATCH --nodes=1                              # Number of nodes
-#SBATCH --gres=gpu:1                           # GPUs per node
-#SBATCH --cpus-per-task=16                      # CPU cores per task
+#SBATCH --gres=gpu:2                           # GPUs per node
+#SBATCH --cpus-per-task=32                      # CPU cores per task
 #SBATCH --mem=128G                              # Memory per node
 #SBATCH --time=48:00:00                        # Walltime (hh:mm:ss)
 #SBATCH --partition=general                    # Partition/queue name
-#SBATCH --output=/data/user_data/sreyasv/diffusion_calvin/logs/base_debug_%x_%j.out   # Stdout log
-#SBATCH --error=/data/user_data/sreyasv/diffusion_calvin/logs/base_debug_%x_%j.err    # Stderr log
+#SBATCH --output=/data/user_data/sreyasv/VLA_ft_logs/logs/libero_10_debug_%x_%j.out   # Stdout log
+#SBATCH --error=/data/user_data/sreyasv/VLA_ft_logs/logs/libero_10_debug_%x_%j.err    # Stderr log
 
 # -------------------------------
 # Environment setup
@@ -15,7 +15,7 @@
 source /home/sreyasv/miniconda3/etc/profile.d/conda.sh
 conda activate parl     # use the correct env (adjust if it's 'seer' or something else)
 
-mkdir -p /data/user_data/sreyasv/diffusion_calvin/logs/
+mkdir -p /data/user_data/sreyasv/VLA_ft_logs/logs/
 
 # -------------------------------
 # Run command
@@ -29,9 +29,9 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 # Run the training script
 python ./train.py \
-  --environment_name=calvin \
-  --wandb_experiment_name=ddpm_bc_with_lang_calvin_debug \
-  --config=./configs/calvin_config.py:ddpm \
+  --environment_name=libero \
+  --wandb_experiment_name=ddpm_bc_with_lang_libero_10_debug \
+  --config=./configs/libero_config.py:ddpm \
   --num_offline_epochs=3000 \
   --num_online_epochs=0 \
   --seed=0
