@@ -10,7 +10,7 @@ from jaxrl_m.agents.continuous.diffusion_q_learning import (
     get_default_config as get_diffusion_q_learning_config,
 )
 
-SAVE_DIR_PREFIX = os.environ.get("SAVE_DIR_PREFIX", "/data/user_data/sreyasv/outputs/VLA_ft/calvin/language_cond_concat_8_blocks_512_hd")
+SAVE_DIR_PREFIX = os.environ.get("SAVE_DIR_PREFIX", "./")
 DEFAULT_PARL_CONFIG = dict(
     num_base_policy_actions=32,
     num_actions_to_keep=10,
@@ -39,9 +39,9 @@ BASE_DDPM_CONFIG = dict(
         batch_size=256,
         score_network_kwargs=dict(
             time_dim=128,
-            num_blocks=8,
+            num_blocks=3,
             dropout_rate=0.1,
-            hidden_dim=512,
+            hidden_dim=256,
             use_layer_norm=True,
         ),
         use_proprio=False,

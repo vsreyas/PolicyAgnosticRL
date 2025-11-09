@@ -40,6 +40,7 @@ class ImageReplayBuffer:
         self,
         data_paths: List[str],
         seed: int,
+        env_name: str, 
         goal_relabeling_strategy: Optional[str] = None,
         goal_relabeling_kwargs: dict = {},
         shuffle_buffer_size: int = 10000,
@@ -64,11 +65,17 @@ class ImageReplayBuffer:
         self.include_next_actions = include_next_actions
         self.use_language = use_language
         self.use_wrist_view = use_wrist_view
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        self._clip_model, self._clip_preprocess = clip.load("ViT-B/32", device=device)
-        self._clip_model.eval()
-        self._clip_device = device
+        self.env_name = env_name
+        if self.env_name == "calvin":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            self._clip_model, self._clip_preprocess = clip.load("ViT-B/32", device=device)
+            self._clip_model.eval()
+            self._clip_device = device
+        elif self.env_name == "libero":
+            self.lang2embedding = load_language_embeddings_str("data_info/libero_language2embeddings_normalised.json")
+        else:
+            raise NotImplementedError
+       
         
         dataset = self._construct_tf_dataset(data_paths, seed)
 
@@ -159,7 +166,6 @@ class ImageReplayBuffer:
                 self.PROTO_TYPE_SPEC.pop("next_observations/images0")
         if self.use_language:
             self.PROTO_TYPE_SPEC["language"] = tf.string
-            self.PROTO_TYPE_SPEC["language_embedding"] = tf.float32
         if self.use_wrist_view:
             self.PROTO_TYPE_SPEC["observations/images1"] = tf.uint8
             if self.tfrecords_include_next_observations:
@@ -199,25 +205,26 @@ class ImageReplayBuffer:
                     parsed_tensors["next_observations/images1"] = wrist_images[1:]
         if self.use_language:
             length = tf.shape(parsed_tensors["observations/state"])[0]
-            
             parsed_tensors["language"] = tf.repeat(
                 parsed_tensors["language"][None], length, axis=0
             )
 
             def _encode_clip(text_tensor):
-                """Run CLIP text encoder and return a 512-D embedding."""
-                import torch
-                import clip
+                """Run CLIP text encoder and return a 512-D embedding (or) use a cached embedding dict."""
 
                 # Convert TF string to Python str
                 text_str = text_tensor.numpy().decode("utf-8")
-                # print("Language: ", text_str)
-                # Tokenize and encode with CLIP
-                tokens = clip.tokenize([text_str]).to(self._clip_device)
-                with torch.no_grad():
-                    emb = self._clip_model.encode_text(tokens)
-                    emb = emb / emb.norm(dim=-1, keepdim=True)
-                return emb.cpu().numpy().squeeze().astype("float32")
+                if self.env_name == "libero":
+                    text_features = self.lang2embedding[text_str]
+                elif self.env_name == "calvin":
+                    tokens = clip.tokenize([text_str]).to(self._clip_device)
+                    with torch.no_grad():
+                        emb = self._clip_model.encode_text(tokens)
+                        emb = emb / emb.norm(dim=-1, keepdim=True)
+                    text_features = emb.cpu().numpy().squeeze().astype("float32")
+                else:
+                    raise NotImplementedError
+                return text_features
 
             clip_emb = tf.py_function(
                 func=_encode_clip,
@@ -410,7 +417,7 @@ if __name__ == "__main__":
     import numpy as np
 
     # Path to your TFRecord directory
-    tfrecord_dir = "/data/hf_cache/datasets/CALVIN/task_D_D/training_tfrecords_rewards_float_masks"
+    tfrecord_dir = "/data/hf_cache/datasets/LIBERO/libero_10_tf" #"/data/hf_cache/datasets/CALVIN/task_D_D/training_tfrecords_rewards_float_masks"
 
     # Find a few TFRecord files
     data_paths = sorted(glob.glob(os.path.join(tfrecord_dir, "*.tfrecord")))
@@ -424,6 +431,7 @@ if __name__ == "__main__":
         use_language=True,
         cache=False,
         tfrecords_include_next_observations=False,
+        env_name="calvin"
     )
 
     # Get an iterator

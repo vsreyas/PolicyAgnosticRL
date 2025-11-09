@@ -138,7 +138,7 @@ flags.DEFINE_bool(
     False,
     "Use Wrist view camera."
 )
-
+# 2: 07 2 13
 BASE_POLICY_TYPE_TO_CLASS = {
     BasePolicyTypes.OpenVLA: OpenVLAAgent,
     BasePolicyTypes.DDPM: DDPMBCAgent,
@@ -639,7 +639,7 @@ def train_agent(_):
 
         dataset = get_calvin_tfrecord_dataset(
             tfrecord_regexp=FLAGS.config.calvin_tfrecord_regexp,
-            use_lang=FLAGS.use_lang, **FLAGS.config.dataset_kwargs,
+            use_lang=FLAGS.use_lang, env_name=FLAGS.environment_name, **FLAGS.config.dataset_kwargs,
         )
         calvin_config = get_calvin_config()
         use_lang=FLAGS.use_lang
@@ -673,7 +673,7 @@ def train_agent(_):
 
         dataset = get_libero_tfrecord_dataset(
             tfrecord_regexp=FLAGS.config.libero_tfrecord_regexp, use_wrist_view=FLAGS.use_wrist_view, 
-            use_language=FLAGS.use_lang, **FLAGS.config.dataset_kwargs,
+            use_language=FLAGS.use_lang, env_name=FLAGS.environment_name, **FLAGS.config.dataset_kwargs,
         )
         libero_config = get_libero_config()
 

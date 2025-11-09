@@ -419,18 +419,21 @@ class DictWrapper(gym.Wrapper):
             obs_space.spaces["language"] = gym.spaces.Box(
                 low=-np.inf, high=np.inf, shape=(512,), dtype=np.float32
             )
+            self.language = self._encode_text(self.env.language)
+
         self.observation_space = obs_space
         self._is_ac_dict = isinstance(env.action_space, gym.spaces.Dict)
         self.action_space = env.action_space
         self.use_lang = use_lang
         
-        self.language = self._encode_text(self.env.language)
+        
         
 
 
     def reset(self):
         ob = self.env.reset()
-        self.language = self._encode_text(self.env.language)
+        if self.use_lang:
+            self.language = self._encode_text(self.env.language)
         return self._get_obs(ob)
 
     def step(self, ac):

@@ -337,7 +337,7 @@ class LiberoEnvWrapper(gym.Wrapper):
         self.task_id = task_id
         self.num_envs = 10 if "10" in cfg.name else 90
         self.suite = suite
-        self.id2embedding = load_language_embeddings("data_info/libero_id2embeddings.json")
+        self.id2embedding = load_language_embeddings("data_info/libero_id2embeddings_normalised.json")
         self.language_embedding = self.id2embedding[self.task_id]
         self.reset()
 
@@ -468,7 +468,7 @@ class LiberoEnvWrapper(gym.Wrapper):
 #     def _render_goal(self):
 #         raise NotImplementedError("Goal rendering not implemented yet for Libero.")
 
-def save_all_task_language_embeddings(cfg=None, output_path="libero_language_embeddings.json", key_val="lang"):
+def save_all_task_language_embeddings(cfg=None, output_path="libero_language_embeddings.json", key_val="id"):
     """
     Iterates over all tasks in the LIBERO benchmark suite and saves CLIP language embeddings.
 
@@ -496,8 +496,9 @@ def save_all_task_language_embeddings(cfg=None, output_path="libero_language_emb
             with torch.no_grad():
                 tokens = clip.tokenize([text]).to(clip_device)
                 text_features = clip_model.encode_text(tokens)
+                text_features = text_features / text_features.norm(dim=-1, keepdim=True)
                 text_features = text_features[0].cpu().numpy().astype(float).tolist()
-            key = text if key_val is "lang" else task_id
+            key = text if key_val == "lang" else task_id
             task_embeddings[key] = text_features
         else:
             print(f"⚠️  Skipping task {task_id}: no valid language description.")
