@@ -1,8 +1,6 @@
 """Script for offline to online RL."""
 
 import os
-os.environ["TMPDIR"] = "/data/hf_cache/datasets/LIBERO/robosuite_temp_dir"
-
 import time
 from typing import Any, Callable, Dict, List, Optional, Union
 
@@ -1481,18 +1479,18 @@ def train_agent(_):
                         save_rollout_gif(ind_traj, save_dir, step_i=i, rollout_j=j)
                         ind_traj = []
                         
-                    frames = np.array(frames)
-                    wandb.log(
-                        {
-                            "video": wandb.Video(
-                                frames,
-                                fps=24,
-                                format="mp4",
-                            )
-                        },
-                        step=i,
-                    )
-                    print("video logged")
+                    # frames = np.array(frames)
+                    # wandb.log(
+                    #     {
+                    #         "video": wandb.Video(
+                    #             frames,
+                    #             fps=24,
+                    #             format="mp4",
+                    #         )
+                    #     },
+                    #     step=i,
+                    # )
+                    # print("video logged")
                     del ind_traj, frames
                     import gc; gc.collect()
 
@@ -1536,15 +1534,15 @@ def train_agent(_):
                 
                 del trajectories
                 import gc; gc.collect()
-            if FLAGS.config.save_video:
-                try:
-                    eval_video = load_recorded_video(
-                        video_path=eval_env.current_save_path
-                    )
-                    if wandb_logger is not None:
-                        wandb_logger.log({"evaluation/video": eval_video}, step=i)
-                except Exception as e:
-                    pass
+            # if FLAGS.config.save_video:
+            #     try:
+            #         eval_video = load_recorded_video(
+            #             video_path=eval_env.current_save_path
+            #         )
+            #         if wandb_logger is not None:
+            #             wandb_logger.log({"evaluation/video": eval_video}, step=i)
+            #     except Exception as e:
+            #         pass
             timer.tock("evaluation/total")
 
         if i % FLAGS.config.save_interval == 0:

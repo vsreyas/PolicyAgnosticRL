@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=ddpm_calvin              # Job name
+#SBATCH --job-name=ddpm_calvin_8_blocks_512_hd              # Job name
 #SBATCH --nodes=1                              # Number of nodes
-#SBATCH --gres=gpu:1                           # GPUs per node
-#SBATCH --cpus-per-task=8                      # CPU cores per task
-#SBATCH --mem=128G                              # Memory per node
+#SBATCH --gres=gpu:4                           # GPUs per node
+#SBATCH --cpus-per-task=64                      # CPU cores per task
+#SBATCH --mem=256G                              # Memory per node
 #SBATCH --time=48:00:00                        # Walltime (hh:mm:ss)
 #SBATCH --partition=general                    # Partition/queue name
-#SBATCH --output=/data/user_data/sreyasv/diffusion_calvin/logs/%x_%j.out   # Stdout log
-#SBATCH --error=/data/user_data/sreyasv/diffusion_calvin/logs/%x_%j.err    # Stderr log
+#SBATCH --output=/data/user_data/sreyasv/diffusion_calvin/logs/8_blocks_512_hd_%x_%j.out   # Stdout log
+#SBATCH --error=/data/user_data/sreyasv/diffusion_calvin/logs/8_blocks_512_hd_%x_%j.err    # Stderr log
 
 # -------------------------------
 # Environment setup
@@ -30,7 +30,7 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 # Run the training script
 python ./train.py \
   --environment_name=calvin \
-  --wandb_experiment_name=ddpm_bc_with_lang_calvin \
+  --wandb_experiment_name=ddpm_bc_with_lang_calvin_8_blocks_512_hd \
   --config=./configs/calvin_config.py:ddpm \
   --num_offline_epochs=3000 \
   --num_online_epochs=0 \
