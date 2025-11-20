@@ -355,6 +355,7 @@ class DDPMBCAgent(BasePolicy):
                     actions.shape[-2] * actions.shape[-1],
                     dropout_rate=score_network_kwargs["dropout_rate"],
                     use_layer_norm=score_network_kwargs["use_layer_norm"],
+                    hidden_dim=score_network_kwargs["hidden_dim"],
                 ),
             ),
             "encoder": encoder_def,

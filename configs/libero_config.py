@@ -15,6 +15,7 @@ from configs.base_config import (
     BASE_DIFFUSION_Q_LEARNING_CONFIG,
     BASE_GAUSSIAN_CALQL_CONFIG,
     BASE_PARL_CALQL_CONFIG,
+    BASE_PI_CONFIG
 )
 
 SAVE_DIR_PREFIX = os.environ.get("SAVE_DIR_PREFIX", "./")
@@ -130,11 +131,32 @@ def get_config(config_string):
     )
     dql_config["agent_kwargs"]["drq_padding"] = 4
 
+    pi_config = deepcopy(BASE_PI_CONFIG)
+    pi_config["save_video"] = False
+    pi_config["image_observations"] = True
+    # ddpm_config["encoder"] = "resnetv1-18-bridge"  # 'resnetv1-18-bridge-film'
+    # ddpm_config["encoder_kwargs"] = dict(
+    #     pooling_method="avg",
+    #     add_spatial_coordinates=False,
+    #     act="swish",
+    # )
+    pi_config["libero_tfrecord_regexp"] = (
+        "/data/hf_cache/datasets/LIBERO/libero_10_tf/*.tfrecord"
+    )
+    pi_config["dataset_kwargs"] = dict(
+        cache=False,
+        tfrecords_include_next_observations=False,
+    )
+    pi_config["agent_kwargs"]["image_observations"] = True
+    pi_config["agent_kwargs"]["use_proprio"] = True
+
+
     possible_structures = {
         "parl_calql": ml_collections.ConfigDict(parl_calql_config),
         "ddpm": ml_collections.ConfigDict(ddpm_config),
         "gaussian_calql": ml_collections.ConfigDict(gaussian_calql_config),
         "dql": ml_collections.ConfigDict(dql_config),
+        "pi0": ml_collections.ConfigDict(pi_config)
     }
 
     return possible_structures[config_string]

@@ -13,6 +13,7 @@ from libero.libero import benchmark
 
 from jaxrl_m.data.dataset import Dataset
 from jaxrl_m.data.image_replay_buffer import ImageReplayBuffer
+from jaxrl_m.data.image_replay_buffer_pi import ImageReplayBufferPi
 from jaxrl_m.data.bridge_dataset import glob_to_path_list
 import numpy as np
 from typing import Dict, Any
@@ -225,9 +226,19 @@ def get_libero_tfrecord_dataset(tfrecord_regexp: str,
                                 cache: bool = False,
                                 train: bool = True,
                                 seed: int = 0,
+                                is_pi: bool = False,
                                 **kwargs):
     assert tfrecord_regexp.endswith(".tfrecord")
     paths = glob_to_path_list(tfrecord_regexp)
+    if is_pi:
+        return ImageReplayBufferPi(data_paths=paths,
+        seed=seed,
+        goal_relabeling_strategy=goal_relabeling_strategy,
+        goal_relabeling_kwargs=goal_relabeling_kwargs,
+        cache=cache,
+        train=train,
+        **kwargs,
+    )
     return ImageReplayBuffer(
         data_paths=paths,
         seed=seed,

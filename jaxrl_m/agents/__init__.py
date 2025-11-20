@@ -8,6 +8,7 @@ from .continuous.parl_calql import PARLCalQLAgent
 from .continuous.sac import SACAgent
 from .continuous.diffusion_q_learning import DiffusionQLearningAgent
 from .continuous.auto_regressive_transformer import AutoRegressiveTransformerAgent
+from .continuous.pi_0 import PiPolicy
 
 agents = {
     "ddpm_bc": DDPMBCAgent,
@@ -20,4 +21,5 @@ agents = {
     "diffusion_q_learning": DiffusionQLearningAgent,
     "sac": SACAgent,
     "auto_regressive_transformer": AutoRegressiveTransformerAgent,
+    "pi-0": PiPolicy,
 }

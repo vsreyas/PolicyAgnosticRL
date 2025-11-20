@@ -10,7 +10,7 @@ from jaxrl_m.agents.continuous.diffusion_q_learning import (
     get_default_config as get_diffusion_q_learning_config,
 )
 
-SAVE_DIR_PREFIX = os.environ.get("SAVE_DIR_PREFIX", "/data/user_data/sreyasv/outputs/VLA_ft/calvin/language_cond_concat_debug")
+SAVE_DIR_PREFIX = os.environ.get("SAVE_DIR_PREFIX", "./")
 DEFAULT_PARL_CONFIG = dict(
     num_base_policy_actions=32,
     num_actions_to_keep=10,
@@ -23,10 +23,10 @@ DEFAULT_PARL_CONFIG = dict(
 # Used to pre-train a Diffusion Policy base policy.
 BASE_DDPM_CONFIG = dict(
     agent="ddpm_bc",
-    batch_size=256,
+    batch_size=2,
     save_dir=tf.io.gfile.join(SAVE_DIR_PREFIX, "results"),
-    eval_interval=50,
-    save_interval=50,
+    eval_interval=2,
+    save_interval=100,
     log_interval=10,
     deterministic_eval=True,
     num_eval_episodes=10,
@@ -327,3 +327,42 @@ BASE_GAUSSIAN_CALQL_CONFIG = dict(
         ),
     ),
 )
+
+BASE_PI_CONFIG = dict(
+    agent="pi-0",
+    batch_size=2,
+    save_dir=tf.io.gfile.join(SAVE_DIR_PREFIX, "results"),
+    eval_interval=2,
+    save_interval=100,
+    log_interval=10,
+    deterministic_eval=True,
+    num_eval_episodes=10,
+    num_episodes_per_video=5,
+    num_episodes_per_row=5,
+    save_video=False,
+    image_observations=False,
+    goal_conditioned=False,
+    agent_kwargs=dict(
+        batch_size=2,
+        score_network_kwargs=dict(
+            time_dim=128,
+            num_blocks=3,
+            dropout_rate=0.1,
+            hidden_dim=256,
+            use_layer_norm=True,
+        ),
+        use_proprio=False,
+        beta_schedule="cosine",
+        diffusion_steps=5,
+        action_samples=64,
+        repeat_last_step=0,
+        learning_rate=3e-4,
+        warmup_steps=1000,
+        actor_decay_steps=int(3e6),
+        image_observations=False,
+        discount=0.99,
+        drq_padding=0,
+    ),
+)
+
+

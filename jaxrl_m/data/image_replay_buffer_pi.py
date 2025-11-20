@@ -12,6 +12,11 @@ import clip
 from jaxrl_m.data.tf_augmentations import augment as augment_fn
 from jaxrl_m.data.tf_goal_relabeling import GOAL_RELABELING_FUNCTIONS
 import json
+from openpi.training.config import get_config
+import openpi.transforms as _transforms
+import openpi.models.model as _model
+import jax
+
 
 def load_language_embeddings_str(path: str) -> dict[int, np.ndarray]:
     """
@@ -35,7 +40,7 @@ def load_language_embeddings_str(path: str) -> dict[int, np.ndarray]:
 
     return embeddings
 
-class ImageReplayBuffer:
+class ImageReplayBufferPi:
     def __init__(
         self,
         data_paths: List[str],
@@ -51,8 +56,9 @@ class ImageReplayBuffer:
         augment: bool = False,
         augment_kwargs: dict = {},
         include_next_actions: bool = False,
-        use_language: bool = False,
-        use_wrist_view: bool = False,
+        use_language: bool = True,
+        use_wrist_view: bool = True,
+        config=None,
     ):
         self.goal_relabeling_strategy = goal_relabeling_strategy
         self.goal_relabeling_kwargs = goal_relabeling_kwargs
@@ -75,8 +81,17 @@ class ImageReplayBuffer:
             self.lang2embedding = load_language_embeddings_str("data_info/libero_language2embeddings_normalised.json")
         else:
             raise NotImplementedError
-       
-        
+
+        self.config = config
+        # Data configs, setup and utils
+        self.data_config = config.data.create(config.assets_dirs, config.model)
+        self.data_norm_stats = self.data_config.norm_stats
+        self.data_transforms = [*self.data_config.repack_transforms.inputs,
+            *self.data_config.data_transforms.inputs,
+            _transforms.Normalize(self.data_norm_stats, use_quantiles=self.data_config.use_quantile_norm),
+            *self.data_config.model_transforms.inputs,]
+        self.data_transforms = _transforms.compose(self.data_transforms)
+
         dataset = self._construct_tf_dataset(data_paths, seed)
 
         if train:
@@ -97,6 +112,8 @@ class ImageReplayBuffer:
 
         self.tf_dataset = dataset
 
+
+
     def _construct_tf_dataset(
         self, data_paths: List[str], seed: int
     ) -> tf.data.Dataset:
@@ -116,7 +133,7 @@ class ImageReplayBuffer:
         if self.cache:
             dataset = dataset.cache()
 
-        dataset = dataset.map(self._add_goals, num_parallel_calls=tf.data.AUTOTUNE)
+        # dataset = dataset.map(self._add_goals, num_parallel_calls=tf.data.AUTOTUNE)
 
         if self.states_only:
             dataset = dataset.map(
@@ -130,10 +147,6 @@ class ImageReplayBuffer:
                 },
                 num_parallel_calls=tf.data.AUTOTUNE,
             )
-
-        if self.augment:
-            dataset = dataset.enumerate(start=seed)
-            dataset = dataset.map(self._augment, num_parallel_calls=tf.data.AUTOTUNE)
 
         # unbatch to yield individual transitions
         dataset = dataset.unbatch()
@@ -204,7 +217,11 @@ class ImageReplayBuffer:
                     parsed_tensors["observations/images1"] = wrist_images[:-1]
                     parsed_tensors["next_observations/images1"] = wrist_images[1:]
         if self.use_language:
+
+            # Repeat prompt for each timestep (tokenizer doesn't handle batching)
             length = tf.shape(parsed_tensors["observations/state"])[0]
+            parsed_tensors["prompt"] = tf.repeat(parsed_tensors["language"][None], length, axis=0)
+           
             parsed_tensors["language"] = tf.repeat(
                 parsed_tensors["language"][None], length, axis=0
             )
@@ -236,96 +253,74 @@ class ImageReplayBuffer:
             parsed_tensors["language_embedding"] = clip_emb
         if self.include_next_actions:
             # add the next action as part of the observation
-            actions = parsed_tensors["actions"]
-            parsed_tensors["actions"] = actions[:-1]
-            parsed_tensors["next_actions"] = actions[1:]
-            # Since we don't have the last next action, we need to remove the last observation
-            for key in parsed_tensors:
-                if "actions" not in key:
-                    parsed_tensors[key] = parsed_tensors[key][:-1]
+           raise NotImplementedError
         # restructure the dictionary into the downstream format
-        return {
-            "observations": {
-                "proprio": parsed_tensors["observations/state"],
-                **(
-                    {
-                        "image": parsed_tensors["observations/images0"],
-                        **(
-                            {"wrist_image": parsed_tensors["observations/images1"]}
-                            if self.use_wrist_view else {}
-                        ),
-                         **(
-                            {"language": parsed_tensors["language_embedding"], }
-                            if "language_embedding" in parsed_tensors else {}
-                        ),
-                    }
-                    if not self.states_only
-                    else {}
-                ),
-            },
-            "next_observations": {
-                "proprio": parsed_tensors["next_observations/state"],
-                **(
-                    {
-                        "image": parsed_tensors["next_observations/images0"],
-                        **(
-                            {"wrist_image": parsed_tensors["next_observations/images1"]}
-                            if self.use_wrist_view else {}
-                        ),
-                    }
-                    if not self.states_only
-                    else {}
-                ),
-            },
-            "actions": parsed_tensors["actions"],
-            **(
-                {
-                    "next_actions": parsed_tensors["next_actions"],
-                }
-                if self.include_next_actions
-                else {}
-            ),
-            "terminals": tf.zeros(
-                tf.shape(parsed_tensors["actions"])[0], dtype=tf.bool
-            ),
-            "truncates": tf.zeros(
-                tf.shape(parsed_tensors["actions"])[0], dtype=tf.bool
-            ),
-            **(
-                {
-                    "rewards": parsed_tensors["rewards"],
-                    "masks": parsed_tensors["masks"],
-                    "mc_returns": parsed_tensors["mc_returns"],
-                }
-                if "rewards" in parsed_tensors
-                else {}
-            ),
-        }
+        ah = self.config.model.action_horizon
 
-    def _add_goals(self, traj):
-        if self.goal_relabeling_strategy is not None:
-            traj = GOAL_RELABELING_FUNCTIONS[self.goal_relabeling_strategy](
-                traj, **self.goal_relabeling_kwargs
-            )
+        # core arrays (obs/state and next_obs/state already aligned)
+        obs_state = parsed_tensors["observations/state"]              # [T]
+        next_state = parsed_tensors["next_observations/state"]        # [T]
+        actions = parsed_tensors["actions"]                           # [T, ad]
 
-        return traj
+        T = tf.shape(obs_state)[0]
 
-    def _augment(self, seed, image):
-        keys_to_augment = ["observations", "next_observations"]
-        if "goals" in image:
-            keys_to_augment.append("goals")
-        for key in keys_to_augment:
-            image[key]["image"] = augment_fn(
-                image[key]["image"], [seed, seed], **self.augment_kwargs
-            )
+        # number of valid windows = T - (ah - 1)
+        W = T - ah + 1
+        start_idx = tf.range(W)   # [0,1,2,...,W-1]
+
+        # ----- window states -----
+        obs_state = tf.gather(obs_state, start_idx)
+        next_state = tf.gather(next_state, start_idx)
+
+        # ----- window images -----
+        obs_images = {}
+        next_images = {}
+        if not self.states_only:
+            imgs0 = parsed_tensors["observations/images0"]
+            nimgs0 = parsed_tensors["next_observations/images0"]
+
+            obs_images["image"] = tf.gather(imgs0, start_idx)
+            next_images["image"] = tf.gather(nimgs0, start_idx)
+
             if self.use_wrist_view:
-                image[key]["wrist_image"] = augment_fn(
-                image[key]["wrist_image"], [seed, seed], **self.augment_kwargs
-            )
-        return image
+                imgs1 = parsed_tensors["observations/images1"]
+                nimgs1 = parsed_tensors["next_observations/images1"]
+                obs_images["wrist_image"] = tf.gather(imgs1, start_idx)
+                next_images["wrist_image"] = tf.gather(nimgs1, start_idx)
 
-    def iterator(self, batch_size):
-        return (
+        # ----- window actions: [W, ah, action_dim] -----
+        actions_window = tf.map_fn(
+            lambda t: actions[t : t + ah],
+            start_idx,
+            fn_output_signature=tf.float32,
+        )
+        return {
+        "observations": {
+            "proprio": obs_state,
+            **obs_images,
+            **({"language": tf.gather(parsed_tensors["language_embedding"], start_idx)}
+               if "language_embedding" in parsed_tensors else {})
+        },
+        "next_observations": {
+            "proprio": next_state,
+            **next_images,
+        },
+        "actions": actions_window,
+        **({"next_actions": tf.gather(parsed_tensors["next_actions"], start_idx)}
+           if self.include_next_actions else {}),
+        "terminals": tf.zeros([W], dtype=tf.bool),
+        "truncates": tf.zeros([W], dtype=tf.bool),
+        **({
+            "rewards": tf.gather(parsed_tensors["rewards"], start_idx),
+            "masks": tf.gather(parsed_tensors["masks"], start_idx),
+            "mc_returns": tf.gather(parsed_tensors["mc_returns"], start_idx),
+        } if "rewards" in parsed_tensors else {}),
+        **({"prompt": tf.gather(parsed_tensors["prompt"], start_idx)}
+           if "prompt" in parsed_tensors else {}),
+    }
+ 
+    def iterator(self, batch_size, training=True):
+        tf_iter = (
             self.tf_dataset.batch(
                 batch_size,
                 num_parallel_calls=tf.data.experimental.AUTOTUNE,
@@ -335,6 +330,89 @@ class ImageReplayBuffer:
             .prefetch(tf.data.AUTOTUNE)
             .as_numpy_iterator()
         )
+
+        for batch in tf_iter:
+            flat = {}
+
+            # observations
+            for k, v in batch["observations"].items():
+                if k != "language":
+                    flat["observation/" + k] = v
+
+            # # # next_observations
+            # for k, v in batch["next_observations"].items():
+            #     flat["next_observation/" + k] = v
+
+            # actions
+            flat["actions"] = batch["actions"]
+
+            # prompt (language)
+            if "prompt" in batch:
+                flat["prompt"] = batch["prompt"]
+            
+            # print("flat keys: ", flat.keys())
+
+            output = self._apply_data_transforms(flat, training=training)
+
+            yield output
+
+
+    def _apply_data_transforms(self, batch, training=False):
+        """
+        Apply self.data_transforms (which expect single-sample dicts)
+        across a batched dictionary.
+        """
+
+        B = next(iter(batch.values())).shape[0]
+
+        # Split into per-sample dicts (zero copy views)
+        samples = []
+        for i in range(B):
+            samples.append(
+                jax.tree_util.tree_map(lambda x: x[i], batch)
+            )
+
+        for s in samples:
+
+            # ---- Fix prompt decoding ----
+            if "prompt" in s:
+                p = s["prompt"]
+                if isinstance(p, np.ndarray):
+                    if p.dtype.type is np.bytes_ or (p.dtype == object and isinstance(p[0], bytes)):
+                        s["prompt"] = np.array([x.decode("utf-8") for x in p], dtype=object)
+                elif isinstance(p, bytes):
+                    s["prompt"] = p.decode("utf-8")
+
+            # ---- Fix proprio → state renaming ----
+            if "observation/proprio" in s:
+                s["observation/state"] = s.pop("observation/proprio")
+
+            if "next_observation/proprio" in s:
+                s["next_observation/state"] = s.pop("next_observation/proprio")
+            if "actions" in s:
+                s["actions"] = np.array(s["actions"], copy=True)
+        # Apply your pre-defined CompositeTransform
+        # print("s keys: ", samples[0].keys())
+        transformed = [self.data_transforms(s) for s in samples]
+        # print(transformed[0].keys())
+        
+        # Rebatch
+        out = self.batch_stack(transformed)
+        # print(out.keys())
+        return out
+        # if training:
+        #     return _model.Observation.from_dict(out), out["actions"]
+        # else:
+        #     return _model.Observation.from_dict(out)
+    
+    def batch_stack(self, samples):
+        return jax.tree_util.tree_map(
+            lambda *xs: np.stack([np.asarray(x) for x in xs], axis=0),
+            *samples
+        )
+
+
+
 
 
 def save_trajectory_as_tfrecord(trajectory: Dict[str, np.ndarray], path: str):
@@ -413,51 +491,113 @@ def save_trajectory_as_tfrecord(trajectory: Dict[str, np.ndarray], path: str):
         writer.write(example.SerializeToString())
 
 if __name__ == "__main__":
+    import os
     import glob
     import numpy as np
 
-    # Path to your TFRecord directory
-    tfrecord_dir = "/data/hf_cache/datasets/LIBERO/libero_10_tf" #"/data/hf_cache/datasets/CALVIN/task_D_D/training_tfrecords_rewards_float_masks"
+    # -------------------------------
+    # Load config
+    # -------------------------------
+    config = get_config("pi0_fast_libero_low_mem_finetune_custom")
+    print("Assets dirs:", config.assets_dirs)
+    print("Model config:", config.model)
 
-    # Find a few TFRecord files
+    data_config = config.data.create(config.assets_dirs, config.model)
+    print("data config:", data_config)
+
+    # -------------------------------
+    # Locate TFRecords
+    # -------------------------------
+    tfrecord_dir = "/data/hf_cache/datasets/LIBERO/libero_10_tf"
     data_paths = sorted(glob.glob(os.path.join(tfrecord_dir, "*.tfrecord")))
-    assert len(data_paths) > 0, f"No TFRecord files found in {tfrecord_dir}"
-    print(f"Found {len(data_paths)} TFRecord files.")
 
-    # Create replay buffer with language support
-    buffer = ImageReplayBuffer(
-        data_paths=data_paths[:5],   # just load a few for test speed
+    if not data_paths:
+        raise FileNotFoundError(f"No TFRecord files found in {tfrecord_dir}")
+
+    print(f"[INFO] Found {len(data_paths)} TFRecord files.")
+    print("[INFO] Using first 5 files for integration test.\n")
+
+    # -------------------------------
+    # Construct Replay Buffer
+    # -------------------------------
+    buffer = ImageReplayBufferPi(
+        data_paths=data_paths[:5],
         seed=42,
         use_language=True,
         cache=False,
         tfrecords_include_next_observations=False,
-        env_name="libero"
+        env_name="libero",
+        config=config,
     )
 
-    # Get an iterator
-    iterator = buffer.iterator(batch_size=1)
+    iterator = buffer.iterator(batch_size=8)
 
-    print("\n[INFO] Fetching one batch from the dataset...\n")
-    batch = next(iterator)
+    print("[INFO] Fetching one batch...\n")
 
-    # --- Inspect the structure ---
-    obs = batch["observations"]
-    next_obs = batch["next_observations"]
-    actions = batch["actions"]
+    # -------------------------------
+    # Your iterator returns:
+    #   (Observation, actions)
+    # -------------------------------
+    obs_struct, actions = next(iterator)
 
-    print("Keys in observations:", obs.keys())
-    if "image" in obs:
-        print("Image shape:", obs["image"].shape)
-        print("Image test: ", obs["image"])
-    print("Proprio shape:", obs["proprio"].shape)
-    if "language" in obs:
-        print("Language embedding shape:", obs["language"].shape)
-        # Verify the values look like embeddings
-        print("Language embedding example (first 5 dims):", obs["language"][0, :5])
+    print("========== BATCH STRUCTURE ==========\n")
 
-    print("\nActions shape:", actions.shape)
-    print("Next obs proprio shape:", next_obs["proprio"].shape)
+    # print("Observation object:", obs_struct)
+    print("Actions shape:", actions.shape, "\n")
 
-    # Sanity check
-    assert obs["language"].shape[-1] in [512, 384, 768], "Unexpected embedding dimension!"
-    print("\n✅ TFRecord + Buffer integration test passed.")
+    # ------------------------------------------------------
+    # Images
+    # ------------------------------------------------------
+    print("------- IMAGE KEYS -------")
+    print("Image cameras:", list(obs_struct.images.keys()), "\n")
+
+    for cam, img in obs_struct.images.items():
+        print(f"[{cam}] image shape:", img.shape)
+        print(f"First pixel: {img[0,0,0]}")
+        break
+
+    # ------------------------------------------------------
+    # Image Masks
+    # ------------------------------------------------------
+    if obs_struct.image_masks:
+        print("\n------- IMAGE MASKS -------")
+        print("Mask cameras:", list(obs_struct.image_masks.keys()))
+        for cam, mask in obs_struct.image_masks.items():
+            print(f"[{cam}] mask shape:", mask.shape)
+            break
+
+    # ------------------------------------------------------
+    # State
+    # ------------------------------------------------------
+    print("\n------- STATE -------")
+    print("State shape:", obs_struct.state.shape)
+    print("State[0]    :", obs_struct.state[0])
+
+    # ------------------------------------------------------
+    # Tokenized Prompt
+    # ------------------------------------------------------
+    print("\n------- TOKENIZED PROMPT -------")
+    if obs_struct.tokenized_prompt is not None:
+        print("Tokenized prompt shape:", obs_struct.tokenized_prompt.shape)
+        print("Prompt tokens [0,:10]:", obs_struct.tokenized_prompt[0, :10])
+    else:
+        print("No tokenized prompt in batch.")
+
+    # ------------------------------------------------------
+    # Token Mask
+    # ------------------------------------------------------
+    if obs_struct.tokenized_prompt_mask is not None:
+        print("\nPrompt mask shape:", obs_struct.tokenized_prompt_mask.shape)
+        print("Mask[0,:10]:", obs_struct.tokenized_prompt_mask[0, :10])
+
+    # ------------------------------------------------------
+    # Actions
+    # ------------------------------------------------------
+    print("\n------- ACTIONS -------")
+    print("Actions shape:", actions.shape)
+    print("First action:", actions[0])
+
+    print("\n==========================================")
+    print("   ✅ PI-0.5 ImageReplayBuffer test PASSED")
+    print("==========================================\n")
+
