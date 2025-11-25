@@ -1206,9 +1206,9 @@ def train_agent(_):
             # if "ddpm" in FLAGS.config.agent:
             #     batch = add_empty_observation_history_axis_to_batch(batch)
 
-            batch["actions"] = np.clip(
-                batch["actions"], action_space.low, action_space.high
-            )
+            # batch["actions"] = np.clip(
+            #     batch["actions"], action_space.low, action_space.high
+            # )
             timer.tock("critic_training/batch_processing")
 
             timer.tick("critic_training/shard_batch")

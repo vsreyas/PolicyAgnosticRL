@@ -394,8 +394,9 @@ class PiPolicy(BasePolicy):
     def get_debug_metrics(self, batch, seed):
         batch = self.convert_to_openpi_format(batch)
         actions = self.sample_actions(observations=batch, processed_obs=True, seed=seed)
-
-        diff = actions - batch["actions"]  # (B, H, D)
+        B, H, D = actions.shape
+        
+        diff = actions - batch["actions"][:, :, : D]  # (B, H, D)
         metrics = {
             "mse": (diff ** 2).mean(),        # scalar
             "mae": jnp.abs(diff).mean(),      # scalar
