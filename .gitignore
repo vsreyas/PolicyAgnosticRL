@@ -181,3 +181,4 @@ install_jax_on_matrix.sh
 *.out
 
 LIBERO/
+results/

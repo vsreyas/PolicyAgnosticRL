@@ -90,7 +90,7 @@ flags.DEFINE_integer(
 flags.DEFINE_float("reward_scale", 1.0, "Reward scale.")
 flags.DEFINE_float("reward_bias", 0.0, "Reward bias.")
 flags.DEFINE_float("clip_action", 0.99999, "Clip action.")
-flags.DEFINE_integer("num_parallel_envs", 1, "Number of parallel environments.")
+flags.DEFINE_integer("num_parallel_envs", 2, "Number of parallel environments.")
 flags.DEFINE_bool("debug", False, "Debug config")
 flags.DEFINE_string("resume_path", None, "Resume training from checkpoint.")
 flags.DEFINE_integer("max_episode_steps", 360, "Maximum episode steps.")
@@ -124,6 +124,11 @@ flags.DEFINE_string(
     "base_policy_offline_cache_path",
     None,
     "Path to pre-computed base policy actions to use for pre-training.",
+)
+flags.DEFINE_string(
+    "task_name",
+    None, 
+    "Name of fixed task"
 )
 flags.DEFINE_bool(
     "plot_q_values_over_trajectory_figure",
@@ -246,7 +251,7 @@ def preprocess_batch_with_action_optimization(
         ), f"This function assumes an empty observation history axis. Found observations with shape {batch['observations'].shape}"
 
     # Unbatch the dataset
-    batch = unbatch_observation_history_axis(batch)
+    # batch = unbatch_observation_history_axis(batch)
     observations = batch["observations"]
 
     if improve_actions_with_global_optimization:
@@ -286,7 +291,7 @@ def preprocess_batch_with_action_optimization(
             )
         )
         batch["actions"] = local_optimization_results.actions
-    batch = add_empty_observation_history_axis_to_batch(batch)
+    # batch = add_empty_observation_history_axis_to_batch(batch)
     return batch
 
 
@@ -331,9 +336,10 @@ def get_base_policy_agent(
 ) -> BasePolicy:
     base_policy_class = BASE_POLICY_TYPE_TO_CLASS[base_policy_type]
     example_batch = next(data_iterator)
-    example_batch = add_empty_observation_history_axis_to_batch(example_batch)
+    # example_batch = add_empty_observation_history_axis_to_batch(example_batch)
     example_batch = shard_batch(example_batch, sharding)
 
+    # TODO for like splitting batch according to the other dict def as well
     if image_observations:
         encoder_def = encoders[encoder_name](**encoder_kwargs)
     else:
@@ -345,7 +351,7 @@ def get_base_policy_agent(
                 assert x.shape[1] == 1, x.shape
                 return x[:, 0]
             return x
-
+    # TODO change this definition according to Pi 
     base_policy_agent = base_policy_class(
         rng=rng,
         observations=example_batch["observations"],
@@ -409,9 +415,9 @@ def get_policy_fn(
                 observations, *args, **kwargs, argmax=argmax, timer=timer
             )
         )
-        if actions.ndim == 3:
-            assert actions.shape[1] == 1, actions.shape
-            actions = actions[:, 0]
+        # if actions.ndim == 3:
+        #     assert actions.shape[1] == 1, actions.shape
+        #     actions = actions[:, 0]
         return actions
 
     policy_fn = supply_rng(policy_fn, rng=rng)
@@ -520,7 +526,7 @@ def train_agent(_):
     devices = jax.local_devices()
     num_devices = len(devices)
     assert FLAGS.config.batch_size % num_devices == 0
-    config = get_config("pi0_fast_libero_low_mem_finetune_custom")
+    config = get_config("pi05_libero_custom_low_mem")
     config.exp_name = FLAGS.wandb_experiment_name
     config.overwrite = True
 
@@ -686,23 +692,25 @@ def train_agent(_):
         dataset = get_libero_tfrecord_dataset(
             tfrecord_regexp=FLAGS.config.libero_tfrecord_regexp, use_wrist_view=FLAGS.use_wrist_view, 
             use_language=FLAGS.use_lang, env_name=FLAGS.environment_name, config=config, is_pi=True, **FLAGS.config.dataset_kwargs,
+            task_name=FLAGS.task_name,
         )
         libero_config = get_libero_config()
 
-        train_env = get_libero_env(cfg=libero_config)
+        train_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
         if FLAGS.num_parallel_envs > 1:
             num_parallel_envs = FLAGS.num_parallel_envs
+            task_name = FLAGS.task_name
             eval_env = gym.vector.AsyncVectorEnv(
                 [
                     lambda: get_libero_env(
-                        cfg=libero_config, task_id = ind*num_parallel_envs
+                        cfg=libero_config, task_id = ind*num_parallel_envs, task_name=task_name, is_pi=True,
                     )
                     for ind in range(num_parallel_envs)
                 ],
-                context="forkserver",  # the default "fork" is incompatible with JAX
+                context="forkserver", shared_memory=False, # the default "fork" is incompatible with JAX
             )
         else:
-            eval_env = get_libero_env(cfg=libero_config)
+            eval_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
     else:
        raise NotImplementedError
 
@@ -797,32 +805,32 @@ def train_agent(_):
 
     logging.info(f"Number of devices: {num_devices}")
     if FLAGS.config.image_observations:
-        logging.info(f"Batch size: {example_batch['state'].shape[0]}")
+        logging.info(f"Batch size: {example_batch['observations']['proprio'].shape[0]}")
         logging.info(
-            f"Batch size per device: {example_batch['state'].shape[0] // num_devices}"
+            f"Batch size per device: {example_batch['observations']['proprio'].shape[0] // num_devices}"
         )
     else:
         logging.info(f"Batch size: {example_batch['observations'].shape[0]}")
         logging.info(
             f"Batch size per device: {example_batch['observations'].shape[0] // num_devices}"
         )
+    print("parsed tensor keys:", example_batch.keys())
 
     example_batch = shard_batch(example_batch, sharding)
-    # if base_policy_agent is not None and base_policy_type == BasePolicyTypes.OpenVLA:
-    #     example_batch["observations"]["image"] = resize_images_to_100x100(
-    #         example_batch["observations"]["image"]
-    #     )
-    #     example_batch["next_observations"]["image"] = resize_images_to_100x100(
-    #         example_batch["next_observations"]["image"]
-    #     )
-    #     if FLAGS.use_wrist_view:
-    #         example_batch["observations"]["wrist_image"] = resize_images_to_100x100(
-    #             example_batch["observations"]["wrist_image"]
-    #         )
-    #         example_batch["next_observations"]["wrist_image"] = resize_images_to_100x100(
-    #             example_batch["next_observations"]["wrist_image"]
-    #         )
-    print("parsed tensor keys:", example_batch.keys())
+    if base_policy_agent is not None and base_policy_type == BasePolicyTypes.OpenVLA:
+        example_batch["observations"]["image"] = resize_images_to_100x100(
+            example_batch["observations"]["image"]
+        )
+        example_batch["next_observations"]["image"] = resize_images_to_100x100(
+            example_batch["next_observations"]["image"]
+        )
+        if FLAGS.use_wrist_view:
+            example_batch["observations"]["wrist_image"] = resize_images_to_100x100(
+                example_batch["observations"]["wrist_image"]
+            )
+            example_batch["next_observations"]["wrist_image"] = resize_images_to_100x100(
+                example_batch["next_observations"]["wrist_image"]
+            )
     # print("shape of images:" , example_batch["observations"]['image'].shape, 
     #       "\nwrist_view cam: ", example_batch["observations"]['wrist_image'].shape , 
     #       "\n languages shape: ", example_batch["observations"]["language"].shape )
@@ -1188,20 +1196,20 @@ def train_agent(_):
                 timer.tock("critic_training/get_batch/online_iterator")
             else:
                 batch = offline_batch
-            # assert batch["rewards"].shape[0] == FLAGS.config.batch_size
+            assert batch["rewards"].shape[0] == FLAGS.config.batch_size
 
-            # timer.tick("critic_training/batch_processing")
-            # batch = set_batch_masks(
-            #     batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
-            # )
+            timer.tick("critic_training/batch_processing")
+            batch = set_batch_masks(
+                batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
+            )
 
             # if "ddpm" in FLAGS.config.agent:
             #     batch = add_empty_observation_history_axis_to_batch(batch)
 
-            # batch["actions"] = np.clip(
-            #     batch["actions"], action_space.low, action_space.high
-            # )
-            # timer.tock("critic_training/batch_processing")
+            batch["actions"] = np.clip(
+                batch["actions"], action_space.low, action_space.high
+            )
+            timer.tock("critic_training/batch_processing")
 
             timer.tick("critic_training/shard_batch")
             batch = shard_batch(batch, sharding)
@@ -1269,14 +1277,14 @@ def train_agent(_):
             if batch_idx == 0:
                 critic_update_info = jax.device_get(critic_update_info)
                 batch_info = {
-                    # "rewards_mean": np.mean(batch["rewards"]),
-                    # "rewards_std": np.std(batch["rewards"]),
-                    # "rewards_max": np.max(batch["rewards"]),
-                    # "rewards_min": np.min(batch["rewards"]),
-                    # "masks_mean": np.mean(batch["masks"]),
-                    # "masks_std": np.std(batch["masks"]),
-                    # "masks_max": np.max(batch["masks"]),
-                    # "masks_min": np.min(batch["masks"]),
+                    "rewards_mean": np.mean(batch["rewards"]),
+                    "rewards_std": np.std(batch["rewards"]),
+                    "rewards_max": np.max(batch["rewards"]),
+                    "rewards_min": np.min(batch["rewards"]),
+                    "masks_mean": np.mean(batch["masks"]),
+                    "masks_std": np.std(batch["masks"]),
+                    "masks_max": np.max(batch["masks"]),
+                    "masks_min": np.min(batch["masks"]),
                     "actions_mean": np.mean(batch["actions"]),
                     "actions_std": np.std(batch["actions"]),
                     "actions_max": np.max(batch["actions"]),
@@ -1341,6 +1349,7 @@ def train_agent(_):
                         eval_policy_fn,
                         eval_env,
                         FLAGS.config.num_eval_episodes,
+                        action_horizon=config.model.action_horizon
                     )
 
                 # log Q - MC
@@ -1418,7 +1427,7 @@ def train_agent(_):
                             image = transition["image"]  # .transpose(2, 0, 1)
                             # Add text for reward and return so far
                             trajectory_return += reward
-                            image = np.flipud(image)
+                            # image = np.flipud(image)
                             image = np.ascontiguousarray(image) 
                             frame = cv2.putText(
                                 image,

@@ -23,13 +23,22 @@ import openpi.training.checkpoints as _checkpoints
 import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
 import openpi.transforms as _transforms
-from openpi.training.config import TrainConfig
+from openpi.training.config import TrainConfig, DataConfig
 import openpi.models.model as _model
+from openpi.training.data_loader import DataLoader
 
 from jaxrl_m.common.typing import Batch, Data, PRNGKey
 import logging
 import numpy as np
 
+
+class Dummy_Dataloader(DataLoader):
+    def __init__(self, data_config: DataConfig):
+        self._data_config = data_config
+    
+    def data_config(self) -> DataConfig:
+        return self._data_config
+ 
 
 class PiPolicy(BasePolicy):
     """
@@ -97,43 +106,73 @@ class PiPolicy(BasePolicy):
             donate_argnums=(1,),
         )
 
-        # Simple forward-pass function for inference
-        def _infer(state, observation):
+        def _infer(state, observation, rng):
             model = nnx.merge(state.model_def, state.params)
             model.eval()
-            return model.sample_actions(observation)
+            return model.sample_actions(rng, observation)
 
         self._pinfer = jax.jit(
             _infer,
-            in_shardings=(self.train_state_sharding, self.replicated_sharding),
+            in_shardings=(
+                self.train_state_sharding,   # state
+                None,    # observation
+                self.replicated_sharding,    # rng
+            ),
             out_shardings=self.replicated_sharding,
         )
+
 
         # Data configs, setup and utils
         self.data_config = config.data.create(config.assets_dirs, config.model)
         logging.info(f"data_config: {self.data_config}")
         self.data_norm_stats = self.data_config.norm_stats
-        self.data_transforms = [*self.data_config.repack_transforms.inputs,
+        self.input_data_transforms = [*self.data_config.repack_transforms.inputs,
             *self.data_config.data_transforms.inputs,
             _transforms.Normalize(self.data_norm_stats, use_quantiles=self.data_config.use_quantile_norm),
             *self.data_config.model_transforms.inputs,]
-        self.data_transforms = _transforms.compose(self.data_transforms)
+        self.input_data_transforms = _transforms.compose(self.input_data_transforms)
+        self.output_data_transforms = [
+            *self.data_config.model_transforms.outputs,
+            _transforms.Unnormalize(self.data_norm_stats, use_quantiles=self.data_config.use_quantile_norm),
+            *self.data_config.data_transforms.outputs,
+            *self.data_config.repack_transforms.outputs,
+        ]
+        self.output_data_transforms = _transforms.compose(self.output_data_transforms)
+
+        self.data_loader_dummy = Dummy_Dataloader(self.data_config)
 
 
 
     # ------------------------------------------------------------------------------------
     # INFERENCE
     # ------------------------------------------------------------------------------------
-    def sample_actions(self, observations: Data, repeat=1, cache_dir=None, timer=None, argmax=False, **unused):
+    def sample_actions(self, observations: Data, repeat=1, cache_dir=None, timer=None, argmax=False, 
+                       processed_obs=False, **kwargs):
         with sharding.set_mesh(self.mesh):
-            obs = _model.Observation.from_dict(observations)
-            return self._pinfer(self.train_state, obs)
+            if not processed_obs:
+                observations = self.convert_to_openpi_format_infer(observations)
+                obs = self.input_data_transforms(observations)
+            else:
+                obs = observations
+            outputs = {
+                "state": obs["state"],
+                }
+            seed = kwargs.pop("seed")
+            obs = _model.Observation.from_dict(obs)
+            actions = self._pinfer(self.train_state, obs, seed)
+            outputs["actions"] = actions
+            outputs = jax.tree.map(lambda x: np.asarray(x), outputs)
+            outputs = self.output_data_transforms(outputs)
+            if outputs['actions'].shape[0] == 1:
+                outputs['actions'] = outputs['actions'][0]
+            return outputs['actions']
 
     # ------------------------------------------------------------------------------------
     # TRAINING (supervised updates)
     # ------------------------------------------------------------------------------------
     def update(self, batch: Batch):
         with sharding.set_mesh(self.mesh):
+            batch = self.convert_to_openpi_format(batch)
             batch = (_model.Observation.from_dict(batch), batch["actions"])
             self.train_state, info = self._ptrain_step(
                 self.train_rng, self.train_state, batch
@@ -202,7 +241,7 @@ class PiPolicy(BasePolicy):
         _checkpoints.save_state(
             ckpt_mgr,
             self.train_state,
-            None,
+            self.data_loader_dummy,
             step,
         )
 
@@ -221,6 +260,7 @@ class PiPolicy(BasePolicy):
         pass
 
     def to_device(self, sharding):
+        self.data_sharding = sharding
         return self
 
     
@@ -261,6 +301,178 @@ class PiPolicy(BasePolicy):
             return _model.Observation.from_dict(out), out["actions"]
         else:
             return _model.Observation.from_dict(out)
+    
+    def convert_to_openpi_format(self, out_new):
+        """
+        Converts your NEW nested output format into the OLD OpenPI-style format.
+        No copies are made — only dict references.
+        """
+
+        old = {}
+
+        # ------------------------------------------------
+        # 1. State & Actions
+        # ------------------------------------------------
+        old["state"] = out_new["observations"]["proprio"]
+        old["actions"] = out_new["actions"]
+
+        # ------------------------------------------------
+        # 2. Images (map new → old)
+        # ------------------------------------------------
+        # new camera names → old camera names
+        CAM_REVERSE = {
+            "image": "base_0_rgb",
+            "wrist_image": "left_wrist_0_rgb",
+            "image_3": "right_wrist_0_rgb",
+        }
+
+        old["image"] = {
+            oldname: out_new["observations"][newname]
+            for newname, oldname in CAM_REVERSE.items()
+        }
+
+        # ------------------------------------------------
+        # 3. Image Masks
+        # ------------------------------------------------
+        old["image_mask"] = {
+            oldname: out_new["observations_image_mask"][newname]
+            for newname, oldname in CAM_REVERSE.items()
+        }
+
+        # ------------------------------------------------
+        # 4. Token fields
+        # ------------------------------------------------
+        old["tokenized_prompt"]      = out_new["tokenized_prompt"]
+        old["tokenized_prompt_mask"] = out_new["tokenized_prompt_mask"]
+        if not "pi05" in self.config.name:
+            old["token_ar_mask"]         = out_new["token_ar_mask"]
+            old["token_loss_mask"]       = out_new["token_loss_mask"]
+        return old
+    
+    def convert_to_openpi_format_infer(self, out_new):
+        """
+        Converts your NEW nested output format into the OLD OpenPI-style format.
+        No copies are made — only dict references.
+        """
+
+        old = {}
+
+        # ------------------------------------------------
+        # 1. State & Actions
+        # ------------------------------------------------
+        old["observation/state"] = self.ensure_batch(out_new["proprio"])
+
+        # ------------------------------------------------
+        # 2. Images (map new → old)
+        # ------------------------------------------------
+        # new camera names → old camera names
+        old["observation/image"] = self.ensure_batch(out_new["image"])
+        old["observation/wrist_image"] = self.ensure_batch(out_new["wrist_image"])
+        
+        old["prompt"] = self._ensure_prompt_batch(out_new["prompt"])
+        return old
+    
+    def ensure_batch(self, x):
+        """If x is 3D or 1D, add a batch dim."""
+        if isinstance(x, dict):
+            return {k: self.ensure_batch(v) for k, v in x.items()}
+
+        arr = x
+        ndim = arr.ndim
+
+        # Image case: [H, W, C] → [1, H, W, C]
+        if ndim == 3:
+            return arr[None, ...]
+
+        # Proprio/state: [S] → [1, S]
+        if ndim == 1:
+            return arr[None, :]
+
+        # Already batched → leave as-is
+        return arr
+    
+    def get_debug_metrics(self, batch, seed):
+        batch = self.convert_to_openpi_format(batch)
+        actions = self.sample_actions(observations=batch, processed_obs=True, seed=seed)
+
+        diff = actions - batch["actions"]  # (B, H, D)
+        metrics = {
+            "mse": (diff ** 2).mean(),        # scalar
+            "mae": jnp.abs(diff).mean(),      # scalar
+        }
+
+        return metrics
+
+    def _ensure_prompt_batch(self, prompt):
+        """
+        Normalizes the prompt into a batched numpy array of byte strings:
+            e.g. ['do X'] → array([b'do X'], dtype=object)
+                (tuple) → array([...])
+                array([...]) → returned as-is if batched
+        """
+
+        # ------------------------------------------------------------
+        # Case 0: Nothing returned
+        # ------------------------------------------------------------
+        if prompt is None:
+            return np.array([b""], dtype=object)
+
+        # ------------------------------------------------------------
+        # Case 1: Single string
+        # ------------------------------------------------------------
+        if isinstance(prompt, str):
+            return np.array([prompt.encode("utf-8")], dtype=object)
+
+        # ------------------------------------------------------------
+        # Case 2: Single bytes
+        # ------------------------------------------------------------
+        if isinstance(prompt, bytes):
+            return np.array([prompt], dtype=object)
+
+        # ------------------------------------------------------------
+        # Case 3: Prompt is a list or tuple (e.g. from vectorized env)
+        # ------------------------------------------------------------
+        if isinstance(prompt, (list, tuple)):
+            out = []
+            for p in prompt:
+                if isinstance(p, str):
+                    out.append(p.encode("utf-8"))
+                elif isinstance(p, bytes):
+                    out.append(p)
+                else:
+                    raise TypeError(f"Unsupported prompt element: {type(p)}")
+            return np.array(out, dtype=object)
+
+        # ------------------------------------------------------------
+        # Case 4: Numpy array
+        # ------------------------------------------------------------
+        if isinstance(prompt, np.ndarray):
+            # If it's unbatched and contains a single string
+            if prompt.ndim == 0:
+                p = prompt.item()
+                return self._ensure_prompt_batch(p)
+
+            # Already batched → ensure byte encoding
+            out = []
+            for p in prompt:
+                if isinstance(p, str):
+                    out.append(p.encode("utf-8"))
+                elif isinstance(p, bytes):
+                    out.append(p)
+                else:
+                    raise TypeError(f"Unsupported prompt element: {type(p)}")
+            return np.array(out, dtype=object)
+
+        # ------------------------------------------------------------
+        # Anything else is unsupported
+        # ------------------------------------------------------------
+        raise TypeError(f"Unsupported prompt type: {type(prompt)}")
+    
+
+
+
+        
+
 
 
 

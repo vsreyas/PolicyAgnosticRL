@@ -365,4 +365,74 @@ BASE_PI_CONFIG = dict(
     ),
 )
 
-
+pi0_base_policy_agent_kwargs_for_parl = BASE_PI_CONFIG["agent_kwargs"].copy()
+pi0_base_policy_agent_kwargs_for_parl.update(
+    learning_rate=5e-5,
+    actor_decay_steps=None,
+)
+BASE_PARL_CALQL_CONFIG_Pi0 = dict(
+    agent="parl_calql",
+    batch_size=256,
+    save_dir=tf.io.gfile.join(SAVE_DIR_PREFIX, "results"),
+    eval_interval=50,
+    save_interval=500,
+    log_interval=10,
+    deterministic_eval=True,
+    num_eval_episodes=10,
+    num_episodes_per_video=1,
+    num_episodes_per_row=1,
+    save_video=False,
+    parl_config=DEFAULT_PARL_CONFIG,
+    data_collection_particle_choosing_strategy="max_q_value",
+    evaluation_particle_choosing_strategy="max_q_value",
+    image_observations=False,
+    goal_conditioned=False,
+    improve_base_policy_actions_with_global_search=True,
+    base_policy_path="",
+    mixing_ratio=0.5,
+    distill_argmax=False,
+    agent_kwargs=get_continuous_cql_config(
+        updates=dict(
+            discount=0.99,
+            batch_size=256,
+            distributional_critic=True,
+            distributional_critic_kwargs=dict(
+                q_min=-100.0,
+                q_max=0.0,
+                num_bins=128,
+            ),
+            critic_network_type="mlp",
+            critic_kwargs=dict(
+                kernel_init_type="orthogonal",
+                kernel_init_params=dict(
+                    scale=1e-2,
+                ),
+            ),
+            critic_network_kwargs=dict(
+                hidden_dims=(256, 256),
+                activate_final=True,
+                kernel_scale_final=1e-2,
+                use_feature_normalization=False,
+                use_layer_norm=True,
+            ),
+            critic_optimizer_kwargs={
+                "learning_rate": 3e-4,
+                "warmup_steps": 0,
+                "weight_decay": 0.0,
+            },
+            cql_importance_sample=False,
+            cql_n_actions=10,
+            use_calql=True,
+            use_calql_on_random_actions=False,
+            autotune_entropy=False,
+            cql_autotune_alpha=False,
+            critic_ensemble_size=10,
+            critic_subsample_size=2,
+            policy_optimizes_ensemble_mean=False,
+            drq_padding=0,
+            cql_alpha=0.005,
+            only_use_next_actions_for_cql=False,
+        ),
+    ),
+    base_policy_agent_kwargs=pi0_base_policy_agent_kwargs_for_parl,
+)

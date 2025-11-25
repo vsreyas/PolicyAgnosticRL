@@ -103,13 +103,87 @@ def evaluate_with_trajectories(
     return stats, trajectories
 
 
+# def evaluate_with_trajectories_vectorized(
+#     policy_fn,
+#     env: gym.vector.VectorEnv,
+#     num_episodes: int,
+#     save_video: bool = False,
+#     max_episodes_for_video: int = 2,
+# ):
+#     trajectories = [[defaultdict(list)] for _ in range(env.num_envs)]
+#     num_envs = env.num_envs
+#     assert num_episodes % num_envs == 0
+#     episode_counts = np.zeros(num_envs, dtype=int)
+
+#     observations = env.reset()
+#     if isinstance(observations, tuple) and len(observations) == 2:
+#         observations, _ = observations
+#     step_indices = np.zeros(
+#         num_envs, dtype=int
+#     )  # Index of the current step in each env
+
+#     while np.sum(episode_counts) < num_episodes:
+#         actions = policy_fn(observations, step_indices=step_indices)
+#         step_variables = env.step(actions)
+#         if len(step_variables) == 4:
+#             next_observations, rewards, dones, infos = step_variables
+#         else:
+#             next_observations, rewards, dones, truncated, infos = step_variables
+#             dones = np.logical_or(dones, truncated)
+
+#         if save_video and np.sum(episode_counts) < max_episodes_for_video:
+#             images = env.render()
+
+#         step_indices += 1
+#         log_progress = False
+#         for i in range(num_envs):
+#             if episode_counts[i] < num_episodes // num_envs:
+#                 obs = jax.tree_map(lambda x: x[i], observations)
+#                 next_obs = jax.tree_map(lambda x: x[i], next_observations)
+#                 transition = dict(
+#                     observation=obs,
+#                     next_observation=next_obs,
+#                     action=actions[i],
+#                     reward=rewards[i],
+#                     done=dones[i],
+#                     # info=infos[i],
+#                     info={},
+#                 )
+#                 if save_video and np.sum(episode_counts) < max_episodes_for_video:
+#                     transition["image"] = images[i].copy()
+#                 add_to(trajectories[i][-1], transition)
+
+#                 if dones[i]:
+#                     episode_counts[i] += 1
+#                     step_indices[i] = 0
+#                     log_progress = True
+#                     if episode_counts[i] < num_episodes // num_envs:
+#                         trajectories[i].append(defaultdict(list))
+
+#         if log_progress:
+#             logging.info(
+#                 f"Completed {np.sum(episode_counts)} out of {num_episodes} eval episodes..."
+#             )
+
+#         observations = next_observations
+
+#     all_trajectories = []
+#     for i in range(num_envs):
+#         all_trajectories.extend(trajectories[i])
+
+#     return all_trajectories
+
 def evaluate_with_trajectories_vectorized(
     policy_fn,
     env: gym.vector.VectorEnv,
     num_episodes: int,
     save_video: bool = False,
     max_episodes_for_video: int = 2,
+    action_horizon: int = 10,        # <--- ADD
 ):
+    H = action_horizon
+    half_H = max(1, H // 2)
+
     trajectories = [[defaultdict(list)] for _ in range(env.num_envs)]
     num_envs = env.num_envs
     assert num_episodes % num_envs == 0
@@ -118,13 +192,52 @@ def evaluate_with_trajectories_vectorized(
     observations = env.reset()
     if isinstance(observations, tuple) and len(observations) == 2:
         observations, _ = observations
-    step_indices = np.zeros(
-        num_envs, dtype=int
-    )  # Index of the current step in each env
+
+    # tracks where each env is inside its horizon
+    action_indices = np.zeros(num_envs, dtype=int)
+
+    # cached actions: (num_envs, H, act_dim)
+    cached_action_sequences = None
 
     while np.sum(episode_counts) < num_episodes:
-        actions = policy_fn(observations, step_indices=step_indices)
-        step_variables = env.step(actions)
+
+        # -------------------------------------------------------------
+        # 1. CALL POLICY WHENEVER ANY ENV NEEDS A REFILL
+        # -------------------------------------------------------------
+        # We need fresh actions IF:
+        #    - first time OR
+        #    - ANY env has already consumed half_H steps
+        if cached_action_sequences is None or np.any(action_indices >= half_H):
+            cached_action_sequences = policy_fn(observations)
+
+            # If policy returned (num_envs, 1, D) or (num_envs, D)
+            if cached_action_sequences.ndim == 2:
+                # (num_envs, D) → make it (num_envs, 1, D)
+                cached_action_sequences = cached_action_sequences[:, None, :]
+
+            if cached_action_sequences.ndim == 3 and cached_action_sequences.shape[1] < H:
+                raise ValueError(
+                    f"Policy returned horizon={cached_action_sequences.shape[1]}, expected >= {H}"
+                )
+
+            action_indices[:] = 0
+        # -------------------------------------------------------------
+        # 2. SELECT ONE ACTION PER ENV FOR THIS STEP
+        # -------------------------------------------------------------
+        # actions_to_apply: (num_envs, act_dim)
+        actions_to_apply = np.array([
+            cached_action_sequences[i, action_indices[i]]
+            for i in range(num_envs)
+        ])
+
+        # Update horizon counters
+        action_indices += 1
+
+        # -------------------------------------------------------------
+        # 3. STEP ENVIRONMENTS
+        # -------------------------------------------------------------
+        step_variables = env.step(actions_to_apply)
+
         if len(step_variables) == 4:
             next_observations, rewards, dones, infos = step_variables
         else:
@@ -134,29 +247,36 @@ def evaluate_with_trajectories_vectorized(
         if save_video and np.sum(episode_counts) < max_episodes_for_video:
             images = env.render()
 
-        step_indices += 1
         log_progress = False
+
+        # -------------------------------------------------------------
+        # 4. STORE TRAJECTORIES PER-ENV
+        # -------------------------------------------------------------
         for i in range(num_envs):
             if episode_counts[i] < num_episodes // num_envs:
-                obs = jax.tree_map(lambda x: x[i], observations)
-                next_obs = jax.tree_map(lambda x: x[i], next_observations)
+                obs_i = jax.tree_map(lambda x: x[i], observations)
+                next_obs_i = jax.tree_map(lambda x: x[i], next_observations)
+
                 transition = dict(
-                    observation=obs,
-                    next_observation=next_obs,
-                    action=actions[i],
+                    observation=obs_i,
+                    next_observation=next_obs_i,
+                    action=actions_to_apply[i],
                     reward=rewards[i],
                     done=dones[i],
-                    # info=infos[i],
                     info={},
                 )
+
                 if save_video and np.sum(episode_counts) < max_episodes_for_video:
                     transition["image"] = images[i].copy()
+
                 add_to(trajectories[i][-1], transition)
 
                 if dones[i]:
                     episode_counts[i] += 1
-                    step_indices[i] = 0
+                    action_indices[:] = 0                   # reset horizon index
+                    cached_action_sequences= None       # force refresh for this env
                     log_progress = True
+
                     if episode_counts[i] < num_episodes // num_envs:
                         trajectories[i].append(defaultdict(list))
 
@@ -167,6 +287,9 @@ def evaluate_with_trajectories_vectorized(
 
         observations = next_observations
 
+    # -------------------------------------------------------------
+    # 5. FLATTEN TRAJECTORIES
+    # -------------------------------------------------------------
     all_trajectories = []
     for i in range(num_envs):
         all_trajectories.extend(trajectories[i])
@@ -265,26 +388,161 @@ def parallel_evaluate(policy_fn, eval_envs, num_eval, verbose=True):
     return eval_episode_rewards, eval_episode_time_rewards
 
 
+# def evaluate_with_trajectories_libero(
+#     policy_fn,
+#     env,
+#     num_episodes: int,
+#     save_video: bool = False,
+#     max_episodes_for_video: int = 2,
+#     action_horizon=1,
+# ):
+#     trajectories = [defaultdict(list)]
+#     episode_count = 0
+
+#     observations = env.reset()
+#     if isinstance(observations, tuple) and len(observations) == 2:
+#         observations, _ = observations
+#     step_index = 0
+#     half_horizon = max(1, action_horizon // 2)
+#     current_action_index = 0
+#     current_action_sequence = None
+
+#     while episode_count < num_episodes:
+#         if current_action_sequence is None or current_action_index >= half_horizon:
+#             print("Calling policy check")
+#             current_action_sequence = policy_fn(observations)
+
+#             # Handle batched output
+#             if isinstance(current_action_sequence, np.ndarray) and current_action_sequence.ndim == 3:
+#                 # Shape (1, H, D) → remove batch dim
+#                 current_action_sequence = current_action_sequence[0]
+
+#             # If the policy returns only one action instead of a horizon
+#             if current_action_sequence.ndim == 1:
+#                 # shape (D,) → promote to horizon 1: (1, D)
+#                 current_action_sequence = current_action_sequence[None, :]
+
+#             current_action_index = 0
+#         actions = current_action_sequence[current_action_index]
+#         step_variables = env.step(actions)
+#         if len(step_variables) == 4:
+#             next_observations, rewards, dones, infos = step_variables
+#         else:
+#             next_observations, rewards, dones, truncated, infos = step_variables
+#             dones = np.logical_or(dones, truncated)
+
+#         if save_video and episode_count < max_episodes_for_video:
+#             images = env.render()
+
+#         step_index += 1
+#         log_progress = False
+#         obs = observations
+#         next_obs = next_observations
+#         transition = dict(
+#             observation=obs,
+#             next_observation=next_obs,
+#             action=actions,
+#             reward=rewards,
+#             done=dones,
+#             info={},  # match vectorized (info dropped / empty)
+#         )
+#         if save_video and episode_count < max_episodes_for_video:
+#             transition["image"] = images.copy()
+#         add_to(trajectories[-1], transition)
+
+#         if dones:
+#             episode_count += 1
+#             step_index = 0
+#             log_progress = True
+
+#             if episode_count < num_episodes:
+#                 # start a new episode: create a new trajectory and reset env
+#                 trajectories.append(defaultdict(list))
+#                 observations = env.reset()
+#                 if isinstance(observations, tuple) and len(observations) == 2:
+#                     observations, _ = observations
+#             else:
+#                 # don't reset if we're done with all episodes
+#                 observations = next_observations
+#         else:
+#             observations = next_observations
+
+#         if log_progress:
+#             logging.info(
+#                 f"Completed {episode_count} out of {num_episodes} eval episodes..."
+#             )
+#     return trajectories
+
 def evaluate_with_trajectories_libero(
     policy_fn,
     env,
     num_episodes: int,
     save_video: bool = False,
     max_episodes_for_video: int = 2,
+    action_horizon: int = 10,
 ):
+    H = action_horizon
+    half_H = max(1, H // 2)
+
     trajectories = [defaultdict(list)]
     episode_count = 0
 
     observations = env.reset()
     if isinstance(observations, tuple) and len(observations) == 2:
         observations, _ = observations
+
     step_index = 0
 
+    # horizon-related state for this single env
+    current_action_index = 0          # where we are inside current horizon
+    current_action_sequence = None    # shape (H, D) or (1, D)
+
     while episode_count < num_episodes:
-        actions = policy_fn(observations)
-        if len(actions) == 1:
-            actions = actions[0]
+        # ---------------------------------------------------------
+        # 1. Call policy when we need a refill
+        # ---------------------------------------------------------
+        if current_action_sequence is None or current_action_index >= half_H:
+            # print("Calling policy check")
+            current_action_sequence = policy_fn(observations)
+
+            # Expect one env. If policy returns (1, H, D) → (H, D)
+            if isinstance(current_action_sequence, np.ndarray):
+                if current_action_sequence.ndim == 3:
+                    # assume (1, H, D)
+                    current_action_sequence = current_action_sequence[0]
+
+                # If policy returns only a single action: (D,)
+                if current_action_sequence.ndim == 1:
+                    # → (1, D)
+                    current_action_sequence = current_action_sequence[None, :]
+
+            # Basic sanity: at this point we expect (T, D)
+            if not isinstance(current_action_sequence, np.ndarray) or current_action_sequence.ndim != 2:
+                raise ValueError(
+                    f"Policy must return array of shape (T, D) or (1, T, D) or (D,), "
+                    f"got type={type(current_action_sequence)}, shape="
+                    f"{getattr(current_action_sequence, 'shape', None)}"
+                )
+
+            # Optionally enforce minimum horizon, like your vectorized version
+            if current_action_sequence.shape[0] < H:
+                raise ValueError(
+                    f"Policy returned horizon={current_action_sequence.shape[0]}, expected >= {H}"
+                )
+
+            current_action_index = 0
+
+        # ---------------------------------------------------------
+        # 2. Pick the action for this step
+        # ---------------------------------------------------------
+        actions = current_action_sequence[current_action_index]
+        current_action_index += 1
+
+        # ---------------------------------------------------------
+        # 3. Step environment
+        # ---------------------------------------------------------
         step_variables = env.step(actions)
+
         if len(step_variables) == 4:
             next_observations, rewards, dones, infos = step_variables
         else:
@@ -296,33 +554,45 @@ def evaluate_with_trajectories_libero(
 
         step_index += 1
         log_progress = False
+
+        # ---------------------------------------------------------
+        # 4. Store transition
+        # ---------------------------------------------------------
         obs = observations
         next_obs = next_observations
+
         transition = dict(
             observation=obs,
             next_observation=next_obs,
             action=actions,
             reward=rewards,
             done=dones,
-            info={},  # match vectorized (info dropped / empty)
+            info={},  # to match vectorized version
         )
+
         if save_video and episode_count < max_episodes_for_video:
             transition["image"] = images.copy()
+
         add_to(trajectories[-1], transition)
 
+        # ---------------------------------------------------------
+        # 5. Episode end handling
+        # ---------------------------------------------------------
         if dones:
             episode_count += 1
             step_index = 0
             log_progress = True
 
+            # IMPORTANT: reset horizon state on episode boundary
+            current_action_index = 0
+            current_action_sequence = None
+
             if episode_count < num_episodes:
-                # start a new episode: create a new trajectory and reset env
                 trajectories.append(defaultdict(list))
                 observations = env.reset()
                 if isinstance(observations, tuple) and len(observations) == 2:
                     observations, _ = observations
             else:
-                # don't reset if we're done with all episodes
                 observations = next_observations
         else:
             observations = next_observations
@@ -331,6 +601,7 @@ def evaluate_with_trajectories_libero(
             logging.info(
                 f"Completed {episode_count} out of {num_episodes} eval episodes..."
             )
+
     return trajectories
 
 

@@ -13,13 +13,14 @@ from libero.libero import benchmark
 
 from jaxrl_m.data.dataset import Dataset
 from jaxrl_m.data.image_replay_buffer import ImageReplayBuffer
-from jaxrl_m.data.image_replay_buffer_pi import ImageReplayBufferPi
+from jaxrl_m.data.image_replay_buffer_pi import ImageReplayBufferPi, save_image_tensor_as_png
 from jaxrl_m.data.bridge_dataset import glob_to_path_list
+from jaxrl_m.utils.gym_text_patch import Text
 import numpy as np
 from typing import Dict, Any
 import torch
 import clip
-
+from robosuite.utils.transform_utils import quat2axisangle    
 import json
 from tqdm import tqdm
 
@@ -139,6 +140,8 @@ def get_libero_env(
     goal_conditioned: bool = False,
     libero_path: str = "",
     device_id: int = 0,
+    is_pi: bool=False,
+    task_name=None, 
     **kwargs,
 ):
     """
@@ -148,6 +151,8 @@ def get_libero_env(
     - GymWrapper (for unified observation/action space)
     - wrap_env (normalization, seeding, etc.)
     - Optional goal-conditioning wrapper
+    - is_pi flag tells whether the corresponding policy is pi-style
+    - task_name when given fixes the task to that one downstream task. 
     """
 
     # --- Config setup ---
@@ -159,8 +164,18 @@ def get_libero_env(
     suite = benchmark_dict[cfg.name]()
 
     num_envs = 10 if "10" in cfg.name else 90
-    task_id = task_id % num_envs
+    
+    if task_name is not None:
+        lang = suite.get_task_names()
+        lang = [grab_language(i) for i in lang]
+        task_id = lang.index(task_name) 
+        fixed_task = True 
+    else:
+        task_id = task_id % num_envs
+        fixed_task=False
     task = suite.get_task(task_id)
+    task_name = task.language
+
 
     # --- Paths for BDDL and init states ---
     bddl_file = os.path.join(
@@ -188,7 +203,7 @@ def get_libero_env(
     
     # --- Wrap LIBERO base env in Calvin-style stack ---
     env = LiberoEnvWrapper(base_env, init_states_path=init_states_path, camera_dims=cfg.screen_size, max_steps=cfg.max_episode_steps, cfg=cfg, task_id = task_id,
-                           suite=suite)
+                           suite=suite, task_name=task_name, is_pi=is_pi,fixed_task=fixed_task)
     
 
     # # Convert to dict-style obs (like Calvin)
@@ -216,9 +231,7 @@ def get_libero_env(
     #     env = AddProprioWrapper(env)
 
     return env
-# ======================================================
-# === TFRecord + Pickle dataset loading
-# ======================================================
+
 
 def get_libero_tfrecord_dataset(tfrecord_regexp: str, 
                                 goal_relabeling_strategy: Optional[str] = None,
@@ -227,7 +240,12 @@ def get_libero_tfrecord_dataset(tfrecord_regexp: str,
                                 train: bool = True,
                                 seed: int = 0,
                                 is_pi: bool = False,
+                                task_name=None,
                                 **kwargs):
+    """
+    is_pi -- the flag which retrieves the dataset with how pi processes it
+    task_name -- retrieves only one task of the libero dataset
+    """
     assert tfrecord_regexp.endswith(".tfrecord")
     paths = glob_to_path_list(tfrecord_regexp)
     if is_pi:
@@ -237,6 +255,7 @@ def get_libero_tfrecord_dataset(tfrecord_regexp: str,
         goal_relabeling_kwargs=goal_relabeling_kwargs,
         cache=cache,
         train=train,
+        task_name=task_name,
         **kwargs,
     )
     return ImageReplayBuffer(
@@ -289,20 +308,64 @@ def _get_task_index(suite, name: str):
 
 class LiberoEnvWrapper(gym.Wrapper):
     """
-    Wraps OffScreenRenderEnv to return Calvin-compatible keys:
-
-        {
-            "observations/state": np.ndarray,
-            "observations/images0": np.uint8[H,W,3],
-            "observations/images1": np.uint8[H,W,3],
-        }
-
-    This ensures the downstream pipeline (TFRecord conversion, training)
-    works exactly as it does for Calvin.
     """
 
     def __init__(self, env: OffScreenRenderEnv, init_states_path: Optional[str] = None, gripper_width=False, camera_dims = (224,224), max_steps = 999, cfg=None, 
-                 task_id = None, suite=None):
+                 task_id = None, suite=None, task_name=None, is_pi=False, fixed_task=False, use_8D=True):
+        """
+        Initialize the environment wrapper.
+
+        Parameters
+        ----------
+        env : OffScreenRenderEnv
+            The underlying environment providing off-screen rendering and simulation.
+        
+        init_states_path : str, optional
+            Path to a `.pt` file containing saved initial states for the environment.
+            If provided and exists, the states are loaded with `torch.load`. Otherwise,
+            no initial states are used.
+
+        gripper_width : bool, default=False
+            Whether to include gripper width information in the proprioceptive vector.
+
+        camera_dims : tuple of int, default=(224, 224)
+            The (height, width) of both rendered RGB camera images.
+
+        max_steps : int, default=999
+            Maximum number of steps before the episode terminates.
+
+        cfg : Any
+            Configuration object used to determine environment settings such as number of envs.
+
+        task_id : Any
+            Identifier for the current task. Used to retrieve language embeddings when not in Pi mode.
+
+        suite : Any
+            Optional task suite descriptor.
+
+        task_name : str, optional
+            Text description of the task. Used as a natural language prompt when `is_pi=True`.
+
+        is_pi : bool, default=False
+            If True, the observation includes raw text prompts via a `Text` space.
+            If False, a precomputed language embedding (512-dim) is used instead. This embedding is pre-computed via CLIP
+            This is for use with the Pi-policy. 
+
+        fixed_task : bool, default=False
+            Whether the task is fixed or can vary across resets.
+
+        Notes
+        -----
+        - Action space is a 7-D continuous Box in [-1, 1].
+        - Observation space contains:
+            * `image`: main RGB camera
+            * `wrist_image`: wrist RGB camera
+            * `proprio`: proprioceptive features (15 + 2 if gripper width enabled)
+            * Language field (`prompt` or `language`) depending on `is_pi`.
+        - For `is_pi=False`, language embeddings are loaded from 
+        `data_info/libero_id2embeddings_normalised.json`.
+
+        """
         super().__init__(env)
         self.metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
         self.env = env
@@ -324,69 +387,92 @@ class LiberoEnvWrapper(gym.Wrapper):
             shape=(camera_dims[0], camera_dims[1], 3),
             dtype=np.uint8,
         )
-        proprio_dim = 15 + (2 if gripper_width else 0)
+        if not use_8D :
+            proprio_dim = 15 + (2 if gripper_width else 0) 
+        else:
+            proprio_dim = 8
         proprio_space = gym.spaces.Box(
             low=-np.inf,
             high=np.inf,
             shape=(proprio_dim,),
             dtype=np.float32,
         )
-        lang_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(512,), dtype=np.float32)
-        self.observation_space = gym.spaces.Dict(
-            {
-                "image": image_space,
-                "wrist_image": image_space,
-                "proprio": proprio_space,
-                "language": lang_space,
-            }
-        )
-
-        self.__step = 0
-        self.max_steps = max_steps
 
         self.cfg = cfg
         self.task_id = task_id
         self.num_envs = 10 if "10" in cfg.name else 90
         self.suite = suite
-        self.id2embedding = load_language_embeddings("data_info/libero_id2embeddings_normalised.json")
-        self.language_embedding = self.id2embedding[self.task_id]
+        self.fixed_task = fixed_task
+        self.is_pi = is_pi
+        if is_pi:
+            self.lang_key = "prompt"
+            lang_space = Text(
+                max_length=512,      
+                min_length=0,        
+                charset="abcdefghijklmnopqrstuvwxyz "   
+            )
+            self.language = task_name
+        else:
+            self.lang_key = "language"
+            lang_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(512,), dtype=np.float32)
+            self.id2embedding = load_language_embeddings("data_info/libero_id2embeddings_normalised.json")
+            self.language_embedding = self.id2embedding[self.task_id]
+        
+        self.observation_space = gym.spaces.Dict(
+            {
+                "image": image_space,
+                "wrist_image": image_space,
+                "proprio": proprio_space,
+                self.lang_key: lang_space,
+            }
+        )
+
+        self.__step = 0
+        self.max_steps = max_steps
+        self.use_8D = use_8D
         self.reset()
 
 
 
     def reset(self):
-        self.env.close()
-        del self.env, self.language_embedding
-        
-        self.task_id = (self.task_id + 1) % self.num_envs
-        task = self.suite.get_task(self.task_id)
-        self.language_embedding = self.id2embedding[self.task_id]
-        # --- Paths for BDDL and init states ---
-        bddl_file = os.path.join(
-            f"{self.cfg.libero_path}/libero/libero/bddl_files",
-            task.problem_folder,
-            task.bddl_file,
-        )
-        init_states_path = os.path.join(
-            f"{self.cfg.libero_path}/libero/libero/init_files",
-            task.problem_folder,
-            task.init_states_file,
-        )
+        if not self.fixed_task:
+            self.env.close()
+            del self.env
+            if self.is_pi: del self.language
+            else: del self.language_embedding
+            
+            self.task_id = (self.task_id + 1) % self.num_envs
+            task = self.suite.get_task(self.task_id)
+            if self.is_pi:
+                self.language = task.language
+            else:
+                self.language_embedding = self.id2embedding[self.task_id]
+            # --- Paths for BDDL and init states ---
+            bddl_file = os.path.join(
+                f"{self.cfg.libero_path}/libero/libero/bddl_files",
+                task.problem_folder,
+                task.bddl_file,
+            )
+            init_states_path = os.path.join(
+                f"{self.cfg.libero_path}/libero/libero/init_files",
+                task.problem_folder,
+                task.init_states_file,
+            )
 
-        # --- Base LIBERO environment ---
-        env_args = dict(
-            bddl_file_name=bddl_file,
-            camera_heights=self.cfg.screen_size[0],
-            camera_widths=self.cfg.screen_size[1],
-            # render_gpu_device_id=device_id,
-            ignore_done=False,
-            reward_shaping=True
+            # --- Base LIBERO environment ---
+            env_args = dict(
+                bddl_file_name=bddl_file,
+                camera_heights=self.cfg.screen_size[0],
+                camera_widths=self.cfg.screen_size[1],
+                # render_gpu_device_id=device_id,
+                ignore_done=False,
+                reward_shaping=True
 
-        )
-        self.env = OffScreenRenderEnv(**env_args)
+            )
+            self.env = OffScreenRenderEnv(**env_args)
 
-        del env_args 
-        import gc; gc.collect()
+            del env_args 
+            import gc; gc.collect()
 
         obs = self.env.reset()
         self.__step = 0
@@ -431,13 +517,49 @@ class LiberoEnvWrapper(gym.Wrapper):
         # scene_obs = np.zeros(24, np.float32)
         # state = np.concatenate([robot_vec, scene_obs], axis=0)
         state = robot_vec
+        if self.use_8D: 
+            state = self.libero_state_to_8d(raw_obs)
+        lang_out = self.language_embedding if not self.is_pi else self.language
+        if img0.ndim == 4:   # [T,H,W,C]
+                img0 = img0[:, ::-1, ::-1, :]
+                img1 = img1[:, ::-1, ::-1, :]
+        else:                # [H,W,C]
+            img0 = img0[::-1, ::-1, :]
+            img1 = img1[::-1, ::-1, :]
         obs = {
             "proprio": state,
             "image": img0,
             "wrist_image": img1,
-            "language": self.language_embedding,
+            self.lang_key: lang_out,
         }
         return obs
+    
+    def libero_state_to_8d(self, raw_obs):
+        """
+        Convert Libero raw_obs into the (8,) state representation:
+            [eef_pos(3), axis-angle(3), gripper_qpos(2)]
+        """
+        pos = raw_obs["robot0_eef_pos"]                   # shape (3,)
+        quat = raw_obs["robot0_eef_quat"]                 # shape (4,) quaternion
+        gripper_qpos = raw_obs["robot0_gripper_qpos"]     # shape (2,)
+
+        # Convert quaternion → axis-angle (3,)
+        axis_angle = quat2axisangle(quat)
+
+        # Build final state
+        state = np.concatenate(
+            (
+                pos,            # 3
+                axis_angle,     # 3
+                gripper_qpos,   # 2
+            ),
+            axis=0
+        )   # → shape (8,)
+
+        return state
+    
+    
+
 
 # # ======================================================
 # # === Dict and Goal Wrappers
@@ -523,39 +645,81 @@ def save_all_task_language_embeddings(cfg=None, output_path="libero_language_emb
     print(f"✅ Saved {len(task_embeddings)} language embeddings to {output_path}")
     return task_embeddings
 
+def grab_language(x):
+    if x[0].isupper():  # LIBERO-100
+        if "SCENE10" in x:
+            language = " ".join(x[x.find("SCENE") + 8 :].split("_"))
+        else:
+            language = " ".join(x[x.find("SCENE") + 7 :].split("_"))
+    else:
+        language = " ".join(x.split("_"))
+    # en = language.find(".bddl")
+    # print(language)
+    return language
+
+
 def main():
-    # import time
+    import time
 
-    # print("Initializing LIBERO environment...")
-    # env = get_libero_env(goal_conditioned=False)
+    print("Initializing LIBERO environment...")
+    env = get_libero_env(goal_conditioned=False, is_pi=True,task_name="put the yellow and white mug in the microwave and close it" ) #task_name="put the yellow and white mug in the microwave and close it"
 
-    # print("Resetting environment...")
-    # obs = env.reset()
-    # print("Initial observation keys:", obs.keys())
-    # for k, v in obs.items():
-    #     print(f"  {k}: shape={np.array(v).shape}, dtype={np.array(v).dtype}")
+    print("Resetting environment...")
+    obs = env.reset()
+    print("Initial observation keys:", obs.keys())
+    for k, v in obs.items():
+        print(f"  {k}: shape={np.array(v).shape}, dtype={np.array(v).dtype}")
 
-    # num_steps = 10
-    # print(f"\nRunning {num_steps} random steps...")
-    # done = False
-    # step = 0
-    # while not done:
-    #     action = env.action_space.sample()
-    #     next_obs, reward, done, info = env.step(action)
-    #     print(f"Step {step+1}: reward={reward:.3f}, done={done}")
+    num_steps = 10
+    print(f"\nRunning {num_steps} random steps...")
+    done = False
+    step = 0
+    while not done:
+        action = env.action_space.sample()
+        next_obs, reward, done, info = env.step(action)
+        print(f"Step {step+1}: reward={reward:.3f}, done={done}")
 
-    #     # Show image sizes for quick sanity check
-    #     if step == 0:
-    #         print("Image0 shape:", np.array(next_obs['image']).shape)
-    #         print("Image1 shape:", np.array(next_obs['images1']).shape)
-    #         print("Proprio shape:", np.array(next_obs['proprio']).shape)
+        # Show image sizes for quick sanity check
+        if step == 0:
+            print("Image0 shape:", np.array(next_obs['image']).shape)
+            print("Image1 shape:", np.array(next_obs['wrist_image']).shape)
+            print("Proprio shape:", np.array(next_obs['proprio']).shape)
+            print("Language: ", next_obs["prompt"])
+            print("Language type: ", type(next_obs["prompt"]))
+            # save_image_tensor_as_png(np.array(next_obs['image']), "sim_base_img_1.png")
+            # exit()
+            break
 
-    #     if done:
-    #         break
-    #     step += 1
-    #     time.sleep(0.1)
-    save_all_task_language_embeddings()
-    
+        # if done:
+        #     break
+        step += 1
+        time.sleep(0.1)
+    env.reset()
+    while not done:
+        action = env.action_space.sample()
+        next_obs, reward, done, info = env.step(action)
+        print(f"Step {step+1}: reward={reward:.3f}, done={done}")
+
+        # Show image sizes for quick sanity check
+        if step == 0:
+            print("Image0 shape:", np.array(next_obs['image']).shape)
+            print("Image1 shape:", np.array(next_obs['wrist_image']).shape)
+            print("Proprio shape:", np.array(next_obs['proprio']).shape)
+            print("Language: ", next_obs["prompt"])
+            print("Language type: ", type(next_obs["prompt"]))
+            break
+
+        # if done:
+        #     break
+        step += 1
+        time.sleep(0.1)
+    # save_all_task_language_embeddings()
+    # benchmark_dict = benchmark.get_benchmark_dict()
+    # suite = benchmark_dict["libero_10"]()
+    # print(suite.get_task_names())
+    # lang = suite.get_task_names()
+    # lang = [grab_language(i) for i in lang]
+    # print(lang)
 
 
 if __name__ == "__main__":
