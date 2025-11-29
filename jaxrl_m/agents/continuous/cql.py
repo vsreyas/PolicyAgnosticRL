@@ -67,6 +67,8 @@ class ContinuousCQLAgent(SACAgent):
         **kwargs,
     ):
         rng, sample_rng = jax.random.split(rng)
+        # print("Forward policy called")
+        # print("obs keys: ", obs.keys())
         action_dist = self.forward_policy(
             obs, rng, grad_params=grad_params, train=True, **kwargs
         )
@@ -80,6 +82,7 @@ class ContinuousCQLAgent(SACAgent):
             log_pi = jnp.transpose(log_pi, (1, 0))  # (batch, repeat)
         else:
             new_actions, log_pi = action_dist.sample_and_log_prob(seed=sample_rng)
+        # print("forward policy call ended")
         return new_actions, log_pi
 
     def _get_cql_q_diff(
@@ -93,6 +96,8 @@ class ContinuousCQLAgent(SACAgent):
             "use_calql": float(self.config["use_calql"]),
         }
         batch_size = batch["rewards"].shape[0]
+        # print("get_cql_q_difference: ")
+        # print(self._include_goals_in_obs(batch, "observations").keys())
         q_pred = self.forward_critic(
             self._include_goals_in_obs(batch, "observations"),
             batch["actions"],
@@ -121,6 +126,7 @@ class ContinuousCQLAgent(SACAgent):
 
         rng, current_a_rng, next_a_rng = jax.random.split(rng, 3)
         if not self.config["only_use_next_actions_for_cql"]:
+            # print("get_cql_q_difference: 2")
             cql_current_actions, cql_current_log_pis = self.forward_policy_and_sample(
                 self._include_goals_in_obs(batch, "observations"),
                 current_a_rng,
@@ -132,6 +138,7 @@ class ContinuousCQLAgent(SACAgent):
         else:
             cql_current_actions = None
             cql_current_log_pis = None
+        # print("get_cql_q_difference_3: ")
 
         cql_next_actions, cql_next_log_pis = self.forward_policy_and_sample(
             self._include_goals_in_obs(batch, "next_observations"),
@@ -157,6 +164,8 @@ class ContinuousCQLAgent(SACAgent):
             )
 
         """q values of randomly sampled actions"""
+        # print("get_cql_q_difference_4: ")
+        # print(self._include_goals_in_obs(batch, "observations").keys())
         rng, q_rng = jax.random.split(rng)
         cql_q_samples = self.forward_critic(
             self._include_goals_in_obs(batch, "observations"),
@@ -312,12 +321,14 @@ class ContinuousCQLAgent(SACAgent):
             if self.config["cql_max_target_backup"]
             else None
         )
+        # print("compute next actions called")
         next_actions, next_actions_log_probs = self.forward_policy_and_sample(
             self._include_goals_in_obs(batch, "next_observations"),
             rng,
             repeat=sample_n_actions,
             **kwargs,
         )
+        # print("compute next actions ended")
         return next_actions, next_actions_log_probs
 
     @overrides
@@ -347,6 +358,7 @@ class ContinuousCQLAgent(SACAgent):
     @overrides
     def critic_loss_fn(self, batch, params: Params, rng: PRNGKey):
         """add CQL loss on top of SAC loss"""
+        # print("critic loss function:", batch.keys())
         if self.config["use_td_loss"]:
             td_loss, td_loss_info = SACAgent.critic_loss_fn(self, batch, params, rng)
         else:
@@ -449,6 +461,7 @@ class ContinuousCQLAgent(SACAgent):
         encoder_def: nn.Module,
         shared_encoder: bool = False,
         use_proprio: bool = False,
+        use_wrist_view: bool = False, 
         proprioceptive_dims: Optional[int] = None,
         enable_stacking: bool = False,
         stop_actor_encoder_gradient: bool = False,
@@ -488,6 +501,7 @@ class ContinuousCQLAgent(SACAgent):
         create_encoder_fn = partial(
             cls._create_encoder_def,
             use_proprio=use_proprio,
+            use_wrist_view=use_wrist_view,
             proprioceptive_dims=proprioceptive_dims,
             enable_stacking=enable_stacking,
             goal_conditioned=config.goal_conditioned,

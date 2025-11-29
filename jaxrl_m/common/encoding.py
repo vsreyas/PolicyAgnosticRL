@@ -60,6 +60,68 @@ class EncodingWrapper(nn.Module):
         return encoding
 
 
+class DualEncodingWrapper(nn.Module):
+    """
+    Encodes observations into a single flat encoding, adding additional
+    functionality for adding proprioception and stopping the gradient.
+
+    Args:
+        encoder: The encoder network.
+        use_proprio: Whether to concatenate proprioception (after encoding).
+        stop_gradient: Whether to stop the gradient after the encoder.
+    """
+
+    encoder: nn.Module
+    use_proprio: bool
+    stop_gradient: bool
+    proprioceptive_dims: Optional[int] = None
+    enable_stacking: bool = False
+
+    def __call__(
+        self, observations: Dict[str, jnp.ndarray], train: bool
+    ) -> jnp.ndarray:
+        # import pdb; pdb.set_trace()
+        if (
+            isinstance(observations, flax.core.FrozenDict)
+            or isinstance(observations, dict)
+            and ("image" in observations or "encoding" in observations)
+        ):
+            if "encoding" in observations:
+                return observations["encoding"]
+            img1 = observations["image"]
+            img2 = observations["wrist_image"]
+            if self.enable_stacking:
+                # Combine stacking and channels into a single dimension
+                if len(obs.shape) == 4:
+                    img1 = rearrange(img1, "T H W C -> H W (T C)")
+                    img2 = rearrange(img2, "T H W C -> H W (T C)")
+                if len(obs.shape) == 5:
+                    img1 = rearrange(img1, "B T H W C -> B H W (T C)")
+                    img2 = rearrange(img2, "B T H W C -> B H W (T C)")
+
+        else:
+            obs = observations
+        
+        B = img1.shape[0]
+        imgs_cat = jnp.concatenate([img1, img2], axis=0)
+        enc = self.encoder(imgs_cat, train=train)
+
+        enc1 = enc[:B]
+        enc2 = enc[B:]
+
+        encoding = jnp.concatenate([enc1, enc2], axis=-1)
+
+        if self.use_proprio:
+            proprio = observations["proprio"]
+            if self.proprioceptive_dims is not None:
+                # proprio = proprio[..., -self.proprioceptive_dims :]
+                proprio = proprio[..., : self.proprioceptive_dims :]
+            encoding = jnp.concatenate([encoding, proprio], axis=-1)
+        if self.stop_gradient:
+            encoding = jax.lax.stop_gradient(encoding)
+        return encoding
+
+
 class GCEncodingWrapper(nn.Module):
     """
     Encodes observations and goals into a single flat encoding. Handles all the
