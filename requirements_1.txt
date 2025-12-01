@@ -109,7 +109,6 @@ jsonschema==4.25.1
 jsonschema-specifications==2025.9.1
 jupyter_core==5.9.1
 jupytext==1.18.1
-keras==2.15.0
 kiwisolver==1.4.9
 labmaze==1.0.6
 lerobot @ git+https://github.com/huggingface/lerobot@0cf864870cf29f4738d3ade893e6fd13fbd7cdb5
@@ -202,7 +201,7 @@ pynput==1.8.1
 PyOpenGL==3.1.10
 PyOpenGL-accelerate==3.1.10
 pyparsing==3.2.5
-pyrender==0.1.45
+pyrender @ git+https://github.com/mmatl/pyrender.git
 pyserial==3.5
 PySocks==1.7.1
 pytest==9.0.0
@@ -216,7 +215,6 @@ referencing==0.37.0
 regex==2025.11.3
 requests==2.32.5
 requests-oauthlib==2.0.0
-rerun-sdk==0.26.2
 rich==14.2.0
 robomimic==0.2.0
 robosuite==1.4.1
@@ -237,10 +235,6 @@ sympy==1.14.0
 tensorboard==2.15.2
 tensorboard-data-server==0.7.2
 tensorboardX==2.6.4
-tensorflow==2.15.0
-tensorflow-estimator==2.15.0
-tensorflow-io-gcs-filesystem==0.37.1
-tensorflow-probability==0.23.0
 tensorstore==0.1.78
 termcolor==3.2.0
 thop==0.1.1.post2209072238

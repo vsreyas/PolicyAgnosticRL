@@ -554,6 +554,7 @@ def add_base_policy_actions_to_batch(
     add_to_next_observations: bool = False,
     manual_cache_dir: Optional[str] = None,
 ) -> Batch:
+    # LOG: Samples actions from base policy for batch["observations"] states #
     observation_keys = ["observations"]
     if add_to_next_observations:
         observation_keys.append("next_observations")

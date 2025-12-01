@@ -403,6 +403,10 @@ def get_policy_fn(
                 argmax=False,
                 **kwargs,
             )
+        # LOG: `observations` statistics #
+
+        # LOG: `batched_observations` statistics #
+        breakpoint()
 
         if "ddpm" in FLAGS.config.agent:
 
@@ -530,6 +534,7 @@ def train_agent(_):
     config.exp_name = FLAGS.wandb_experiment_name
     config.overwrite = True
 
+    # LOG: WANDB setup #
     if FLAGS.wandb_project_name is not None:
         wandb_config = WandBLogger.get_default_config()
         wandb_config.update(
@@ -561,6 +566,8 @@ def train_agent(_):
             os.path.abspath(FLAGS.config.save_dir),
         )
         config.wandb_enabled = False
+
+    # breakpoint()
 
     # Create environment and dataset
     action_space = None
@@ -689,11 +696,15 @@ def train_agent(_):
             get_libero_tfrecord_dataset,
         )
 
+        # LOG: Data stored in hf_cache on babel, can access on common path; Loads for example, 'libero_10' path as tf_records #
+        # LOG: `dataset` will store the offline dataset to train on #
+        # Iterates over to yield a dict with bunch of keys which can include observations, actions, rewards, masks, next_observations, etc. #
         dataset = get_libero_tfrecord_dataset(
             tfrecord_regexp=FLAGS.config.libero_tfrecord_regexp, use_wrist_view=FLAGS.use_wrist_view, 
             use_language=FLAGS.use_lang, env_name=FLAGS.environment_name, config=config, is_pi=True, **FLAGS.config.dataset_kwargs,
             task_name=FLAGS.task_name,
         )
+        # breakpoint()
         libero_config = get_libero_config()
 
         train_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
@@ -718,7 +729,10 @@ def train_agent(_):
         action_space = train_env.action_space
     assert action_space.high.ndim == 1, action_space.shape
     # Create replay buffer
+    # LOG: Libero comes under this for now #
     if FLAGS.config.image_observations:
+        # LOG: Create directory to store the image replay buffer #
+        # LOG: Loaded later on from this directory for the online trajectories collected #
         tf.io.gfile.makedirs(tf.io.gfile.join(save_dir, "image_replay_buffer"))
         if FLAGS.train_on_separate_computer_mode != "agent_training_only":
             assert not tf.io.gfile.exists(
@@ -743,10 +757,12 @@ def train_agent(_):
     sharding = jax.sharding.PositionalSharding(devices)
 
     # Create data iterators
+    # LOG: Offline dataset #
     offline_train_iterator_for_critic = dataset.iterator(
         batch_size=FLAGS.config.agent_kwargs.batch_size
     )
     offline_train_iterator_for_base_policy = None
+    # Online dataset/buffer #
     # Online iterators will be set when switching to online training.
     online_train_iterator_for_critic = None
     online_train_iterator_for_base_policy = None
@@ -778,6 +794,8 @@ def train_agent(_):
             )
 
         rng, construct_rng = jax.random.split(rng)
+        # LOG: Create base policy agent like Pi0 model, need dataset iterator for `example_batch` and jitting #
+        # LOG: Need `observations` and `actions` for the base policy agent input for forward pass #
         base_policy_agent = get_base_policy_agent(
             base_policy_type=base_policy_type,
             rng=construct_rng,
@@ -799,7 +817,12 @@ def train_agent(_):
             ),
         )
 
+    # breakpoint()
+
     example_batch = next(offline_train_iterator_for_critic)
+    # LOG: `example_batch` statistics #
+    breakpoint()
+
     # if "ddpm" in FLAGS.config.agent:
     #     example_batch = add_empty_observation_history_axis_to_batch(example_batch)
 
@@ -856,9 +879,7 @@ def train_agent(_):
 
     is_transformer_agent = FLAGS.config.agent in ["auto_regressive_transformer"]
 
-    
-
-
+    # LOG: Load the agent, Pi0 model is constructed here #
     agent = agents[FLAGS.config.agent](
         rng=construct_rng,
         config=config
@@ -907,7 +928,13 @@ def train_agent(_):
         max_traj_length=FLAGS.config.get("max_episode_steps", 1000),
     )
 
+    # LOG: `eval_policy_fn` #
+
+    # LOG: `data_collection_trajectory_sampler` #
+    breakpoint()
+
     def calc_mc_return_fn(rewards, masks):
+        breakpoint()
         return calc_return_to_go(
             rewards,
             masks,
@@ -926,7 +953,8 @@ def train_agent(_):
         range(FLAGS.num_offline_epochs + FLAGS.num_online_epochs + 1), desc="Epoch"
     ):
         timer.tick("total")
-
+        
+        # LOG: If not true, the simply update critic using offline data #
         if i >= FLAGS.num_offline_epochs and FLAGS.num_online_epochs > 0:
             num_trajectories_to_collect = FLAGS.num_online_trajectories_per_epoch
             if i == FLAGS.num_offline_epochs:
@@ -966,10 +994,12 @@ def train_agent(_):
 
                 num_trajectories_to_collect = FLAGS.num_warmup_trajectories
 
-            if FLAGS.train_on_separate_computer_mode == "agent_training_only":
+            if FLAGS.train_on_separate_computer_mode == "agent_training_only": # LOG: Looks like this setting is for real robot training #
                 # Don't collect if mode is agent_training_only
                 num_trajectories_to_collect = 0
 
+            # LOG: Sample trajectories from the environment using the policy function #
+            # LOG: To to this using the same abstraction for image buffer loading, dump all data offline to disk as tf_records and load them back as an ImageReplayBuffer #
             trajectories = []
             for traj_index in range(num_trajectories_to_collect):
                 traj = data_collection_trajectory_sampler.sample(
@@ -982,6 +1012,8 @@ def train_agent(_):
                         "early_terminate_on_success", False
                     ),
                 )[0]
+                # LOG: `traj` statistics #
+                breakpoint()
                 trajectories.append(traj)
 
                 if FLAGS.config.image_observations:
@@ -996,8 +1028,11 @@ def train_agent(_):
                     )
                 online_trajectories_added += 1
                 online_env_steps_this_epoch += len(traj["rewards"])
+            # LOG: `trajectories` now contains online trajectories #
 
             # Finished collecting trajectories
+            # LOG: Construct buffers using the trajectories #
+            # LOG: Looks like two iterators are constructed, one for online trajectories and `dataset` from previous definition, for offline dataset #
             online_env_steps += online_env_steps_this_epoch
             if FLAGS.config.image_observations:
                 # Recreate the image replay buffer iterator to include the new trajectories
@@ -1011,6 +1046,7 @@ def train_agent(_):
                     train=True,
                     **FLAGS.config.image_replay_buffer_kwargs,
                 )
+                # LOG: online dataset iterator separately for critic and base policy #
                 online_train_iterator_for_critic = image_replay_buffer.iterator(
                     batch_size=FLAGS.config.batch_size
                     - int(FLAGS.config.batch_size * FLAGS.config.mixing_ratio),
@@ -1026,6 +1062,7 @@ def train_agent(_):
                 timer.tock("recreate_image_replay_buffer_iterator")
 
             # Get trajectory statistics
+            # LOG: Log some statistics for the collected trajectories #
             mean_trajectory_return = np.mean(
                 [np.sum(t["rewards"]) for t in trajectories]
             )
@@ -1045,6 +1082,7 @@ def train_agent(_):
             )
 
         """Base policy distillation"""
+        # LOG: Update base policy using `optimized` actions #
         if (
             base_policy_agent is not None
             and FLAGS.train_on_separate_computer_mode != "env_steps_only"
@@ -1100,6 +1138,8 @@ def train_agent(_):
                 batch["actions"] = np.clip(
                     batch["actions"], action_space.low, action_space.high
                 )
+                # LOG: `batch` statistics #
+                breakpoint()
 
                 batch = shard_batch(batch, sharding)
                 if FLAGS.config.improve_base_policy_actions_with_global_search:

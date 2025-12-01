@@ -253,6 +253,8 @@ class ImageReplayBufferPi:
         # tf.print("state tf shape: ", tf.shape(state_tf))
         actions_tf = parsed_tensors["actions"]
         image_tf = [parsed_tensors["observations/images0"][:-1], parsed_tensors['observations/images1'][:-1]]
+
+        breakpoint()
         
         
         ah = self.config.model.action_horizon

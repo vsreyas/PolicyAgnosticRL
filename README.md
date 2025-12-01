@@ -3,11 +3,41 @@
 Jax codebase for [Policy Agnostic RL: Offline RL and Online RL Fine-Tuning of Any Policy Class and Backbone](https://arxiv.org/abs/2412.06685).
 
 ## Environment
+
+### Clean Setup on Babel
 ```
 conda create -n parl python=3.11
 conda activate parl
-pip install -e .
-pip install -r requirements.txt
+pip install uv
+uv pip install -e .
+uv pip install -r requirements_og.txt
+
+# Install libero from parl branch
+git clone https://github.com/vsreyas/LIBERO.git
+git checkout parl
+uv pip install -r requirements.txt
+uv pip install -e .
+
+# Install openpi from parl branch
+git clone https://github.com/vsreyas/openpi.git
+git checkout parl
+# Remove "rerun-sdk==0.26.2"
+GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
+uv pip install "augmax>=0.3.4"
+uv pip install torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0 --extra-index-url https://download.pytorch.org/whl/cu113
+```
+
+```
+pip install "opencv-python-headless==4.10.0.84"
+
+```
+
+```
+conda create -n parl python=3.11
+conda activate parl
+pip install uv
+uv pip install -e .
+uv pip install -r requirements.txt
 ```
 
 If you run into GL/glew.h: No such file or directory, run this:

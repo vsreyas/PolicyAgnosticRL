@@ -34,7 +34,7 @@ camera_heights: 224
 # -----------------------------
 save_dir: /data/hf_cache/datasets/LIBERO/robosuite_temp_dir # logs & outputs
 record: true                                    # record rendered videos
-libero_path: /home/sreyasv/Projects/PolicyAgnosticRL/LIBERO               # root LIBERO source path (for bddl, init files)
+libero_path: /home/skowshik/vla/codebase/envs/LIBERO               # root LIBERO source path (for bddl, init files)
 
 return_state: false
 from_pixels: true

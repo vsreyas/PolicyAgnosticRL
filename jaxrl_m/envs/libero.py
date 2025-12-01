@@ -404,6 +404,7 @@ class LiberoEnvWrapper(gym.Wrapper):
         self.suite = suite
         self.fixed_task = fixed_task
         self.is_pi = is_pi
+        # LOG: Dynamically change the language key or use pre-computed language embeddings for each task #
         if is_pi:
             self.lang_key = "prompt"
             lang_space = Text(
