@@ -17,7 +17,7 @@ from jaxrl_m.common.common import (
 )
 from jaxrl_m.common.typing import Batch
 from jaxrl_m.utils.timer_utils import Timer
-
+from jaxrl_m.utils.train_utils import preprocess_action, repack_action
 LocalOptimizationState = namedtuple(
     "LocalOptimizationState",
     [
@@ -572,15 +572,88 @@ def add_base_policy_actions_to_batch(
         if not isinstance(batch[observation_key], dict):
             batch[observation_key] = {"state": batch[observation_key]}
         assert "base_policy_actions" not in batch[observation_key]
-        batch[observation_key]["base_policy_actions"] = (
-            base_policy_agent.sample_actions(
-                # Add empty observation history axis
-                jax.tree_map(lambda x: x[:, None], batch[observation_key]),
-                repeat=num_base_policy_actions,
-                cache_dir=cache_dir,
-                timer=timer,
-                seed=seed,
+        if base_policy_type != BasePolicyTypes.Pi0:
+            obs = jax.tree_map(lambda x: x[:, None], batch[observation_key])
+            batch[observation_key]["base_policy_actions"] = (
+                base_policy_agent.sample_actions(
+                    # Add empty observation history axis
+                    obs, 
+                    repeat=num_base_policy_actions,
+                    cache_dir=cache_dir,
+                    timer=timer,
+                    seed=seed,
+                    processed_obs= True, 
+                    normalized=True,
+                )
             )
-        )
+        else:
+            obs = convert_to_openpi_format(batch, obs_key=observation_key)
+            batch[observation_key]["base_policy_actions"] = (
+                base_policy_agent.sample_actions(
+                    # Add empty observation history axis
+                    obs, 
+                    repeat=num_base_policy_actions,
+                    cache_dir=cache_dir,
+                    timer=timer,
+                    seed=seed,
+                    processed_obs= True, 
+                    normalized=True,
+                )
+            )
+            actions = batch[observation_key]["base_policy_actions"]
+            B, R, H, D = actions.shape
+            actions = actions.reshape(B*R, H, D)
+            actions = preprocess_action(actions)
+            actions = actions.reshape(B,R,actions.shape[-1])
+            batch[observation_key]["base_policy_actions"] = actions
+            # print(batch.keys())
 
     return batch
+
+def convert_to_openpi_format(out_new, obs_key):
+        """
+        Converts your NEW nested output format into the OLD OpenPI-style format.
+        No copies are made — only dict references.
+        """
+
+        old = {}
+
+        # ------------------------------------------------
+        # 1. State & Actions
+        # ------------------------------------------------
+        old["state"] = out_new[obs_key]["proprio"]
+
+        # ------------------------------------------------
+        # 2. Images (map new → old)
+        # ------------------------------------------------
+        # new camera names → old camera names
+        CAM_REVERSE = {
+            "image": "base_0_rgb",
+            "wrist_image": "left_wrist_0_rgb",
+            "image_3": "right_wrist_0_rgb",
+        }
+
+        old["image"] = {
+            oldname: out_new[obs_key][newname]
+            for newname, oldname in CAM_REVERSE.items()
+        }
+
+        # ------------------------------------------------
+        # 3. Image Masks
+        # ------------------------------------------------
+        old["image_mask"] = {
+            oldname: out_new[obs_key+"_image_mask"][newname]
+            for newname, oldname in CAM_REVERSE.items()
+        }
+
+        # ------------------------------------------------
+        # 4. Token fields
+        # ------------------------------------------------
+        old["tokenized_prompt"]      = out_new["tokenized_prompt"]
+        old["tokenized_prompt_mask"] = out_new["tokenized_prompt_mask"]
+        # if not "pi05" in self.config.name:
+        #     old["token_ar_mask"]         = out_new["token_ar_mask"]
+        #     old["token_loss_mask"]       = out_new["token_loss_mask"]
+        return old
+
+

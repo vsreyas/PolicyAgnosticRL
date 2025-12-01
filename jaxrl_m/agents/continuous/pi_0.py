@@ -26,6 +26,8 @@ import openpi.transforms as _transforms
 from openpi.training.config import TrainConfig, DataConfig
 import openpi.models.model as _model
 from openpi.training.data_loader import DataLoader
+from typing import Callable
+
 
 from jaxrl_m.common.typing import Batch, Data, PRNGKey
 import logging
@@ -105,21 +107,22 @@ class PiPolicy(BasePolicy):
             ),
             donate_argnums=(1,),
         )
+        self.model_def = self.train_state.model_def  # static graphdef
+        self.params_sharding = self.train_state_sharding.params 
+        # def _infer(params, observation, rng):
+        #     model = nnx.merge(self.model_def, params)
+        #     model.eval()
+        #     return model.sample_actions(rng, observation)
 
-        def _infer(state, observation, rng):
-            model = nnx.merge(state.model_def, state.params)
-            model.eval()
-            return model.sample_actions(rng, observation)
-
-        self._pinfer = jax.jit(
-            _infer,
-            in_shardings=(
-                self.train_state_sharding,   # state
-                None,    # observation
-                self.replicated_sharding,    # rng
-            ),
-            out_shardings=self.replicated_sharding,
-        )
+        # self._pinfer = jax.jit(
+        #     _infer,
+        #     in_shardings=(
+        #         self.params_sharding,   # state
+        #         None,    # observation
+        #         self.replicated_sharding,    # rng
+        #     ),
+        #     out_shardings=self.replicated_sharding,
+        # )
 
 
         # Data configs, setup and utils
@@ -140,6 +143,14 @@ class PiPolicy(BasePolicy):
         self.output_data_transforms = _transforms.compose(self.output_data_transforms)
 
         self.data_loader_dummy = Dummy_Dataloader(self.data_config)
+        self.output_data_transforms_without_unnorm = [
+            *self.data_config.model_transforms.outputs,
+            *self.data_config.data_transforms.outputs,
+            *self.data_config.repack_transforms.outputs,
+        ]
+        self.output_data_transforms_without_unnorm = _transforms.compose(self.output_data_transforms_without_unnorm)
+        self.unnormalize = _transforms.Unnormalize(self.data_norm_stats, use_quantiles=self.data_config.use_quantile_norm)
+        self._infer_cache: dict[int, Callable] = {}
 
 
 
@@ -147,30 +158,53 @@ class PiPolicy(BasePolicy):
     # INFERENCE
     # ------------------------------------------------------------------------------------
     def sample_actions(self, observations: Data, repeat=1, cache_dir=None, timer=None, argmax=False, 
-                       processed_obs=False, **kwargs):
+                       processed_obs=False, normalized=False, return_obs= False, **kwargs):
         with sharding.set_mesh(self.mesh):
             if not processed_obs:
                 observations = self.convert_to_openpi_format_infer(observations)
                 obs = self.input_data_transforms(observations)
             else:
                 obs = observations
+
+            if repeat > 1:
+                obs = repeat_tree(obs, repeat)
+                obs = flatten_repeat(obs)  
             outputs = {
                 "state": obs["state"],
                 }
+            
+            batch_size = obs['state'].shape[0]
             seed = kwargs.pop("seed")
-            obs = _model.Observation.from_dict(obs)
-            actions = self._pinfer(self.train_state, obs, seed)
+            obs_ = _model.Observation.from_dict(obs)
+            if batch_size not in self._infer_cache:
+                # First time seeing this batch size → compile JIT
+                self._infer_cache[batch_size] = self._build_infer_jit()
+
+            infer_fn = self._infer_cache[batch_size]
+            actions = infer_fn(self.train_state.params, obs_, seed)
+            # actions = self._pinfer(self.train_state.params, obs, seed)
+
             outputs["actions"] = actions
+            # print("actions shape: ", actions.shape)
             outputs = jax.tree.map(lambda x: np.asarray(x), outputs)
-            outputs = self.output_data_transforms(outputs)
-            if outputs['actions'].shape[0] == 1:
+            if normalized:
+                outputs = self.output_data_transforms_without_unnorm(outputs)
+            else:
+                outputs = self.output_data_transforms(outputs)
+            if repeat > 1:
+                outputs = unflatten_repeat(outputs,repeat)
+
+            if outputs['actions'].shape[0] == 1 and repeat==1:
                 outputs['actions'] = outputs['actions'][0]
+            # print("final actions shape: ", outputs['actions'].shape)
+            if return_obs:
+                return outputs['actions'], obs
             return outputs['actions']
 
     # ------------------------------------------------------------------------------------
     # TRAINING (supervised updates)
     # ------------------------------------------------------------------------------------
-    def update(self, batch: Batch):
+    def update(self, batch: Batch, timer=None):
         with sharding.set_mesh(self.mesh):
             batch = self.convert_to_openpi_format(batch)
             batch = (_model.Observation.from_dict(batch), batch["actions"])
@@ -178,6 +212,31 @@ class PiPolicy(BasePolicy):
                 self.train_rng, self.train_state, batch
             )
         return info
+
+    def _build_infer_jit(self):
+        """
+        Build and JIT-compile an inference function specialized to `obs_example`'s batch size.
+        """
+
+        # This is the core inference function
+        def _infer(params, observation, rng):
+            model = nnx.merge(self.model_def, params)
+            model.eval()
+            return model.sample_actions(rng, observation)
+
+
+        compiled = jax.jit(
+            _infer,
+            in_shardings=(
+                self.params_sharding,      # params
+                None, 
+                self.replicated_sharding,  # rng
+            ),
+            out_shardings=self.replicated_sharding,
+        )
+
+        return compiled
+
 
     # ------------------------------------------------------------------------------------
     # CHECKPOINTING — directly use OpenPI
@@ -469,11 +528,52 @@ class PiPolicy(BasePolicy):
         # ------------------------------------------------------------
         raise TypeError(f"Unsupported prompt type: {type(prompt)}")
     
+def repeat_tree(tree, repeat: int):
+    """
+    Repeat every array in a PyTree along a new repeat dimension.
+    Input:  (B, ...)
+    Output: (B, repeat, ...)
+    Works for both np.ndarray and jnp.ndarray.
+    Preserves the original array type.
+    """
+    def _repeat(x):
+        if isinstance(x, (np.ndarray, jnp.ndarray)):
+            # x: (B, ...)
+            # x[:, None, ...] → (B, 1, ...)
+            # tile/repeat along axis=1
+            return x[:, None, ...].repeat(repeat, axis=1)
+        return x
+
+    return jax.tree.map(_repeat, tree)
+
+def flatten_repeat(tree):
+    """
+    Convert a PyTree from (B, repeat, ...) → (B*repeat, ...)
+    Works for both np.ndarray and jnp.ndarray.
+    Preserves the original array type.
+    """
+    def _flatten(x):
+        if isinstance(x, (np.ndarray, jnp.ndarray)):
+            B, R = x.shape[:2]
+            return x.reshape((B * R,) + x.shape[2:])
+        return x
+
+    return jax.tree.map(_flatten, tree)
 
 
+def unflatten_repeat(tree, repeat: int):
+    """
+    Convert PyTree from (B*repeat, ...) → (B, repeat, ...)
+    Works for both jnp.ndarray and np.ndarray.
+    """
+    def _unflatten(x):
+        # Handle arrays from both JAX and NumPy
+        if hasattr(x, "shape") and x.shape is not None and len(x.shape) >= 1:
+            BR = x.shape[0]
+            assert BR % repeat == 0, f"{BR} not divisible by repeat {repeat}"
+            B = BR // repeat
+            return x.reshape((B, repeat) + x.shape[1:])
+        return x
 
-        
-
-
-
+    return jax.tree.map(_unflatten, tree)
 

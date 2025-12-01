@@ -11,7 +11,7 @@ import jax
 import jax.numpy as jnp
 
 from jaxrl_m.common.common import JaxRLTrainState, ModuleDict, nonpytree_field
-from jaxrl_m.common.encoding import EncodingWrapper, GCEncodingWrapper, MultiViewLCEncodingWrapper, MultiViewSingleLCEncodingWrapper, LCEncodingWrapperM
+from jaxrl_m.common.encoding import EncodingWrapper, GCEncodingWrapper, MultiViewLCEncodingWrapper, MultiViewSingleLCEncodingWrapper, LCEncodingWrapperM, DualEncodingWrapper
 from jaxrl_m.common.optimizers import make_optimizer
 from jaxrl_m.common.typing import Batch, Data, Params, PRNGKey
 from jaxrl_m.networks.actor_critic_nets import (
@@ -92,6 +92,7 @@ class SACAgent(flax.struct.PyTreeNode):
         Forward pass for critic network.
         Pass grad_params to use non-default parameters (e.g. for gradients).
         """
+        # print(observations)
         if train:
             assert rng is not None, "Must specify rng when training"
         if jnp.ndim(actions) == 3:
@@ -156,6 +157,8 @@ class SACAgent(flax.struct.PyTreeNode):
         Forward pass for policy network.
         Pass grad_params to use non-default parameters (e.g. for gradients).
         """
+        # print("forward policy called ")
+        # print(observations.keys())
         if train:
             assert rng is not None, "Must specify rng when training"
         return self.state.apply_fn(
@@ -229,12 +232,13 @@ class SACAgent(flax.struct.PyTreeNode):
         # (batch_size, ) for sac, (batch_size, cql_n_actions) for cql
 
         # Evaluate next Qs for all ensemble members (cheap because we're only doing the forward pass)
+        # print("forward target critic called")
         target_next_qs = self.forward_target_critic(
             self._include_goals_in_obs(batch, "next_observations"),
             next_actions,
             rng=rng,
         )  # (critic_ensemble_size, batch_size)
-
+        # print("forward target critic ended")
         # Subsample if requested
         if self.config["critic_subsample_size"] is not None:
             rng, subsample_key = jax.random.split(rng)
@@ -271,7 +275,7 @@ class SACAgent(flax.struct.PyTreeNode):
         if self.config.get("max_q_target", None) is not None:
             assert not self.config["distributional_critic"]
             target_q = jnp.minimum(target_q, self.config["max_q_target"])
-
+        # print("Forward critic called inside critic loss function for obs -q values")
         predicted_qs = self.forward_critic(
             self._include_goals_in_obs(batch, "observations"),
             batch["actions"],
@@ -279,6 +283,7 @@ class SACAgent(flax.struct.PyTreeNode):
             grad_params=params,
             distributional_critic_return_logits=self.config["distributional_critic"],
         )
+        # print("Forward critic ended inside critic loss function for obs -q values")
         if self.config["distributional_critic"]:
             predicted_qs, predicted_q_logits = predicted_qs  # unpack
 
@@ -343,12 +348,13 @@ class SACAgent(flax.struct.PyTreeNode):
         temperature = self.forward_temperature()
 
         rng, policy_rng, sample_rng, critic_rng, critic_rng2 = jax.random.split(rng, 5)
+        # print("Forward policy called inside policy loss function ")
         action_distributions = self.forward_policy(
             self._include_goals_in_obs(batch, "observations"),
             rng=policy_rng,
             grad_params=params,
         )
-
+        # print("Forward policy called inside poly loss function ended")
         # Sample actions, applying trick to sample only binary actions for gripper dimension
         # actions = action_distributions.sample(seed=sample_rng)
         # last_dim_mean, last_dim_std = action_distributions.mode()[:, -1], action_distributions.stddev()[:, -1]
@@ -373,12 +379,13 @@ class SACAgent(flax.struct.PyTreeNode):
         # log_probs = action_distributions.log_prob(actions)
 
         actions, log_probs = action_distributions.sample_and_log_prob(seed=sample_rng)
-
+        # print("critic called inside policy loss function ")
         predicted_qs = self.forward_critic(
             self._include_goals_in_obs(batch, "observations"),
             actions,
             rng=critic_rng,
         )
+        # print("critic call ended")
         if self.config["policy_optimizes_ensemble_mean"]:
             predicted_q = predicted_qs.mean(axis=0)
         else:
@@ -743,6 +750,16 @@ class SACAgent(flax.struct.PyTreeNode):
                     encoder_def,
                     use_proprio=use_proprio,
                     stop_gradient=stop_gradient,
+                )
+            elif not use_lang and use_wrist_view:
+                print("intialising multi-view-encoder")
+                # breakpoint()
+                encoder_def = DualEncodingWrapper(
+                    encoder_def,
+                    use_proprio=use_proprio,
+                    proprioceptive_dims=proprioceptive_dims,
+                    stop_gradient=stop_gradient,
+                    enable_stacking=enable_stacking,
                 )
 
         return encoder_def

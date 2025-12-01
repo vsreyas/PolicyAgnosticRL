@@ -12,7 +12,7 @@ class BasePolicyTypes(Enum):
     OpenVLA = "openvla"
     DDPM = "ddpm"
     AutoRegressiveTransformer = "transformer"
-    Pi0 = 'pi-0'
+    Pi0 = 'pi0'
 
 
 class BasePolicy:

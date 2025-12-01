@@ -42,8 +42,8 @@ from jaxrl_m.data.bridge_dataset import (
     get_task_to_initial_eep,
     glob_to_path_list,
 )
-from jaxrl_m.data.image_replay_buffer import (
-    ImageReplayBuffer,
+from jaxrl_m.data.image_replay_buffer_pi import (
+    ImageReplayBufferPi,
     save_trajectory_as_tfrecord,
 )
 from jaxrl_m.data.replay_buffer import ReplayBuffer
@@ -51,6 +51,7 @@ from jaxrl_m.envs.d4rl import TruncationWrapper, get_d4rl_dataset_with_mc_calcul
 from jaxrl_m.utils.timer_utils import Timer
 from jaxrl_m.utils.train_utils import concatenate_batches, load_recorded_video
 from jaxrl_m.vision import encoders
+from jaxrl_m.utils.train_utils import preprocess_action, repack_action
 
 try:
     from jax_smi import initialise_tracking  # type: ignore
@@ -64,7 +65,7 @@ from openpi.training.config import get_config
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string("environment_name", "", "Environment name.")
-flags.DEFINE_string("wandb_project_name", None, "WandB project name.") #"PA-RL"
+flags.DEFINE_string("wandb_project_name", "PI-0.5-finetuning", "WandB project name.") #"PA-RL""debug"
 flags.DEFINE_string("wandb_experiment_name", "", "WandB experiment name.")
 flags.DEFINE_string("wandb_group", "", "WandB group.")
 config_flags.DEFINE_config_file(
@@ -80,20 +81,20 @@ config_flags.DEFINE_config_file(
     lock_config=False,
 )
 flags.DEFINE_integer("seed", 0, "Random seed.")
-flags.DEFINE_integer("num_offline_epochs", 500, "Number of epochs for pre-training.")
+flags.DEFINE_integer("num_offline_epochs", 100, "Number of epochs for pre-training.")
 flags.DEFINE_integer(
     "num_online_epochs", 500, "Number of epochs for online fine-tuning."
 )
 flags.DEFINE_integer(
-    "num_train_steps_per_offline_epoch", 1000, "Number of training steps per epoch."
+    "num_train_steps_per_offline_epoch", 500, "Number of training steps per epoch."
 )
 flags.DEFINE_float("reward_scale", 1.0, "Reward scale.")
 flags.DEFINE_float("reward_bias", 0.0, "Reward bias.")
 flags.DEFINE_float("clip_action", 0.99999, "Clip action.")
-flags.DEFINE_integer("num_parallel_envs", 2, "Number of parallel environments.")
+flags.DEFINE_integer("num_parallel_envs", 1, "Number of parallel environments.")
 flags.DEFINE_bool("debug", False, "Debug config")
 flags.DEFINE_string("resume_path", None, "Resume training from checkpoint.")
-flags.DEFINE_integer("max_episode_steps", 360, "Maximum episode steps.")
+flags.DEFINE_integer("max_episode_steps", 1000, "Maximum episode steps.")
 flags.DEFINE_string(
     "replay_buffer_path", "", "Path to replay buffer to load (Optional)."
 )
@@ -127,7 +128,7 @@ flags.DEFINE_string(
 )
 flags.DEFINE_string(
     "task_name",
-    None, 
+    "put both moka pots on the stove", 
     "Name of fixed task"
 )
 flags.DEFINE_bool(
@@ -154,9 +155,17 @@ BASE_POLICY_TYPE_TO_CLASS = {
     BasePolicyTypes.Pi0: PiPolicy
 }
 
-def shard_batch(batch, sharding):
-    return jax.tree_map(lambda x: jax.device_put(x, sharding), batch)
+devices = jax.local_devices()
+# def shard_batch(batch, sharding):
+#     return jax.tree_map(lambda x: jax.device_put(x, sharding), batch)
+def shard_batch(batch, base_sharding):
+    def shard_array(x):
+        # Build a sharding spec matching the array's rank
+        sharding_shape = (len(devices),) + (1,) * (x.ndim - 1)
+        sharding = base_sharding.reshape(sharding_shape)
+        return jax.device_put(x, sharding)
 
+    return jax.tree_map(shard_array, batch)
 
 def add_empty_observation_history_axis_to_batch(batch: Batch) -> Batch:
     """
@@ -229,26 +238,26 @@ def preprocess_batch_with_action_optimization(
         Batch after applying action optimization to the actions.
     """
 
-    assert (
-        len(batch["actions"].shape) == 3 and batch["actions"].shape[1] == 1
-    ), f"This function assumes an empty action chunking axis. Found actions with shape {batch['actions'].shape}"
+    # assert (
+    #     len(batch["actions"].shape) == 3 and batch["actions"].shape[1] == 1
+    # ), f"This function assumes an empty action chunking axis. Found actions with shape {batch['actions'].shape}"
 
-    if isinstance(batch["observations"], dict):
-        if "image" in batch["observations"]:
-            assert (
-                len(batch["observations"]["image"].shape) == 5
-                and batch["observations"]["image"].shape[1] == 1
-            ), f"This function assumes an empty observation history axis. Found images with shape {batch['observations']['image'].shape}"
-        else:
-            assert (
-                batch["observations"]["state"].ndim == 3
-                and batch["observations"]["state"].shape[1] == 1
-            ), f"This function assumes an empty observation history axis. Found states with shape {batch['observations']['state'].shape}"
-    else:
-        assert (
-            len(batch["observations"].shape) == 3
-            and batch["observations"].shape[1] == 1
-        ), f"This function assumes an empty observation history axis. Found observations with shape {batch['observations'].shape}"
+    # if isinstance(batch["observations"], dict):
+    #     if "image" in batch["observations"]:
+    #         assert (
+    #             len(batch["observations"]["image"].shape) == 5
+    #             and batch["observations"]["image"].shape[1] == 1
+    #         ), f"This function assumes an empty observation history axis. Found images with shape {batch['observations']['image'].shape}"
+    #     else:
+    #         assert (
+    #             batch["observations"]["state"].ndim == 3
+    #             and batch["observations"]["state"].shape[1] == 1
+    #         ), f"This function assumes an empty observation history axis. Found states with shape {batch['observations']['state'].shape}"
+    # else:
+    #     assert (
+    #         len(batch["observations"].shape) == 3
+    #         and batch["observations"].shape[1] == 1
+    #     ), f"This function assumes an empty observation history axis. Found observations with shape {batch['observations'].shape}"
 
     # Unbatch the dataset
     # batch = unbatch_observation_history_axis(batch)
@@ -322,52 +331,33 @@ def get_robot_action_space(
     )
 
 
-def get_base_policy_agent(
+def get_base_policy_agent_pi(
     base_policy_type: BasePolicyTypes,
     rng: jax.random.PRNGKey,
-    data_iterator: tf.data.NumpyIterator,
-    sharding: jax.sharding.Sharding,
-    base_policy_agent_kwargs: Dict[str, Any],
-    image_observations: bool,
-    action_space: gym.Space,
+    config,
     base_policy_path: Optional[str] = None,
-    encoder_name: Optional[str] = None,
-    encoder_kwargs: Optional[str] = None,
 ) -> BasePolicy:
     base_policy_class = BASE_POLICY_TYPE_TO_CLASS[base_policy_type]
-    example_batch = next(data_iterator)
-    # example_batch = add_empty_observation_history_axis_to_batch(example_batch)
-    example_batch = shard_batch(example_batch, sharding)
-
-    # TODO for like splitting batch according to the other dict def as well
-    if image_observations:
-        encoder_def = encoders[encoder_name](**encoder_kwargs)
-    else:
-
-        def encoder_def(x, **kwargs):
-            if isinstance(x, dict):
-                x = x["state"]
-            if x.ndim == 3:
-                assert x.shape[1] == 1, x.shape
-                return x[:, 0]
-            return x
     # TODO change this definition according to Pi 
     base_policy_agent = base_policy_class(
         rng=rng,
-        observations=example_batch["observations"],
-        actions=example_batch["actions"],
-        encoder_def=encoder_def,
-        action_space_high=action_space.high,
-        action_space_low=action_space.low,
-        **base_policy_agent_kwargs,
+        config=config,
     )
 
     if base_policy_path is not None:
         base_policy_agent = base_policy_agent.restore_checkpoint(
-            base_policy_path, sharding=sharding
+            base_policy_path
         )
 
     return base_policy_agent
+
+def sanitize_obs(obs):
+    out = {}
+    for k, v in obs.items():
+        if isinstance(v, (np.ndarray, jnp.ndarray)):
+            out[k] = v
+        # skip strings, lists, python objects
+    return out
 
 
 def get_policy_fn(
@@ -390,23 +380,39 @@ def get_policy_fn(
         if base_policy is not None:
             # Get samples from the base policy, put them in the observation dict
 
-            if obs_ndim == 2:
-                batched_observations = jax.tree_map(lambda x: x[:, None], observations)
-            elif obs_ndim == 1:
-                batched_observations = jax.tree_map(
-                    lambda x: x[None, None], observations
-                )
-            observations["base_policy_actions"] = base_policy.sample_actions(
-                batched_observations,
+            # if obs_ndim == 2:
+            #     batched_observations = jax.tree_map(lambda x: x[:, None], observations)
+            # elif obs_ndim == 1:
+            #     batched_observations = jax.tree_map(
+            #         lambda x: x[None, None], observations
+            #     )
+            observations["base_policy_actions"], obs_processed = base_policy.sample_actions(
+                observations,
                 repeat=num_samples_from_base_policy,
                 timer=timer,
                 argmax=False,
+                normalized=True,
+                return_obs=True,
                 **kwargs,
             )
         # LOG: `observations` statistics #
 
         # LOG: `batched_observations` statistics #
         breakpoint()
+            actions = observations["base_policy_actions"]
+            observations['proprio'] = obs_processed['state'][0]
+            observations['image'] = obs_processed['image']['base_0_rgb'][0]
+            observations['wrist_image'] = obs_processed['image']['left_wrist_0_rgb'][0]
+            B, R, H, D = actions.shape
+            actions = actions.reshape(B*R, H, D)
+            actions = preprocess_action(actions)
+            actions = actions.reshape(B,R,actions.shape[-1])
+            observations["base_policy_actions"] = actions
+            observations = sanitize_obs(observations)
+            
+            if obs_ndim==1:
+                observations = jax.tree_map(lambda x: x[None,: ], observations)
+                obs_ndim += 1
 
         if "ddpm" in FLAGS.config.agent:
 
@@ -414,11 +420,29 @@ def get_policy_fn(
                 observations = jax.tree_map(lambda x: x[:, None], observations)
             elif obs_ndim == 1:
                 observations = jax.tree_map(lambda x: x[None, None], observations)
+        
+        
+        observations["image"] = resize_images_to_100x100(
+            observations["image"]
+        )
+        if FLAGS.use_wrist_view:
+            observations["wrist_image"] = resize_images_to_100x100(
+                observations["wrist_image"]
+            )
+        # print("Observations: ", observations['image'].shape)
+        #TODO this is not right, since the observation preprocessing happens inside the dataloader
         actions = jax.device_get(
             agent.sample_actions(
                 observations, *args, **kwargs, argmax=argmax, timer=timer
             )
         )
+        if "parl" in FLAGS.config.agent:
+            actions = repack_action(actions)
+            output ={}
+            output["actions"] = actions
+            output['state'] = observations["proprio"]
+            actions = base_policy.unnormalize(output)
+            actions = actions['actions']
         # if actions.ndim == 3:
         #     assert actions.shape[1] == 1, actions.shape
         #     actions = actions[:, 0]
@@ -469,6 +493,7 @@ def plot_q_values_over_trajectory_time_step(
 ):
     trajectories = [trajectories[0]]  # only plot the first trajectory
     if isinstance(trajectories[0]["observation"][0], dict):
+        trajectories[0]['observation'][0] = sanitize_obs(trajectories[0]['observation'][0])
         observations = [
             {
                 key: np.array([obs[key] for obs in trajectory["observation"]])
@@ -701,7 +726,7 @@ def train_agent(_):
         # Iterates over to yield a dict with bunch of keys which can include observations, actions, rewards, masks, next_observations, etc. #
         dataset = get_libero_tfrecord_dataset(
             tfrecord_regexp=FLAGS.config.libero_tfrecord_regexp, use_wrist_view=FLAGS.use_wrist_view, 
-            use_language=FLAGS.use_lang, env_name=FLAGS.environment_name, config=config, is_pi=True, **FLAGS.config.dataset_kwargs,
+            use_language=FLAGS.use_lang, config=config, is_pi=True, **FLAGS.config.dataset_kwargs,
             task_name=FLAGS.task_name,
         )
         # breakpoint()
@@ -731,13 +756,11 @@ def train_agent(_):
     # Create replay buffer
     # LOG: Libero comes under this for now #
     if FLAGS.config.image_observations:
-        # LOG: Create directory to store the image replay buffer #
-        # LOG: Loaded later on from this directory for the online trajectories collected #
-        tf.io.gfile.makedirs(tf.io.gfile.join(save_dir, "image_replay_buffer"))
-        if FLAGS.train_on_separate_computer_mode != "agent_training_only":
-            assert not tf.io.gfile.exists(
-                tf.io.gfile.join(save_dir, "image_replay_buffer", "episode_0.tfrecord")
-            ), f"Image replay buffer already exists! ({tf.io.gfile.join(save_dir, 'image_replay_buffer', 'episode_0.tfrecord')})"
+        # tf.io.gfile.makedirs(tf.io.gfile.join(save_dir, "image_replay_buffer"))
+        # if FLAGS.train_on_separate_computer_mode != "agent_training_only":
+        #     assert not tf.io.gfile.exists(
+        #         tf.io.gfile.join(save_dir, "image_replay_buffer", "episode_0.tfrecord")
+        #     ), f"Image replay buffer already exists! ({tf.io.gfile.join(save_dir, 'image_replay_buffer', 'episode_0.tfrecord')})"
         image_replay_buffer = None  # Will be created when switching to online training.
         state_replay_buffer = None
     else:
@@ -754,8 +777,8 @@ def train_agent(_):
 
     rng = jax.random.PRNGKey(FLAGS.seed)
     # we shard the leading dimension (batch dimension) accross all devices evenly
+    # sharding = jax.sharding.PositionalSharding(devices)
     sharding = jax.sharding.PositionalSharding(devices)
-
     # Create data iterators
     # LOG: Offline dataset #
     offline_train_iterator_for_critic = dataset.iterator(
@@ -788,33 +811,11 @@ def train_agent(_):
             raise ValueError(
                 f"Did you forget to specify the base policy type in the base_policy_path? E.g. ddpm:./results/...\nGot {base_policy_path_components[0]}"
             )
-        if base_policy_type == BasePolicyTypes.OpenVLA:
-            FLAGS.config.base_policy_agent_kwargs["action_std"] = (
-                FLAGS.data_config.action_proprio_metadata["action"]["std"]
-            )
-
         rng, construct_rng = jax.random.split(rng)
-        # LOG: Create base policy agent like Pi0 model, need dataset iterator for `example_batch` and jitting #
-        # LOG: Need `observations` and `actions` for the base policy agent input for forward pass #
-        base_policy_agent = get_base_policy_agent(
+        base_policy_agent = get_base_policy_agent_pi(
             base_policy_type=base_policy_type,
             rng=construct_rng,
-            data_iterator=offline_train_iterator_for_base_policy,
-            sharding=sharding,
-            base_policy_agent_kwargs=FLAGS.config.base_policy_agent_kwargs,
-            image_observations=FLAGS.config.image_observations,
-            action_space=action_space,
-            base_policy_path=(
-                base_policy_path_components[1]
-                if len(base_policy_path_components) == 2
-                else None
-            ),
-            encoder_name=(
-                FLAGS.config.encoder if FLAGS.config.image_observations else None
-            ),
-            encoder_kwargs=(
-                FLAGS.config.encoder_kwargs if FLAGS.config.image_observations else None
-            ),
+            config=config
         )
 
     # breakpoint()
@@ -840,7 +841,7 @@ def train_agent(_):
     print("parsed tensor keys:", example_batch.keys())
 
     example_batch = shard_batch(example_batch, sharding)
-    if base_policy_agent is not None and base_policy_type == BasePolicyTypes.OpenVLA:
+    if base_policy_agent is not None:
         example_batch["observations"]["image"] = resize_images_to_100x100(
             example_batch["observations"]["image"]
         )
@@ -858,33 +859,55 @@ def train_agent(_):
     #       "\nwrist_view cam: ", example_batch["observations"]['wrist_image'].shape , 
     #       "\n languages shape: ", example_batch["observations"]["language"].shape )
     # # define encoder
-    # if FLAGS.config.image_observations:
-    #     encoder_def = encoders[FLAGS.config.encoder](**FLAGS.config.encoder_kwargs)
-    #     # if FLAGS.use_wrist_view:
-    #     #     encoder_def = [encoders[FLAGS.config.encoder](**FLAGS.config.encoder_kwargs),
-    #     #                    encoders[FLAGS.config.encoder](**FLAGS.config.encoder_kwargs)]
-
-    # else:
-
-    #     def encoder_def(x, **kwargs):
-    #         if isinstance(x, dict):
-    #             x = x["state"]
-    #         if x.ndim == 3:
-    #             assert x.shape[1] == 1, x.shape
-    #             return x[:, 0]
-    #         return x
-
+ 
     # initialize agent
     rng, construct_rng = jax.random.split(rng)
 
     is_transformer_agent = FLAGS.config.agent in ["auto_regressive_transformer"]
 
-    # LOG: Load the agent, Pi0 model is constructed here #
-    agent = agents[FLAGS.config.agent](
-        rng=construct_rng,
-        config=config
-    )
+    
 
+    if 'parl' in FLAGS.config.agent:
+        # print("line 822: example -- batch keys :", example_batch.keys())
+        observations = example_batch["observations"]
+
+        if not isinstance(observations, dict):
+            observations = {"state": example_batch["observations"]}
+        if FLAGS.config.image_observations:
+            encoder_def = encoders[FLAGS.config.encoder](**FLAGS.config.encoder_kwargs)
+            # if FLAGS.use_wrist_view:
+            #     encoder_def = [encoders[FLAGS.config.encoder](**FLAGS.config.encoder_kwargs),
+            #                    encoders[FLAGS.config.encoder](**FLAGS.config.encoder_kwargs)]
+        else:
+            def encoder_def(x, **kwargs):
+                if isinstance(x, dict):
+                    x = x["state"]
+                if x.ndim == 3:
+                    assert x.shape[1] == 1, x.shape
+                    return x[:, 0]
+                return x
+        actions = preprocess_action(example_batch['actions'])
+        H = config.model.action_horizon
+        low = jnp.tile(action_space.low, (H,))
+        high = jnp.tile(action_space.high, (H,))
+        agent = agents[FLAGS.config.agent](
+                rng=construct_rng,
+                observations=observations,
+                actions=actions,
+                encoder_def=encoder_def,
+                action_space_low=low,
+                action_space_high=high,
+                num_base_policy_actions=FLAGS.config.parl_config.num_base_policy_actions,
+                # encoder_use_lang=FLAGS.use_lang,
+                # encoder_use_wrist_view=FLAGS.use_wrist_view,
+                **FLAGS.config.agent_kwargs,
+            )
+    else:
+        agent = agents[FLAGS.config.agent](
+            rng=construct_rng,
+            config=config
+        )
+    # print("example batch processing done: -----------")
     del example_batch
     if FLAGS.resume_path is not None:
         agent = agent.restore_checkpoint(FLAGS.resume_path)
@@ -919,7 +942,7 @@ def train_agent(_):
         rng=eval_policy_fn_key,
         base_policy=base_policy_agent,
     )
-
+    # print("eval function instantiated ----")
     data_collection_trajectory_sampler = TrajSampler(
         train_env,
         clip_action=FLAGS.clip_action,
@@ -933,6 +956,7 @@ def train_agent(_):
     # LOG: `data_collection_trajectory_sampler` #
     breakpoint()
 
+    # print("traj sampler set up ---- ")
     def calc_mc_return_fn(rewards, masks):
         breakpoint()
         return calc_return_to_go(
@@ -1029,6 +1053,7 @@ def train_agent(_):
                 online_trajectories_added += 1
                 online_env_steps_this_epoch += len(traj["rewards"])
             # LOG: `trajectories` now contains online trajectories #
+                # online_env_steps_this_epoch=2
 
             # Finished collecting trajectories
             # LOG: Construct buffers using the trajectories #
@@ -1040,13 +1065,17 @@ def train_agent(_):
                 data_paths = glob_to_path_list(
                     tf.io.gfile.join(save_dir, "image_replay_buffer", "*.tfrecord")
                 )
-                image_replay_buffer = ImageReplayBuffer(
+                image_replay_buffer = ImageReplayBufferPi(
                     data_paths=data_paths,
                     seed=FLAGS.seed,
                     train=True,
+                    task_name=FLAGS.task_name,
+                    use_wrist_view=FLAGS.use_wrist_view, 
+                    use_language=FLAGS.use_lang, config=config,
                     **FLAGS.config.image_replay_buffer_kwargs,
                 )
                 # LOG: online dataset iterator separately for critic and base policy #
+                
                 online_train_iterator_for_critic = image_replay_buffer.iterator(
                     batch_size=FLAGS.config.batch_size
                     - int(FLAGS.config.batch_size * FLAGS.config.mixing_ratio),
@@ -1058,8 +1087,11 @@ def train_agent(_):
                         * FLAGS.config.mixing_ratio
                     ),
                 )
+                # print("batxh size: _--", FLAGS.config.batch_size
+                    # - int(FLAGS.config.batch_size * FLAGS.config.mixing_ratio),)
 
                 timer.tock("recreate_image_replay_buffer_iterator")
+                # print("image buffer recreated")
 
             # Get trajectory statistics
             # LOG: Log some statistics for the collected trajectories #
@@ -1068,18 +1100,19 @@ def train_agent(_):
             )
             mean_trajectory_length = np.mean([len(t["rewards"]) for t in trajectories])
             mean_max_reward = np.mean([np.max(t["rewards"]) for t in trajectories])
-            wandb_logger.log(
-                {
-                    "train_env": {
-                        "mean_trajectory_return": mean_trajectory_return,
-                        "mean_trajectory_length": mean_trajectory_length,
-                        "mean_max_reward": mean_max_reward,
+            if wandb_logger is not None:
+                wandb_logger.log(
+                    {
+                        "train_env": {
+                            "mean_trajectory_return": mean_trajectory_return,
+                            "mean_trajectory_length": mean_trajectory_length,
+                            "mean_max_reward": mean_max_reward,
+                        },
+                        "online_env_steps": online_env_steps,
+                        "online_trajectories_added": online_trajectories_added,
                     },
-                    "online_env_steps": online_env_steps,
-                    "online_trajectories_added": online_trajectories_added,
-                },
-                step=i,
-            )
+                    step=i,
+                )
 
         """Base policy distillation"""
         # LOG: Update base policy using `optimized` actions #
@@ -1090,6 +1123,8 @@ def train_agent(_):
             and i >= FLAGS.num_offline_epochs
             and FLAGS.num_online_epochs > 0
         ):
+            # print("base policy distallation --")
+            # print("type: ", type(online_train_iterator_for_base_policy))
             if offline_dataset_size is not None:
                 # The ratio of offline to online data changes after every epoch, so we need to
                 # update the iterator.
@@ -1108,6 +1143,7 @@ def train_agent(_):
                         * FLAGS.config.base_policy_agent_kwargs.batch_size
                     )
                 )
+                # print("type: ", type(online_train_iterator_for_base_policy))
             num_base_policy_distillation_steps = int(
                 online_env_steps_this_epoch * FLAGS.base_policy_utd
             )
@@ -1125,7 +1161,7 @@ def train_agent(_):
                     offline_batch = next(offline_train_iterator_for_base_policy)
                 else:
                     offline_batch = None
-
+                # print("Update index for base_policy distillation:" , update_index)
                 online_batch = next(online_train_iterator_for_base_policy)
                 if offline_batch is not None:
                     batch = concatenate_batches([offline_batch, online_batch])
@@ -1135,13 +1171,12 @@ def train_agent(_):
                 assert batch["rewards"].shape == (
                     FLAGS.config.base_policy_agent_kwargs.batch_size,
                 )
-                batch["actions"] = np.clip(
-                    batch["actions"], action_space.low, action_space.high
-                )
                 # LOG: `batch` statistics #
                 breakpoint()
-
+                
                 batch = shard_batch(batch, sharding)
+                # print("adding base policy actions in base policy distallation: ---")
+                # print(batch.keys())
                 if FLAGS.config.improve_base_policy_actions_with_global_search:
                     # pre-compute actions from base policy, add them to the batch
                     rng, key = jax.random.split(rng)
@@ -1157,21 +1192,27 @@ def train_agent(_):
                     )
 
                 base_policy_agent.prepare_for_finetuning()
-                batch = add_empty_observation_history_axis_to_batch(batch)
+                # batch = add_empty_observation_history_axis_to_batch(batch)
                 timer.tock("base_policy_distillation/get_batch")
 
                 timer.tick(
                     "base_policy_distillation/preprocess_batch_with_action_optimization"
                 )
                 rng, key = jax.random.split(rng)
+                batch['actions'] = preprocess_action(batch['actions'])
+                batch["actions"] = np.clip(
+                    batch["actions"], low, high
+                )
+                # print("preprocessing bathc with action optimisation")
+                # print(batch.keys())
                 batch = preprocess_batch_with_action_optimization(
                     batch=batch,
                     critic_agent=agent,
                     local_optimization_steps=FLAGS.config.parl_config.num_steps,
                     local_optimization_step_size=FLAGS.config.parl_config.step_size,
                     optimize_critic_ensemble_min=FLAGS.config.parl_config.optimize_critic_ensemble_min,
-                    action_space_low=action_space.low,
-                    action_space_high=action_space.high,
+                    action_space_low=low,
+                    action_space_high=high,
                     improve_actions_with_global_optimization=FLAGS.config.improve_base_policy_actions_with_global_search,
                     base_policy_agent=base_policy_agent,
                     num_base_policy_actions=FLAGS.config.parl_config.num_base_policy_actions,
@@ -1179,6 +1220,7 @@ def train_agent(_):
                     distill_argmax=FLAGS.config.distill_argmax,
                     rng=key,
                 )
+                batch['actions'] = repack_action(batch['actions'], pad=True)
                 timer.tock(
                     "base_policy_distillation/preprocess_batch_with_action_optimization"
                 )
@@ -1188,9 +1230,10 @@ def train_agent(_):
                 timer.tock("base_policy_distillation/update")
                 if update_index == 0:
                     base_policy_update_info = jax.device_get(base_policy_update_info)
-                    wandb_logger.log(
-                        {"base_policy_distillation": base_policy_update_info}, step=i
-                    )
+                    if wandb_logger is not None:
+                        wandb_logger.log(
+                            {"base_policy_distillation": base_policy_update_info}, step=i
+                        )
                 base_policy_agent.prepare_for_inference()
 
             timer.tock("base_policy_distillation/total")
@@ -1208,6 +1251,7 @@ def train_agent(_):
                 timer.tock("base_policy_save_checkpoint")
 
         """Critic update"""
+        # print("critic update -----")
         timer.tick("critic_training/total")
         num_train_steps = (
             FLAGS.num_train_steps_per_offline_epoch
@@ -1242,7 +1286,8 @@ def train_agent(_):
             batch = set_batch_masks(
                 batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
             )
-
+            # print("batch in critic traiining-----")
+            # print(batch.keys())
             # if "ddpm" in FLAGS.config.agent:
             #     batch = add_empty_observation_history_axis_to_batch(batch)
 
@@ -1277,11 +1322,11 @@ def train_agent(_):
                     manual_cache_dir=manual_cache_dir,
                     seed=key,
                 )
+                # print("after adding base policy actions to batch")
                 timer.tock("critic_training/add_base_policy_actions_to_batch")
 
             if (
                 base_policy_agent is not None
-                and base_policy_type == BasePolicyTypes.OpenVLA
             ):
                 # OpenVLA requires 224x224 images. For a single-task critic, 100x100 is likely
                 # enough and speeds up training.
@@ -1299,14 +1344,20 @@ def train_agent(_):
                     batch["next_observations"]["wrist_image"] = resize_images_to_100x100(
                         batch["next_observations"]["wrist_image"]
                     )
-
+                # print("image resize --completed")
+                # print(batch.keys())
+                # print(batch['observations']['image'].shape)
                 timer.tock("critic_image_resize")
 
             timer.tock("critic_training/get_batch")
             timer.tick("agent.update")
+            batch['actions'] = preprocess_action(batch['actions'])
+            print("PARL agent update ---- ")
+            # print(batch.keys())
             update_return_values = agent.update(
                 batch,
             )
+            # print("PARL update done")
             if len(update_return_values) == 2:
                 agent, critic_update_info = update_return_values
             else:
@@ -1353,6 +1404,7 @@ def train_agent(_):
             timer.tock("wandb_logging")
 
         timer.tock("critic_training/total")
+        # print("critic trianing done ---- ")
 
         if (
             (i + 1) % FLAGS.config.eval_interval == 0 or i == FLAGS.num_offline_epochs
@@ -1392,63 +1444,76 @@ def train_agent(_):
                         action_horizon=config.model.action_horizon
                     )
 
-                # log Q - MC
-                if hasattr(agent, "forward_critic"):
-                    timer.tick("q-mc calculation")
-                    initial_states = [t["observation"][0] for t in trajectories]
-                    initial_states = jax.tree_map(
-                        lambda *x: jnp.stack(x), *initial_states
-                    )
-                    initial_actions = [t["action"][0] for t in trajectories]
-                    initial_actions = jax.tree_map(
-                        lambda *x: jnp.stack(x), *initial_actions
-                    )
-                    initial_qs = agent.forward_critic(
-                        initial_states, initial_actions, rng=None, train=False
-                    ).mean(axis=0)
-                    mc_returns = jax.tree_map(
-                        lambda t: calc_return_to_go(
-                            rewards=np.array(t["reward"]) * FLAGS.reward_scale
-                            + FLAGS.reward_bias,
-                            masks=1 - np.array(t["done"]),
-                            gamma=FLAGS.config.agent_kwargs.discount,
-                            push_failed_to_min="maze" in FLAGS.environment_name
-                            or FLAGS.environment_name == "real_robot",
-                            min_reward=FLAGS.reward_bias,
-                        ),
-                        trajectories,
-                        is_leaf=lambda x: isinstance(
-                            x, dict
-                        ),  # only map over traj in trajs
-                    )
-                    initial_mc_returns = jax.tree_map(lambda t: t[0], mc_returns)
+                # # log Q - MC
+                # if hasattr(agent, "forward_critic"):
+                #     timer.tick("q-mc calculation")
+                #     initial_states = []
+                #     for t in trajectories:
+                #         observations = sanitize_obs(t["observation"][0])
+                #         observations["image"] = resize_images_to_100x100(
+                #             observations["image"]
+                #         )
+                #         if FLAGS.use_wrist_view:
+                #             observations["wrist_image"] = resize_images_to_100x100(
+                #                 observations["wrist_image"]
+                #             )
+                #         initial_states.append(observations)
+                        
+                #     breakpoint()
+                #     initial_states = jax.tree_map(
+                #         lambda *x: jnp.stack(x), *initial_states
+                #     )
+                #     initial_actions = [t["action"][0] for t in trajectories]
+                #     initial_actions = jax.tree_map(
+                #         lambda *x: jnp.stack(x), *initial_actions
+                #     )
+                #     initial_qs = agent.forward_critic(
+                #         initial_states, initial_actions, rng=None, train=False
+                #     ).mean(axis=0)
+                #     mc_returns = jax.tree_map(
+                #         lambda t: calc_return_to_go(
+                #             rewards=np.array(t["reward"]) * FLAGS.reward_scale
+                #             + FLAGS.reward_bias,
+                #             masks=1 - np.array(t["done"]),
+                #             gamma=FLAGS.config.agent_kwargs.discount,
+                #             push_failed_to_min="maze" in FLAGS.environment_name
+                #             or FLAGS.environment_name == "real_robot",
+                #             min_reward=FLAGS.reward_bias,
+                #         ),
+                #         trajectories,
+                #         is_leaf=lambda x: isinstance(
+                #             x, dict
+                #         ),  # only map over traj in trajs
+                #     )
+                #     initial_mc_returns = jax.tree_map(lambda t: t[0], mc_returns)
 
-                    timer.tock("q-mc calculation")
-                    if FLAGS.plot_q_values_over_trajectory_figure:
-                        timer.tick("q_values_over_trajectory")
-                        q_values_over_trajectory_time_step_figure = (
-                            plot_q_values_over_trajectory_time_step(
-                                trajectories=trajectories,
-                                critic_agent=agent,
-                                sharding=sharding,
-                            )
-                        )
-                    else:
-                        q_values_over_trajectory_time_step_figure = None
-                    timer.tock("q_values_over_trajectory")
-                    wandb.log(
-                        {
-                            "eval/initial state Q": wandb.Histogram(initial_qs),
-                            "eval/initial state MC": wandb.Histogram(
-                                initial_mc_returns
-                            ),
-                            "eval/Q - MC": wandb.Histogram(
-                                np.array(initial_qs) - np.array(initial_mc_returns)
-                            ),
-                            "eval/q_values_over_trajectory_time_step": q_values_over_trajectory_time_step_figure,
-                        },
-                        step=i,
-                    )
+                #     timer.tock("q-mc calculation")
+                #     if FLAGS.plot_q_values_over_trajectory_figure:
+                #         timer.tick("q_values_over_trajectory")
+                #         q_values_over_trajectory_time_step_figure = (
+                #             plot_q_values_over_trajectory_time_step(
+                #                 trajectories=trajectories,
+                #                 critic_agent=agent,
+                #                 sharding=sharding,
+                #             )
+                #         )
+                #     else:
+                #         q_values_over_trajectory_time_step_figure = None
+                    # timer.tock("q_values_over_trajectory")
+                    # if wandb_logger is not None:
+                    #     wandb.log(
+                    #         {
+                    #             "eval/initial state Q": wandb.Histogram(initial_qs),
+                    #             "eval/initial state MC": wandb.Histogram(
+                    #                 initial_mc_returns
+                    #             ),
+                    #             "eval/Q - MC": wandb.Histogram(
+                    #                 np.array(initial_qs) - np.array(initial_mc_returns)
+                    #             ),
+                    #             "eval/q_values_over_trajectory_time_step": q_values_over_trajectory_time_step_figure,
+                    #         },
+                    #         step=i,
+                    #     )
 
                 if (FLAGS.environment_name == "calvin" or FLAGS.environment_name =='libero') and FLAGS.config.save_video:
                     trajectories_to_save = trajectories[
@@ -1678,6 +1743,7 @@ def train_agent(_):
                 raise ValueError(
                     f"Invalid train_on_separate_computer_mode: {FLAGS.train_on_separate_computer_mode}"
                 )
+    base_policy_agent.checkpoint_manager.wait_until_finished()
 
 
 if __name__ == "__main__":

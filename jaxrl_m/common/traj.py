@@ -2,7 +2,7 @@ from collections import defaultdict
 from typing import Optional
 
 import numpy as np
-
+import copy
 from jaxrl_m.common.evaluation import add_to
 
 
@@ -14,13 +14,14 @@ class TrajSampler(object):
     """
 
     def __init__(
-        self, env, clip_action, reward_scale, reward_bias, max_traj_length=1000
+        self, env, clip_action, reward_scale, reward_bias, max_traj_length=10, action_horizon=1,
     ):
         self.clip_action = clip_action
         self.reward_scale = reward_scale
         self.reward_bias = reward_bias
         self.max_traj_length = max_traj_length
         self._env = env
+        self.action_horizon = action_horizon
 
     def sample(
         self,
@@ -45,6 +46,8 @@ class TrajSampler(object):
                                 replay buffer.
         """
         trajectories = []
+        H = self.action_horizon
+        half_H = max(1, H // 2)
 
         for _ in range(num_episodes):
             trajectory = defaultdict(list)
@@ -59,11 +62,52 @@ class TrajSampler(object):
                 observation, info = reset_variables
             done = False
             step = 0
+            current_action_index = 0
+            current_action_sequence = None
+
             while not done and step < self.max_traj_length:
-                if goal_relabel_fn is not None:
-                    action = policy_fn(observation, info["goal"])
-                else:
-                    action = policy_fn(observation)
+                observation_storing = copy.deepcopy(observation)
+                # if goal_relabel_fn is not None:
+                #     action = policy_fn(observation, info["goal"])
+                # else:
+                #     action = policy_fn(observation)
+                if current_action_sequence is None or current_action_index >= half_H:
+                    if goal_relabel_fn is not None:
+                        current_action_sequence = policy_fn(observation, info.get("goal"))
+                    else:
+                        current_action_sequence = policy_fn(observation)
+
+                    # Normalize shapes:
+                    if isinstance(current_action_sequence, np.ndarray):
+                        # case: (1, H, D)
+                        if current_action_sequence.ndim == 3:
+                            current_action_sequence = current_action_sequence[0]
+
+                        # case: (D,)
+                        if current_action_sequence.ndim == 1:
+                            current_action_sequence = current_action_sequence[None, :]
+
+                    # Must now be (T, D)
+                    if (
+                        not isinstance(current_action_sequence, np.ndarray)
+                        or current_action_sequence.ndim != 2
+                    ):
+                        raise ValueError(
+                            f"Policy must return array of shape (T, D) or (1, T, D) or (D,), "
+                            f"got type={type(current_action_sequence)}, shape="
+                            f"{getattr(current_action_sequence, 'shape', None)}"
+                        )
+
+                    if current_action_sequence.shape[0] < H:
+                        raise ValueError(
+                            f"Policy returned horizon={current_action_sequence.shape[0]}, expected >= {H}"
+                        )
+
+                    current_action_index = 0
+
+                action = current_action_sequence[current_action_index]
+                current_action_index += 1
+
                 step_variables = self._env.step(action)
                 if len(step_variables) == 5:
                     next_observation, r, terminated, truncated, info = step_variables
@@ -72,7 +116,7 @@ class TrajSampler(object):
                     assert len(step_variables) == 4
                     next_observation, r, done, info = step_variables
                 transition = dict(
-                    observations=observation,
+                    observations=observation_storing,
                     next_observations=next_observation,
                     actions=np.clip(action, -self.clip_action, self.clip_action),
                     rewards=r * self.reward_scale + self.reward_bias,
@@ -86,6 +130,8 @@ class TrajSampler(object):
                     terminate_on_success
                     and (r * self.reward_scale + self.reward_bias) == 0
                 ):
+                    current_action_sequence = None
+                    current_action_index = 0
                     break
 
                 observation = next_observation

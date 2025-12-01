@@ -10,9 +10,9 @@ from jaxrl_m.agents.continuous.diffusion_q_learning import (
     get_default_config as get_diffusion_q_learning_config,
 )
 
-SAVE_DIR_PREFIX = os.environ.get("SAVE_DIR_PREFIX", "./")
+SAVE_DIR_PREFIX = os.environ.get("SAVE_DIR_PREFIX", "libero_10_pi05_put_the_two_mocha_pots_on_the_stove")
 DEFAULT_PARL_CONFIG = dict(
-    num_base_policy_actions=32,
+    num_base_policy_actions=16,
     num_actions_to_keep=10,
     num_steps=10,
     step_size=3e-4,
@@ -330,20 +330,20 @@ BASE_GAUSSIAN_CALQL_CONFIG = dict(
 
 BASE_PI_CONFIG = dict(
     agent="pi-0",
-    batch_size=2,
+    batch_size=16,
     save_dir=tf.io.gfile.join(SAVE_DIR_PREFIX, "results"),
-    eval_interval=2,
-    save_interval=100,
-    log_interval=10,
+    eval_interval=10,
+    save_interval=5,
+    log_interval=1,
     deterministic_eval=True,
-    num_eval_episodes=10,
-    num_episodes_per_video=5,
-    num_episodes_per_row=5,
-    save_video=False,
+    num_eval_episodes=4,
+    num_episodes_per_video=2,
+    num_episodes_per_row=1,
+    save_video=True,
     image_observations=False,
     goal_conditioned=False,
     agent_kwargs=dict(
-        batch_size=2,
+        batch_size=16,
         score_network_kwargs=dict(
             time_dim=128,
             num_blocks=3,
@@ -372,16 +372,16 @@ pi0_base_policy_agent_kwargs_for_parl.update(
 )
 BASE_PARL_CALQL_CONFIG_Pi0 = dict(
     agent="parl_calql",
-    batch_size=256,
+    batch_size=16,
     save_dir=tf.io.gfile.join(SAVE_DIR_PREFIX, "results"),
-    eval_interval=50,
-    save_interval=500,
-    log_interval=10,
+    eval_interval=10,
+    save_interval=5,
+    log_interval=1,
     deterministic_eval=True,
-    num_eval_episodes=10,
-    num_episodes_per_video=1,
+    num_eval_episodes=4,
+    num_episodes_per_video=2,
     num_episodes_per_row=1,
-    save_video=False,
+    save_video=True,
     parl_config=DEFAULT_PARL_CONFIG,
     data_collection_particle_choosing_strategy="max_q_value",
     evaluation_particle_choosing_strategy="max_q_value",
@@ -394,7 +394,7 @@ BASE_PARL_CALQL_CONFIG_Pi0 = dict(
     agent_kwargs=get_continuous_cql_config(
         updates=dict(
             discount=0.99,
-            batch_size=256,
+            batch_size=16,
             distributional_critic=True,
             distributional_critic_kwargs=dict(
                 q_min=-100.0,
@@ -432,6 +432,8 @@ BASE_PARL_CALQL_CONFIG_Pi0 = dict(
             drq_padding=0,
             cql_alpha=0.005,
             only_use_next_actions_for_cql=False,
+            use_wrist_view=True,
+            use_proprio=True
         ),
     ),
     base_policy_agent_kwargs=pi0_base_policy_agent_kwargs_for_parl,

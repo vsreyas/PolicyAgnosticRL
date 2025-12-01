@@ -74,7 +74,6 @@ class ImageReplayBufferPi:
         self,
         data_paths: List[str],
         seed: int,
-        env_name: str, 
         goal_relabeling_strategy: Optional[str] = None,
         goal_relabeling_kwargs: dict = {},
         shuffle_buffer_size: int = 10000,
@@ -102,7 +101,6 @@ class ImageReplayBufferPi:
         self.include_next_actions = include_next_actions
         self.use_language = use_language
         self.use_wrist_view = use_wrist_view
-        self.env_name = env_name
         
         device = "cuda" if torch.cuda.is_available() else "cpu"
         self._clip_model, self._clip_preprocess = clip.load("ViT-B/32", device=device)
@@ -200,6 +198,7 @@ class ImageReplayBufferPi:
 
         parsed = tf.io.parse_single_example(example_proto, features)
         txt = parsed["language"]
+        # print(parsed.keys())
 
         # Case-insensitive substring match
         task = tf.strings.lower(self.task_name)
@@ -318,7 +317,7 @@ class ImageReplayBufferPi:
                 img0 = img0[::-1, ::-1, :]
                 img1 = img1[::-1, ::-1, :]
 
-            if self.use_8D:
+            if self.use_8D and state.shape[-1] != 8:
                 state = convert_state_15_to_8(state)
 
             # Reconstruct EXACT input dict
@@ -454,34 +453,33 @@ class ImageReplayBufferPi:
             out["masks"] = masks_tf
             out["mc_returns"] = mc_returns_tf
 
-        if not self.tfrecords_include_next_observations:
-            states = out['observations']["proprio"]
-            out['observations']["proprio"] = states[:-1]
-           
-            out['next_observations']["proprio"] = states[1:]
-            # if self.states_only:
-            #     parsed_tensors["observations/images0"] = None
-            #     parsed_tensors["next_observations/images0"] = None
-            # else:
-            if not self.states_only:
-                # images = out["image"]
-                # parsed_tensors["observations/images0"] = images[:-1]
-                # parsed_tensors["next_observations/images0"] = images[1:]
-                # if self.use_wrist_view:
-                #     wrist_images = parsed_tensors["observations/images1"]
-                #     parsed_tensors["observations/images1"] = wrist_images[:-1]
-                #     parsed_tensors["next_observations/images1"] = wrist_images[1:]
-                for cam in out["observations_image_mask"].keys():
-                    img = out['observations'][cam]
-                    
-                    out['observations'][cam] = img[:-1]
-                    out['next_observations'][cam] = img[1:]
-                   
+        states = out['observations']["proprio"]
+        out['observations']["proprio"] = states[:-1]
+        
+        out['next_observations']["proprio"] = states[1:]
+        # if self.states_only:
+        #     parsed_tensors["observations/images0"] = None
+        #     parsed_tensors["next_observations/images0"] = None
+        # else:
+        if not self.states_only:
+            # images = out["image"]
+            # parsed_tensors["observations/images0"] = images[:-1]
+            # parsed_tensors["next_observations/images0"] = images[1:]
+            # if self.use_wrist_view:
+            #     wrist_images = parsed_tensors["observations/images1"]
+            #     parsed_tensors["observations/images1"] = wrist_images[:-1]
+            #     parsed_tensors["next_observations/images1"] = wrist_images[1:]
+            for cam in out["observations_image_mask"].keys():
+                img = out['observations'][cam]
+                
+                out['observations'][cam] = img[:-1]
+                out['next_observations'][cam] = img[1:]
+                
 
-                    mask = out["observations_image_mask"][cam]
-                    out["observations_image_mask"][cam] = mask[:-1]
-                    out['next_observations_image_mask'][cam] = mask[1:]
-                    # tf.print("here 2")
+                mask = out["observations_image_mask"][cam]
+                out["observations_image_mask"][cam] = mask[:-1]
+                out['next_observations_image_mask'][cam] = mask[1:]
+                # tf.print("here 2")
 
         out['terminals'] = tf.zeros([W-1], dtype=tf.bool)
         # # terminals[-1] = True
@@ -508,6 +506,7 @@ class ImageReplayBufferPi:
         clip_emb = tf.repeat(clip_emb[None, :], num_samples, axis=0)
         out['observations']["language"] = clip_emb
         out.pop("prompt")
+        # print_tensor_tree("OUT", out)
         return out
     # {
     #     'image': obs_images,
@@ -641,7 +640,7 @@ def save_trajectory_as_tfrecord(trajectory: Dict[str, np.ndarray], path: str):
         "actions",
     }
     assert type(trajectory["observations"]) == list
-    assert trajectory["observations"][0].keys() >= {"image", "proprio"}
+    assert trajectory["observations"][0].keys() >= {"image", "proprio", "prompt"}
 
     if tf.io.gfile.exists(path):
         print(f"Warning: Removing existing file at {path}")
@@ -651,10 +650,13 @@ def save_trajectory_as_tfrecord(trajectory: Dict[str, np.ndarray], path: str):
             breakpoint()
 
     tf.io.gfile.makedirs(os.path.dirname(path))
-    if "language" in trajectory:
-        language_bytes = trajectory["language"].encode("utf-8")
-    else:
-        language_bytes = "".encode("utf-8")
+    try:
+        language_bytes = trajectory["observations"][0]["prompt"].encode("utf-8")
+        print(language_bytes)
+    except:
+        print("no language")
+    # else:
+        # language_bytes = "".encode("utf-8")
 
     with tf.io.TFRecordWriter(path) as writer:
         example = tf.train.Example(
@@ -666,7 +668,7 @@ def save_trajectory_as_tfrecord(trajectory: Dict[str, np.ndarray], path: str):
                             dtype=np.uint8,
                         )
                     ),
-                    "observations/wrist_image": tensor_feature(
+                    "observations/images1": tensor_feature(
                         np.array(
                             [o["wrist_image"] for o in trajectory["observations"]], 
                             dtype=np.uint8)
@@ -690,18 +692,18 @@ def save_trajectory_as_tfrecord(trajectory: Dict[str, np.ndarray], path: str):
                     #     )
                     # ),
                     "actions": tensor_feature(
-                        np.array(trajectory["actions"], dtype=np.float32)
+                        np.array(trajectory["actions"][:-1], dtype=np.float32)
                     ),
                     **(
                         {
                             "rewards": tensor_feature(
-                                np.array(trajectory["rewards"], dtype=np.float32)
+                                np.array(trajectory["rewards"][:-1], dtype=np.float32)
                             ),
                             "masks": tensor_feature(
-                                np.array(trajectory["masks"], dtype=np.float32)
+                                np.array(trajectory["masks"][:-1], dtype=np.float32)
                             ),
                             "mc_returns": tensor_feature(
-                                np.array(trajectory["mc_returns"], dtype=np.float32)
+                                np.array(trajectory["mc_returns"][:-1], dtype=np.float32)
                             ),
                         }
                         if "rewards" in trajectory
@@ -754,6 +756,34 @@ def convert_state_15_to_8(state_15: np.ndarray):
 
     return out if batched else out[0]
 
+def print_tensor_tree(prefix, obj):
+    """
+    Recursively print shapes and dtypes of all Tensors in a nested structure.
+    Handles dicts, lists, tuples, and tensors.
+    Uses tf.print so it works inside tf.data / tf.function.
+    """
+
+    # Case 1: Tensor -> print its shape + dtype
+    if isinstance(obj, tf.Tensor):
+        tf.print(prefix, "SHAPE:", tf.shape(obj), "DTYPE:", obj.dtype)
+        return
+
+    # Case 2: dict -> recurse on each key
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            child_prefix = prefix + "/" + str(k)
+            print_tensor_tree(child_prefix, v)
+        return
+
+    # Case 3: list or tuple -> recurse on each element
+    if isinstance(obj, (list, tuple)):
+        for i, v in enumerate(obj):
+            child_prefix = prefix + f"[{i}]"
+            print_tensor_tree(child_prefix, v)
+        return
+
+    # Case 4: anything else (scalar, None, etc.) -> just print type
+    tf.print(prefix, "NON-TENSOR LEAF OF TYPE:", str(type(obj)))
 
 if __name__ == "__main__":
     import os
@@ -773,7 +803,8 @@ if __name__ == "__main__":
     # -------------------------------
     # Locate TFRecords
     # -------------------------------
-    tfrecord_dir = "/data/hf_cache/datasets/LIBERO/libero_10_tf"
+    # tfrecord_dir = "/data/hf_cache/datasets/LIBERO/libero_10_tf"
+    tfrecord_dir = "/home/sreyasv/Projects/PolicyAgnosticRL/results/image_replay_buffer"
     data_paths = sorted(glob.glob(os.path.join(tfrecord_dir, "*.tfrecord")))
 
     if not data_paths:
@@ -791,9 +822,8 @@ if __name__ == "__main__":
         use_language=True,
         cache=False,
         tfrecords_include_next_observations=False,
-        env_name="libero",
         config=config,
-        # task_name= "put the yellow and white mug in the microwave and close it",
+        # task_name= "put both moka pots on the stove" #"put the yellow and white mug in the microwave and close it",
     )
 
     iterator = buffer.iterator(batch_size=64)
@@ -808,6 +838,7 @@ if __name__ == "__main__":
 
     print("\n========== BATCH STRUCTURE ==========\n")
     print("output keys: ", output.keys())
+    print("prompt: ", output['prompt'])
 
     # -------------------------
     # Actions

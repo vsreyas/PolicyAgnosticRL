@@ -15,7 +15,8 @@ from configs.base_config import (
     BASE_DIFFUSION_Q_LEARNING_CONFIG,
     BASE_GAUSSIAN_CALQL_CONFIG,
     BASE_PARL_CALQL_CONFIG,
-    BASE_PI_CONFIG
+    BASE_PI_CONFIG,
+    BASE_PARL_CALQL_CONFIG_Pi0
 )
 
 SAVE_DIR_PREFIX = os.environ.get("SAVE_DIR_PREFIX", "./")
@@ -56,7 +57,7 @@ def get_config(config_string):
     parl_calql_config["distill_argmax"] = True
     parl_calql_config["image_replay_buffer_kwargs"] = dict()
 
-    parl_calql_config_pi0 = deepcopy(BASE_PARL_CALQL_CONFIG)
+    parl_calql_config_pi0 = deepcopy(BASE_PARL_CALQL_CONFIG_Pi0)
     parl_calql_config_pi0["save_video"] = True
     parl_calql_config_pi0["image_observations"] = True
     parl_calql_config_pi0["encoder"] = "resnetv1-18-bridge"
@@ -85,6 +86,8 @@ def get_config(config_string):
     )
     parl_calql_config_pi0["agent_kwargs"]["cql_n_actions"] = 4
     parl_calql_config_pi0["agent_kwargs"]["drq_padding"] = 4
+    parl_calql_config['agent_kwargs']['use_proprio'] = True
+    parl_calql_config['agent_kwargs']['use_wrist_view'] = True
     parl_calql_config_pi0["base_policy_agent_kwargs"]["image_observations"] = True
     parl_calql_config_pi0["base_policy_agent_kwargs"]["drq_padding"] = 4
     parl_calql_config_pi0["distill_argmax"] = True
