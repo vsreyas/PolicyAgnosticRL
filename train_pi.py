@@ -86,7 +86,7 @@ flags.DEFINE_integer(
     "num_online_epochs", 500, "Number of epochs for online fine-tuning."
 )
 flags.DEFINE_integer(
-    "num_train_steps_per_offline_epoch", 500, "Number of training steps per epoch."
+    "num_train_steps_per_offline_epoch", 50, "Number of training steps per epoch."
 )
 flags.DEFINE_float("reward_scale", 1.0, "Reward scale.")
 flags.DEFINE_float("reward_bias", 0.0, "Reward bias.")
@@ -395,10 +395,10 @@ def get_policy_fn(
                 return_obs=True,
                 **kwargs,
             )
-        # LOG: `observations` statistics #
+            # LOG: `observations` statistics #
 
-        # LOG: `batched_observations` statistics #
-        breakpoint()
+            # LOG: `batched_observations` statistics #
+            # breakpoint()
             actions = observations["base_policy_actions"]
             observations['proprio'] = obs_processed['state'][0]
             observations['image'] = obs_processed['image']['base_0_rgb'][0]
@@ -421,15 +421,16 @@ def get_policy_fn(
             elif obs_ndim == 1:
                 observations = jax.tree_map(lambda x: x[None, None], observations)
         
-        
-        observations["image"] = resize_images_to_100x100(
-            observations["image"]
-        )
-        if FLAGS.use_wrist_view:
-            observations["wrist_image"] = resize_images_to_100x100(
-                observations["wrist_image"]
-            )
+        # Ignore this for now, pass full size image to pi as it was trained on it #
+        # observations["image"] = resize_images_to_100x100(
+        #     observations["image"]
+        # )
+        # if FLAGS.use_wrist_view:
+        #     observations["wrist_image"] = resize_images_to_100x100(
+        #         observations["wrist_image"]
+        #     )
         # print("Observations: ", observations['image'].shape)
+
         #TODO this is not right, since the observation preprocessing happens inside the dataloader
         actions = jax.device_get(
             agent.sample_actions(
@@ -556,6 +557,7 @@ def train_agent(_):
     num_devices = len(devices)
     assert FLAGS.config.batch_size % num_devices == 0
     config = get_config("pi05_libero_custom_low_mem")
+    # breakpoint()
     config.exp_name = FLAGS.wandb_experiment_name
     config.overwrite = True
 
@@ -598,6 +600,7 @@ def train_agent(_):
     action_space = None
     offline_dataset_size = None
     
+    ####### Dataset and evironment setup ###########
     if FLAGS.environment_name == "real_robot":
         assert FLAGS.reward_bias == -1.0
         assert FLAGS.reward_scale == 1.0
@@ -789,7 +792,12 @@ def train_agent(_):
     # Online iterators will be set when switching to online training.
     online_train_iterator_for_critic = None
     online_train_iterator_for_base_policy = None
+    #########################################################
 
+
+
+
+    ### Base policy agent setup ###
     # Optionally create base policy agent
     base_policy_path_components = FLAGS.config.get("base_policy_path", "").split(":")
     if len(base_policy_path_components) == 1 and base_policy_path_components[0] == "":
@@ -812,17 +820,39 @@ def train_agent(_):
                 f"Did you forget to specify the base policy type in the base_policy_path? E.g. ddpm:./results/...\nGot {base_policy_path_components[0]}"
             )
         rng, construct_rng = jax.random.split(rng)
+        # LOG: Creates an object of class `PiPolicy` #
         base_policy_agent = get_base_policy_agent_pi(
             base_policy_type=base_policy_type,
             rng=construct_rng,
             config=config
         )
+    #########################################################
 
     # breakpoint()
 
     example_batch = next(offline_train_iterator_for_critic)
     # LOG: `example_batch` statistics #
-    breakpoint()
+    # `example_batch` keys: dict_keys(['observations', 'actions', 'observations_image_mask', 
+    # 'tokenized_prompt', 'tokenized_prompt_mask', 'token_ar_mask', 'token_loss_mask', 
+    # 'next_observations', 'next_observations_image_mask', 'rewards', 'masks', 'mc_returns', 
+    # 'terminals', 'truncates'])
+    # `observations` keys: dict_keys(['proprio', 'image', 'wrist_image', 'image_3', 'language'])
+    # `next_observations` keys: dict_keys(['proprio', 'image', 'wrist_image', 'image_3'])
+    # `proprio` shape: (B, 32) with appropriate action dimensions having values and 0 otherwise (for libero, top 8 actions are filled)
+    # `image`, `wrist_image`, `image_3` shape: (B, H, W, 3) (For libero H=W=224)
+    # `language` shape: (B, 512) denoting 512 dimensional clip embedding of language instruction/prompt
+    # `actions` shape: (B, H, D) where H is action horizon and D is action dimension
+    # `observations_image_mask` keys: dict_keys(['image', 'wrist_image', 'image_3'])
+    # example_batch['observations_image_mask']['image']: (B,) containing boolean masks for each image in batch, similarly for wrist_image and image_3
+    # example_batch['tokenized_prompt']: (B, L=200) containing tokenized prompt for each example in batch, where L is the length of the prompt
+    # example_batch['tokenized_prompt_mask']: (B, L=200) containing boolean masks for each token
+    # Above similarly (B,L) for token_ar_mask, token_loss_mask
+    # 'rewards': (B,) containing rewards for each example in batch, for timestep represented by it; Can be non 0/1 as well depending on if it was decayed over time or not
+    # 'masks': (B,)
+    # mc_returns: (B,)
+    # terminals: (B,)
+    # truncates: (B,)
+    # breakpoint()
 
     # if "ddpm" in FLAGS.config.agent:
     #     example_batch = add_empty_observation_history_axis_to_batch(example_batch)
@@ -907,6 +937,9 @@ def train_agent(_):
             rng=construct_rng,
             config=config
         )
+    
+    # breakpoint()
+
     # print("example batch processing done: -----------")
     del example_batch
     if FLAGS.resume_path is not None:
@@ -941,7 +974,7 @@ def train_agent(_):
         timer=timer,
         rng=eval_policy_fn_key,
         base_policy=base_policy_agent,
-    )
+    ) # LOG: Calls `sample_actions` method of agent and base_policy agent #
     # print("eval function instantiated ----")
     data_collection_trajectory_sampler = TrajSampler(
         train_env,
@@ -949,16 +982,16 @@ def train_agent(_):
         reward_scale=FLAGS.reward_scale,
         reward_bias=FLAGS.reward_bias,
         max_traj_length=FLAGS.config.get("max_episode_steps", 1000),
-    )
+    ) # LOG: Used only for online trajectory rollouts and sampling #
 
     # LOG: `eval_policy_fn` #
-
     # LOG: `data_collection_trajectory_sampler` #
-    breakpoint()
+    # These are function objects as of now #
+    # breakpoint()
 
     # print("traj sampler set up ---- ")
     def calc_mc_return_fn(rewards, masks):
-        breakpoint()
+        # breakpoint()
         return calc_return_to_go(
             rewards,
             masks,
@@ -979,6 +1012,7 @@ def train_agent(_):
         timer.tick("total")
         
         # LOG: If not true, the simply update critic using offline data #
+        ### LOG: Online Training ###
         if i >= FLAGS.num_offline_epochs and FLAGS.num_online_epochs > 0:
             num_trajectories_to_collect = FLAGS.num_online_trajectories_per_epoch
             if i == FLAGS.num_offline_epochs:
@@ -1037,7 +1071,7 @@ def train_agent(_):
                     ),
                 )[0]
                 # LOG: `traj` statistics #
-                breakpoint()
+                # breakpoint()
                 trajectories.append(traj)
 
                 if FLAGS.config.image_observations:
@@ -1113,6 +1147,7 @@ def train_agent(_):
                     },
                     step=i,
                 )
+        #########################################################
 
         """Base policy distillation"""
         # LOG: Update base policy using `optimized` actions #
@@ -1172,7 +1207,7 @@ def train_agent(_):
                     FLAGS.config.base_policy_agent_kwargs.batch_size,
                 )
                 # LOG: `batch` statistics #
-                breakpoint()
+                # breakpoint()
                 
                 batch = shard_batch(batch, sharding)
                 # print("adding base policy actions in base policy distallation: ---")
@@ -1270,6 +1305,8 @@ def train_agent(_):
             else:
                 offline_batch = None
 
+            # breakpoint()
+
             if i >= FLAGS.num_offline_epochs:
                 timer.tick("critic_training/get_batch/online_iterator")
                 online_batch = next(online_train_iterator_for_critic)
@@ -1351,9 +1388,10 @@ def train_agent(_):
 
             timer.tock("critic_training/get_batch")
             timer.tick("agent.update")
-            batch['actions'] = preprocess_action(batch['actions'])
-            print("PARL agent update ---- ")
+            # batch['actions'] = preprocess_action(batch['actions'])
+            # print("PARL agent update ---- ")
             # print(batch.keys())
+            # breakpoint()
             update_return_values = agent.update(
                 batch,
             )

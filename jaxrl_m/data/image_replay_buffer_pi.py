@@ -245,6 +245,9 @@ class ImageReplayBufferPi:
         # Repeat prompt for each timestep (tokenizer doesn't handle batching)
         out = {}
 
+        # LOG: `parsed_tensors` statistics #
+        # breakpoint()
+
         # for k, v in parsed_tensors.items():
         #     tf.print("KEY:", k, "SHAPE:", tf.shape(v))
         
@@ -253,7 +256,7 @@ class ImageReplayBufferPi:
         actions_tf = parsed_tensors["actions"]
         image_tf = [parsed_tensors["observations/images0"][:-1], parsed_tensors['observations/images1'][:-1]]
 
-        breakpoint()
+        # breakpoint()
         
         
         ah = self.config.model.action_horizon
@@ -275,6 +278,8 @@ class ImageReplayBufferPi:
             fn_output_signature=tf.float32,
         )
 
+        # breakpoint()
+
         state_tf = tf.gather(state_tf, start_idx)
         image_tf[0] = tf.gather(image_tf[0], start_idx)
         image_tf[1] = tf.gather(image_tf[1], start_idx)
@@ -292,6 +297,8 @@ class ImageReplayBufferPi:
         # tf.print("length:", length)
         # tf.print("------------------------")
         out['prompt'] = prompt_tf
+
+        # breakpoint()
 
         
         def _apply_data_transforms_numpy(
@@ -385,7 +392,7 @@ class ImageReplayBufferPi:
                 tf.bool,     # token_loss_mask
             ]
         )
-        
+        # breakpoint()
 
         idx = 0
         out['observations'] = {}
@@ -457,6 +464,7 @@ class ImageReplayBufferPi:
         out['observations']["proprio"] = states[:-1]
         
         out['next_observations']["proprio"] = states[1:]
+        # breakpoint()
         # if self.states_only:
         #     parsed_tensors["observations/images0"] = None
         #     parsed_tensors["next_observations/images0"] = None
@@ -506,6 +514,8 @@ class ImageReplayBufferPi:
         clip_emb = tf.repeat(clip_emb[None, :], num_samples, axis=0)
         out['observations']["language"] = clip_emb
         out.pop("prompt")
+
+        # breakpoint()
         # print_tensor_tree("OUT", out)
         return out
     # {

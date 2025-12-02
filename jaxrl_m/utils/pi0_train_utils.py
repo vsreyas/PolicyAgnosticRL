@@ -143,6 +143,8 @@ def train_step(
     model = nnx.merge(state.model_def, state.params)
     model.train()
 
+    # jax.debug.breakpoint()
+
     @at.typecheck
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
@@ -152,6 +154,8 @@ def train_step(
 
     train_rng = jax.random.fold_in(rng, state.step)
     observation, actions = batch
+
+    # jax.debug.breakpoint()
 
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)
