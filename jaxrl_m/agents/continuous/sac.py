@@ -761,6 +761,7 @@ class SACAgent(flax.struct.PyTreeNode):
                     stop_gradient=stop_gradient,
                     enable_stacking=enable_stacking,
                 )
+            # LOG: Create a pi0 encoder def here #
 
         return encoder_def
 

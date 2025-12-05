@@ -91,6 +91,7 @@ def init_train_state(
         rng, model_rng = jax.random.split(rng)
         # initialize the model (and its parameters).
         model = config.model.create(model_rng)
+        breakpoint()
 
         # Merge the partial params into the model.
         if partial_params is not None:
