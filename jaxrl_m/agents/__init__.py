@@ -9,6 +9,7 @@ from .continuous.sac import SACAgent
 from .continuous.diffusion_q_learning import DiffusionQLearningAgent
 from .continuous.auto_regressive_transformer import AutoRegressiveTransformerAgent
 from .continuous.pi_0 import PiPolicy
+from .continuous.expo_pi import ExpoPiLearner
 
 agents = {
     "ddpm_bc": DDPMBCAgent,
@@ -22,4 +23,5 @@ agents = {
     "sac": SACAgent,
     "auto_regressive_transformer": AutoRegressiveTransformerAgent,
     "pi-0": PiPolicy,
+    "expo": ExpoPiLearner,
 }

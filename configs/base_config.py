@@ -365,6 +365,52 @@ BASE_PI_CONFIG = dict(
     ),
 )
 
+BASE_EXPO_CONFIG = dict(
+    batch_size=16,
+    save_video=True,
+    image_observations=True,
+    libero_tfrecord_regexp="/data/hf_cache/datasets/LIBERO/libero_10_tf/*.tfrecord",
+    dataset_kwargs=dict(
+        cache=False,
+        tfrecords_include_next_observations=False,
+    ),
+    num_epochs=100,
+    num_train_steps_per_epoch=1000,
+    eval_interval=10,
+    log_interval=10,
+    save_interval=50,
+    discount=0.99,
+    actor_lr=3e-4,
+    critic_lr=3e-4,
+    temp_lr=3e-4,
+    tau=0.005,
+    max_episode_steps=1000,
+    save_dir=os.path.join(SAVE_DIR_PREFIX, "results_expo"),
+    # PaliGemma config name from openpi
+    paligemma_config_name="pi05_libero_custom_low_mem",
+    agent_kwargs=dict(
+        batch_size=16,
+        score_network_kwargs=dict(
+            time_dim=128,
+            num_blocks=3,
+            dropout_rate=0.1,
+            hidden_dim=256,
+            use_layer_norm=True,
+        ),
+        use_proprio=False,
+        beta_schedule="cosine",
+        diffusion_steps=5,
+        action_samples=64,
+        repeat_last_step=0,
+        learning_rate=3e-4,
+        warmup_steps=1000,
+        actor_decay_steps=int(3e6),
+        image_observations=False,
+        discount=0.99,
+        drq_padding=0,
+    ),
+)
+
 pi0_base_policy_agent_kwargs_for_parl = BASE_PI_CONFIG["agent_kwargs"].copy()
 pi0_base_policy_agent_kwargs_for_parl.update(
     learning_rate=5e-5,

@@ -18,6 +18,7 @@ from .base_policy import BasePolicy
 # ---- Use the real training functions directly ----
 from jaxrl_m.utils.pi0_train_utils import (
     init_train_state,
+    init_train_state_for_target,
     train_step,
 )
 import openpi.training.checkpoints as _checkpoints
@@ -27,6 +28,7 @@ import openpi.transforms as _transforms
 from openpi.training.config import TrainConfig, DataConfig
 import openpi.models.model as _model
 from openpi.training.data_loader import DataLoader
+from openpi.models.pi0 import make_attn_mask
 from typing import Callable
 
 
@@ -53,6 +55,7 @@ class PiPolicy(BasePolicy):
         rng: Optional[PRNGKey] = None,
         # example arrays for model init
         config: TrainConfig | None = None,
+        is_target: bool = False,
         **kwargs,
         ):
         # NOTE: Pi0.5 initialization does NOT depend on observations or actions.
@@ -60,6 +63,9 @@ class PiPolicy(BasePolicy):
             raise ValueError("Pi-0.5 Policy requires config=<OpenPI TrainConfig>") 
 
         self.config = config
+
+        # Get action_horizon from config
+        self.action_horizon = config.model.action_horizon
 
         # RNG split
         if rng is None:
@@ -81,7 +87,12 @@ class PiPolicy(BasePolicy):
         )
 
         # Initialize model + sharding
-        self.train_state, self.train_state_sharding = init_train_state(
+        if is_target:
+            self.train_state, self.train_state_sharding = init_train_state_for_target(
+                self.config, init_rng, self.mesh, resume=resuming
+            )
+        else:
+            self.train_state, self.train_state_sharding = init_train_state(
             self.config, init_rng, self.mesh, resume=resuming
         )
 
@@ -155,6 +166,7 @@ class PiPolicy(BasePolicy):
         self.output_data_transforms_without_unnorm = _transforms.compose(self.output_data_transforms_without_unnorm)
         self.unnormalize = _transforms.Unnormalize(self.data_norm_stats, use_quantiles=self.data_config.use_quantile_norm)
         self._infer_cache: dict[int, Callable] = {}
+        self._vlm_cache: dict[int, Callable] = {}
 
     # Misc to print trainable params #
     def print_trainable_params(self):
@@ -188,14 +200,15 @@ class PiPolicy(BasePolicy):
     # ------------------------------------------------------------------------------------
     # INFERENCE
     # ------------------------------------------------------------------------------------
-    def sample_actions(self, observations: Data, repeat=1, cache_dir=None, timer=None, argmax=False, 
+    def sample_actions(self, _observations: Data, repeat=1, cache_dir=None, timer=None, argmax=False, 
                        processed_obs=False, normalized=False, return_obs= False, **kwargs):
         with sharding.set_mesh(self.mesh):
             if not processed_obs:
-                observations = self.convert_to_openpi_format_infer(observations)
+                observations = self.convert_to_openpi_format_infer(_observations)
+                # breakpoint()
                 obs = self.input_data_transforms(observations)
             else:
-                obs = observations
+                obs = _observations
 
             if repeat > 1:
                 obs = repeat_tree(obs, repeat)
@@ -207,13 +220,17 @@ class PiPolicy(BasePolicy):
             batch_size = obs['state'].shape[0]
             # breakpoint()
             seed = kwargs.pop("seed")
+            
+            # Split seed once more #
+            seed, rng = jax.random.split(seed)
+
             obs_ = _model.Observation.from_dict(obs)
             if batch_size not in self._infer_cache:
                 # First time seeing this batch size → compile JIT
                 self._infer_cache[batch_size] = self._build_infer_jit()
 
             infer_fn = self._infer_cache[batch_size]
-            actions = infer_fn(self.train_state.params, obs_, seed)
+            actions = infer_fn(self.train_state.params, obs_, rng)
             # actions = self._pinfer(self.train_state.params, obs, seed)
 
             outputs["actions"] = actions
@@ -245,6 +262,182 @@ class PiPolicy(BasePolicy):
                 self.train_rng, self.train_state, batch
             )
         return info
+    
+    # ------------------------------------------------------------------------------------
+    # Get VLM output from the model #
+    # ------------------------------------------------------------------------------------
+    # def get_vlm_output(self, rng, observations):
+    #     with sharding.set_mesh(self.mesh):
+            # model = nnx.merge(self.train_state.model_def, self.train_state.params)
+            # model.eval()
+
+    #         batch_shape = observations['image'].shape[0]
+
+            # observations = self.convert_to_openpi_format_infer(observations)
+            # obs = self.input_data_transforms(observations)
+            # obs_ = _model.Observation.from_dict(obs)
+    #         observation = _model.preprocess_observation(rng, obs_, train=False)
+
+    #         noise = jax.random.normal(noise_rng, )
+    #         time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
+    #         time_expanded = time[..., None, None]
+    #         x_t = time_expanded * noise + (1 - time_expanded) * actions
+    #         u_t = noise - actions
+
+    #         # one big forward pass of prefix + suffix at once
+    #         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation) # LOG: Encode images and language #
+    #         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
+    #         input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
+    #         ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
+    #         attn_mask = make_attn_mask(input_mask, ar_mask)
+    #         positions = jnp.cumsum(input_mask, axis=1) - 1
+    #         (prefix_out, suffix_out), _ = self.PaliGemma.llm(
+    #             [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
+    #         )
+    #         # breakpoint()
+    #         # prefix_tokens, prefix_mask, prefix_ar_mask = model.embed_prefix(obs_)
+    #         breakpoint()
+    #         return prefix_tokens, prefix_mask, prefix_ar_mask
+
+    # def get_vlm_output(
+    #     self,
+    #     rng,
+    #     _observations: Data,
+    # ): # TODO: Add return typecheck #
+    #     with sharding.set_mesh(self.mesh):
+    #         model = nnx.merge(self.train_state.model_def, self.train_state.params)
+    #         model.eval()
+
+    #         observations = self.convert_to_openpi_format_infer(_observations)
+    #         obs = self.input_data_transforms(observations)
+    #         obs_ = _model.Observation.from_dict(obs)
+    #         observation = _model.preprocess_observation(None, obs_, train=False)
+
+    #         # first fill KV cache with a forward pass of the prefix
+    #         prefix_tokens, prefix_mask, prefix_ar_mask = model.embed_prefix(observation)
+    #         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+    #         positions = jnp.cumsum(prefix_mask, axis=1) - 1
+    #         _, kv_cache = model.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+
+    #         # breakpoint()
+    #         return kv_cache
+
+        # def step(carry):
+        #     x_t, time = carry
+        #     suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = model.embed_suffix(
+        #         observation, x_t, jnp.broadcast_to(time, batch_size)
+        #     )
+        #     # `suffix_attn_mask` is shape (b, suffix_len, suffix_len) indicating how the suffix tokens can attend to each
+        #     # other
+        #     suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
+        #     # `prefix_attn_mask` is shape (b, suffix_len, prefix_len) indicating how the suffix tokens can attend to the
+        #     # prefix tokens
+        #     prefix_attn_mask = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
+        #     # `combined_mask` is shape (b, suffix_len, prefix_len + suffix_len) indicating how the suffix tokens (which
+        #     # generate the queries) can attend to the full prefix + suffix sequence (which generates the keys and values)
+        #     full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
+        #     assert full_attn_mask.shape == (
+        #         batch_size,
+        #         suffix_tokens.shape[1],
+        #         prefix_tokens.shape[1] + suffix_tokens.shape[1],
+        #     )
+        #     # `positions` is shape (b, suffix_len) indicating the positions of the suffix tokens
+        #     positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
+
+        #     (prefix_out, suffix_out), _ = self.PaliGemma.llm(
+        #         [None, suffix_tokens],
+        #         mask=full_attn_mask,
+        #         positions=positions,
+        #         kv_cache=kv_cache,
+        #         adarms_cond=[None, adarms_cond],
+        #     )
+        #     assert prefix_out is None
+        #     v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+
+        #     return x_t + dt * v_t, time + dt
+
+        # def cond(carry):
+        #     x_t, time = carry
+        #     # robust to floating-point error
+        #     return time >= -dt / 2
+
+        # x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
+        # return x_0
+    
+    def _build_vlm_jit(self):
+        """
+        Build and JIT-compile a function that runs the VLM prefix and
+        returns the KV cache, given an Observation.
+        """
+
+        def _vlm(params, obs: _model.Observation):
+            # Reconstruct model from graphdef + params
+            model = nnx.merge(self.model_def, params)
+            model.eval()
+
+            # Same preprocessing as in training / sample_actions
+            observation = _model.preprocess_observation(
+                None,  # no rng needed at inference
+                obs,
+                train=False,
+            )
+
+            # first fill KV cache with a forward pass of the prefix
+            prefix_tokens, prefix_mask, prefix_ar_mask = model.embed_prefix(observation)
+            # jax.debug.breakpoint()
+            prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+            positions = jnp.cumsum(prefix_mask, axis=1) - 1
+
+            vlm_output, kv_cache = model.PaliGemma.llm(
+                [prefix_tokens, None],
+                mask=prefix_attn_mask,
+                positions=positions,
+            )
+
+            return vlm_output, kv_cache
+
+        compiled = jax.jit(
+            _vlm,
+            in_shardings=(
+                self.params_sharding,      # params
+                self.replicated_sharding,  # rng
+            ),
+            out_shardings=(self.replicated_sharding, self.replicated_sharding),
+        )
+
+        return compiled
+    
+    def get_vlm_output(
+        self,
+        rng,
+        _observations: Data,
+    ):
+        with sharding.set_mesh(self.mesh):
+            # 1) Convert your env obs → OpenPI format
+            observations = self.convert_to_openpi_format_infer(_observations)
+
+            # 2) Apply the same input transforms as sample_actions
+            obs = self.input_data_transforms(observations)
+
+            # 3) Wrap into OpenPI Observation (still NumPy here is fine;
+            #    preprocess_observation inside the JIT will turn them into jax.Arrays)
+            obs_ = _model.Observation.from_dict(obs)
+
+            # 4) Key JIT cache by batch size (same pattern as _infer_cache)
+            #    choose any reliable field to read batch size from:
+            batch_size = obs_.tokenized_prompt.shape[0]
+
+            if batch_size not in self._vlm_cache:
+                self._vlm_cache[batch_size] = self._build_vlm_jit()
+
+            vlm_fn = self._vlm_cache[batch_size]
+
+            # 5) Call the compiled function
+            out1, kv_cache = vlm_fn(self.train_state.params, obs_)
+
+            return out1, kv_cache
+
+        
 
     def _build_infer_jit(self):
         """

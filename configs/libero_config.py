@@ -16,7 +16,8 @@ from configs.base_config import (
     BASE_GAUSSIAN_CALQL_CONFIG,
     BASE_PARL_CALQL_CONFIG,
     BASE_PI_CONFIG,
-    BASE_PARL_CALQL_CONFIG_Pi0
+    BASE_PARL_CALQL_CONFIG_Pi0,
+    BASE_EXPO_CONFIG
 )
 
 SAVE_DIR_PREFIX = os.environ.get("SAVE_DIR_PREFIX", "./")
@@ -187,6 +188,11 @@ def get_config(config_string):
     pi_config["agent_kwargs"]["image_observations"] = True
     pi_config["agent_kwargs"]["use_proprio"] = True
 
+    # Expo Config #
+    expo_config = deepcopy(BASE_EXPO_CONFIG)
+    expo_config["agent_kwargs"]["batch_size"] = 256
+    ###############
+
 
     possible_structures = {
         "parl_calql": ml_collections.ConfigDict(parl_calql_config),
@@ -194,7 +200,8 @@ def get_config(config_string):
         "gaussian_calql": ml_collections.ConfigDict(gaussian_calql_config),
         "dql": ml_collections.ConfigDict(dql_config),
         "pi0": ml_collections.ConfigDict(pi_config),
-        "parl_calql_pi0": ml_collections.ConfigDict(parl_calql_config_pi0)
+        "parl_calql_pi0": ml_collections.ConfigDict(parl_calql_config_pi0),
+        "expo": ml_collections.ConfigDict(expo_config),
     }
 
     return possible_structures[config_string]

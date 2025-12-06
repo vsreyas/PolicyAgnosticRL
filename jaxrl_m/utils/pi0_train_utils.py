@@ -2,7 +2,7 @@ import dataclasses
 import functools
 import logging
 import platform
-from typing import Any
+from typing import Any, Optional
 
 import etils.epath as epath
 import flax.nnx as nnx
@@ -27,6 +27,7 @@ import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
 import openpi.training.weight_loaders as _weight_loaders
 
+from jaxrl_m.common.typing import Params
 
 def init_logging():
     """Custom logging format for better readability."""
@@ -91,7 +92,7 @@ def init_train_state(
         rng, model_rng = jax.random.split(rng)
         # initialize the model (and its parameters).
         model = config.model.create(model_rng)
-        breakpoint()
+        # breakpoint()
 
         # Merge the partial params into the model.
         if partial_params is not None:
@@ -103,13 +104,14 @@ def init_train_state(
         params = nnx.state(model)
         # Convert frozen params to bfloat16.
         params = nnx_utils.state_map(params, config.freeze_filter, lambda p: p.replace(p.value.astype(jnp.bfloat16)))
+        opt_state = tx.init(params.filter(config.trainable_filter))
 
         return training_utils.TrainState(
             step=0,
             params=params,
             model_def=nnx.graphdef(model),
             tx=tx,
-            opt_state=tx.init(params.filter(config.trainable_filter)),
+            opt_state=opt_state,
             ema_decay=config.ema_decay,
             ema_params=None if config.ema_decay is None else params,
         )
@@ -120,7 +122,9 @@ def init_train_state(
     if resume:
         return train_state_shape, state_sharding
 
+    # Check if train_state arrays loaded from checkpoint and constructed here have same shapes and dtypes
     partial_params = _load_weights_and_validate(config.weight_loader, train_state_shape.params.to_pure_dict())
+    # breakpoint()
     replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
     # Initialize the train state and mix in the partial params.
@@ -133,6 +137,60 @@ def init_train_state(
 
     return train_state, state_sharding
 
+@at.typecheck
+def init_train_state_for_target(
+    config: _config.TrainConfig, init_rng: at.KeyArrayLike, mesh: jax.sharding.Mesh, *, resume: bool
+) -> tuple[training_utils.TrainState, Any]:
+    tx = optax.set_to_zero()
+
+    def init(rng: at.KeyArrayLike, partial_params: at.Params | None = None) -> training_utils.TrainState:
+        rng, model_rng = jax.random.split(rng)
+        # initialize the model (and its parameters).
+        model = config.model.create(model_rng)
+        # breakpoint()
+
+        # Merge the partial params into the model.
+        if partial_params is not None:
+            graphdef, state = nnx.split(model)
+            # This will produce an error if the partial params are not a subset of the state.
+            state.replace_by_pure_dict(partial_params)
+            model = nnx.merge(graphdef, state)
+
+        params = nnx.state(model)
+        # Convert frozen params to bfloat16.
+        params = nnx_utils.state_map(params, config.freeze_filter, lambda p: p.replace(p.value.astype(jnp.bfloat16)))
+        opt_state = tx.init(params)
+
+        return training_utils.TrainState(
+            step=0,
+            params=params,
+            model_def=nnx.graphdef(model),
+            tx=tx,
+            opt_state=opt_state,
+            ema_decay=config.ema_decay,
+            ema_params=None if config.ema_decay is None else params,
+        )
+
+    train_state_shape = jax.eval_shape(init, init_rng)
+    state_sharding = sharding.fsdp_sharding(train_state_shape, mesh, log=True)
+
+    if resume:
+        return train_state_shape, state_sharding
+
+    # Check if train_state arrays loaded from checkpoint and constructed here have same shapes and dtypes
+    partial_params = _load_weights_and_validate(config.weight_loader, train_state_shape.params.to_pure_dict())
+    # breakpoint()
+    replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+
+    # Initialize the train state and mix in the partial params.
+    train_state = jax.jit(
+        init,
+        donate_argnums=(1,),  # donate the partial params buffer.
+        in_shardings=replicated_sharding,
+        out_shardings=state_sharding,
+    )(init_rng, partial_params)
+
+    return train_state, state_sharding
 
 @at.typecheck
 def train_step(
