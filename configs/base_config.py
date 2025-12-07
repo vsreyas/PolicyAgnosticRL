@@ -384,6 +384,7 @@ BASE_EXPO_CONFIG = dict(
     critic_lr=3e-4,
     temp_lr=3e-4,
     tau=0.005,
+    utd_ratio=4,
     max_episode_steps=1000,
     save_dir=os.path.join(SAVE_DIR_PREFIX, "results_expo"),
     # PaliGemma config name from openpi

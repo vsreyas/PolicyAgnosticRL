@@ -89,6 +89,8 @@ class ImageReplayBufferPi:
         config=None,
         task_name: Optional[str] = None,
         use_8D=True,
+        final_step_sparse_reward: bool = True, # Keeps only the last step of the trajectory for reward computation
+        discount: float = 0.99,
     ):
         self.goal_relabeling_strategy = goal_relabeling_strategy
         self.goal_relabeling_kwargs = goal_relabeling_kwargs
@@ -118,7 +120,9 @@ class ImageReplayBufferPi:
         self.data_transforms = _transforms.compose(self.data_transforms)
         self.task_name = task_name
         self.use_8D = use_8D
-
+        self.final_step_sparse_reward = final_step_sparse_reward
+        self.discount = discount
+        
         dataset = self._construct_tf_dataset(data_paths, seed)
 
         if train:
@@ -265,12 +269,53 @@ class ImageReplayBufferPi:
         # number of valid windows = T - (ah - 1)
         W = T - ah + 1
         start_idx = tf.range(W)  
+        # if 'rewards' in parsed_tensors:
+        #     rewards_tf = tf.gather(parsed_tensors["rewards"], start_idx)[: -1]
+        #     masks_tf = tf.gather(parsed_tensors["masks"], start_idx)[: -1]
+        #     mc_returns_tf = tf.gather(parsed_tensors["mc_returns"], start_idx)[: -1]
+        # breakpoint()
         if 'rewards' in parsed_tensors:
             rewards_tf = tf.gather(parsed_tensors["rewards"], start_idx)[: -1]
             masks_tf = tf.gather(parsed_tensors["masks"], start_idx)[: -1]
             mc_returns_tf = tf.gather(parsed_tensors["mc_returns"], start_idx)[: -1]
+            # breakpoint()
 
-      
+            # Optionally override rewards: 0 at all steps, 1 at final step
+            if self.final_step_sparse_reward:
+                # breakpoint()
+                # rewards_tf has shape [W-1]; we use its shape to build the new vector
+                num_steps = tf.shape(rewards_tf)[0]
+                # Start with all zeros
+                rewards = tf.zeros_like(rewards_tf)
+                # Set last index to 1.0
+                last_idx = num_steps - 1
+                rewards = tf.tensor_scatter_nd_update(
+                    rewards,
+                    indices=tf.reshape(last_idx, [1, 1]),  # [[last_idx]]
+                    updates=tf.constant([1.0], dtype=rewards.dtype),
+                )
+                out["rewards"] = rewards
+                rewards_tf = rewards
+                # Keep masks / mc_returns as-is (or adjust later if you want them consistent)
+                out["masks"] = masks_tf
+                # out["mc_returns"] = mc_returns_tf
+
+                gamma = tf.constant(self.discount, dtype=rewards_tf.dtype)
+                rev_rewards = tf.reverse(rewards_tf, axis=[0])
+                
+                def scan_fn(acc, r):
+                    return r + gamma * acc
+                
+                rev_returns = tf.scan(
+                    scan_fn,
+                    rev_rewards,
+                )
+
+                mc_returns_tf = tf.reverse(rev_returns, axis=[0])
+            else:
+                out["rewards"] = rewards_tf
+                out["masks"] = masks_tf
+                out["mc_returns"] = mc_returns_tf
 
         actions_tf = tf.map_fn(
             lambda t: actions_tf[t : t + ah],

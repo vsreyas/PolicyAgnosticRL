@@ -297,61 +297,135 @@ class ExpoPiLearner(Agent):
         return np.array(action.squeeze()), self.replace(rng=rng)
 
 
-    def sample_batch_actions(self, observations):
-        rng = self.rng
+    def sample_batch_actions(self, _observations: Data, *args, **kwargs):
+        # rng = self.rng
 
-        observations = jnp.squeeze(observations)
-        observations = jax.device_put(observations)
+        # observations = jnp.squeeze(observations)
+        # observations = jax.device_put(observations)
         
-        batch_size = observations.shape[0]
-        observations_repeated = jnp.repeat(observations, self.N, axis=0)
+        # batch_size = observations.shape[0]
+        # observations_repeated = jnp.repeat(observations, self.N, axis=0)
 
-        actor_params = self.actor.params
-        actions_flat, rng = ddpm_train_sampler(
-            self.actor.apply_fn, actor_params, self.T, rng, self.action_dim, 
-            observations_repeated, self.alphas, self.alpha_hats, self.betas, 
-            self.ddpm_temperature, self.M, self.clip_sampler
-        )
+        # actor_params = self.actor.params
+        # actions_flat, rng = ddpm_train_sampler(
+        #     self.actor.apply_fn, actor_params, self.T, rng, self.action_dim, 
+        #     observations_repeated, self.alphas, self.alpha_hats, self.betas, 
+        #     self.ddpm_temperature, self.M, self.clip_sampler
+        # )
 
-        actions = actions_flat.reshape(batch_size, self.N, -1)
-        observations_repeated = jnp.repeat(observations, self.N + self.n_edit_samples, axis=0)
+        # actions = actions_flat.reshape(batch_size, self.N, -1)
+        # observations_repeated = jnp.repeat(observations, self.N + self.n_edit_samples, axis=0)
         
-        if self.n_edit_samples > 0:
-            key, rng = jax.random.split(rng, 2)
-            r_observations = jnp.repeat(observations, self.n_edit_samples, axis=0) # (batch_size * n_edit_samples, obs_dim) repeats
-            d_actions = actions.copy()[:, :self.n_edit_samples].reshape(-1, actions.shape[-1])
-            r_observations = jnp.concatenate([r_observations, d_actions], axis=1) # self.n_edit_samples actions for each observation
-            r_samples, rng =  _sample_actions(key, self.edit_actor.apply_fn, self.edit_actor.params, r_observations)
-            r_samples = r_samples * self.edit_action_scale + d_actions
-            actions = jnp.concatenate([actions, r_samples.reshape(batch_size, self.n_edit_samples, -1)], axis=1)
-            actions_flat = actions.reshape(-1, actions.shape[-1])
+        # if self.n_edit_samples > 0:
+        #     key, rng = jax.random.split(rng, 2)
+        #     r_observations = jnp.repeat(observations, self.n_edit_samples, axis=0) # (batch_size * n_edit_samples, obs_dim) repeats
+        #     d_actions = actions.copy()[:, :self.n_edit_samples].reshape(-1, actions.shape[-1])
+        #     r_observations = jnp.concatenate([r_observations, d_actions], axis=1) # self.n_edit_samples actions for each observation
+        #     r_samples, rng =  _sample_actions(key, self.edit_actor.apply_fn, self.edit_actor.params, r_observations)
+        #     r_samples = r_samples * self.edit_action_scale + d_actions
+        #     actions = jnp.concatenate([actions, r_samples.reshape(batch_size, self.n_edit_samples, -1)], axis=1)
+        #     actions_flat = actions.reshape(-1, actions.shape[-1])
 
 
         
+        # if self.N > 1:
+        #     key, rng = jax.random.split(rng)
+        #     target_params = subsample_ensemble(
+        #         key, self.target_critic.params, self.num_min_qs, self.num_qs
+        #     )
+            
+        #     obs_flat = observations_repeated
+        #     actions_flat = actions_flat
+
+        #     qs = compute_q(self.target_critic.apply_fn, target_params, obs_flat, actions_flat)
+        #     qs = qs.reshape(batch_size, self.N + self.n_edit_samples)
+
+        #     best_indices = jnp.argmax(qs, axis=1) 
+        #     batch_indices = jnp.arange(batch_size)
+        #     best_actions = actions[batch_indices, best_indices] 
+        # else:
+        #     best_actions = actions[:, 0] 
+        
+        # rng, _ = jax.random.split(rng, 2)
+        # return jnp.array(best_actions.squeeze())
+
+        # Extract rng from kwargs
+        # seed = kwargs.pop("seed")
+        # # Split seed #
+        # seed, rng = jax.random.split(seed)
+        seed = kwargs.pop("seed")
+        seed, rng = jax.random.split(seed)
+        timer = kwargs.pop("timer")
+        # timer.tick("total_sample_actions_time")
+        # timer.tick("sample_actions_time")
+        # Repeat observations to sample `N` actions#
+        observations = repeat_observations(_observations, self.N, axis=0)
+
+        # breakpoint()
+        actions = self.actor.sample_actions(observations, seed=rng) # (N, action_horizon, action_dim)
+        # timer.tock("sample_actions_time")
+        # breakpoint()
+        diffusion_actions = actions
+        
+        # # DEBUG #
+        # action = actions[0, 0, :]
+        # #########
+
+        # Do a forward pass to get VLM output #
+        seed, rng = jax.random.split(rng)
+        vlm_output, _ = self.target_actor.get_vlm_output(rng, observations)
+        # vlm_output: (N, 256 * num_images + 200 (tokens), pi0_hidden_dims)
+        # breakpoint()
+        # Take mean across tokens as representation from VLM #
+        vlm_output = jnp.mean(vlm_output[0], axis=1) # (N, pi0_hidden_dims)
+
+        # NOTE: In all the computation in this class, self.action_dim = action_horizon * action_dim, so keep that semantic in mind #
+        # This is done so that without any code modification, edit_actor outputs an action chunk #
+        # TODO: Think of a better design #
         if self.N > 1:
             key, rng = jax.random.split(rng)
             target_params = subsample_ensemble(
                 key, self.target_critic.params, self.num_min_qs, self.num_qs
             )
-            
-            obs_flat = observations_repeated
-            actions_flat = actions_flat
 
-            qs = compute_q(self.target_critic.apply_fn, target_params, obs_flat, actions_flat)
-            qs = qs.reshape(batch_size, self.N + self.n_edit_samples)
+            if self.n_edit_samples > 0:
+                key, rng = jax.random.split(rng, 2)
 
-            best_indices = jnp.argmax(qs, axis=1) 
-            batch_indices = jnp.arange(batch_size)
-            best_actions = actions[batch_indices, best_indices] 
+                observations = jnp.concatenate([vlm_output, jnp.expand_dims(vlm_output[0], axis = 0).repeat(self.n_edit_samples, axis = 0)], axis=0)
+                # (N + n_edit_samples, pi0_hidden_dims)
+
+                r_observations = jnp.repeat(jnp.expand_dims(vlm_output[0], axis = 0), self.n_edit_samples, axis=0) # (n_edit_samples, pi0_hidden_dims)
+                d_actions = diffusion_actions.copy()[:self.n_edit_samples] # (n_edit_samples, action_horizon, action_dim)
+                d_actions = d_actions.reshape(self.n_edit_samples, -1) # (n_edit_samples, action_horizon * action_dim)
+                r_observations = jnp.concatenate([r_observations, d_actions], axis=1) # (n_edit_samples, pi0_hidden_dims + action_horizon * action_dim)
+                r_samples, rng =  _sample_actions(key, self.edit_actor.apply_fn, self.edit_actor.params, r_observations) # (n_edit_samples, action_horizon * action_dim)
+                r_samples = r_samples * self.edit_action_scale + d_actions
+                # Need to divide by action_horizon as self.action_dim = action_horizon * action_dim in this class #
+                r_samples = r_samples.reshape(-1, self.action_horizon, self.action_dim // self.action_horizon) # (n_edit_samples, action_horizon, action_dim)
+                actions = jnp.concatenate([actions, r_samples], axis=0) # (N + n_edit_samples, action_horizon, action_dim)
+
+            actions = actions.reshape(-1, self.action_dim) # (N + n_edit_samples, action_horizon * action_dim) # Accounting for the fact that self.action_dim = action_horizon * action_dim in this class #
+            qs = compute_q(self.target_critic.apply_fn, target_params, observations, actions)
+            # Keep only first action in chunk for choosing next action #
+            actions = actions.reshape(self.N + self.n_edit_samples, self.action_horizon, self.action_dim // self.action_horizon)
+            actions = actions[:, 0, :] # (N + n_edit_samples, action_dim)
+            idx = jnp.argmax(qs)
+            action = actions[idx]
+
+            # breakpoint()
+
         else:
-            best_actions = actions[:, 0] 
+            raise ValueError(f"N must be greater than 1, got {self.N}")
         
+        # timer.tock("total_sample_actions_time")
+        # print(timer.get_total_times(reset=False))
+
         rng, _ = jax.random.split(rng, 2)
-        return jnp.array(best_actions.squeeze())
+        return np.array(action.squeeze())
     
     
 
-    def sample_actions(self, _observations, *args, **kwargs):
+    def sample_actions(self, _observations: Data, *args, **kwargs):
         # Extract rng from kwargs
         # seed = kwargs.pop("seed")
         # # Split seed #
@@ -516,6 +590,7 @@ class ExpoPiLearner(Agent):
         return self.replace(temp=temp), temp_info
 
     def update_critic(self, batch: Batch) -> Tuple[TrainState, Dict[str, float]]:
+        breakpoint()
 
         next_actions = self.sample_batch_actions(batch["next_observations"])
         rng = self.rng
@@ -592,18 +667,19 @@ class ExpoPiLearner(Agent):
     
 
 
-    @partial(jax.jit, static_argnames="utd_ratio")
-    def update(self, batch: Batch, utd_ratio: int):
+    # @partial(jax.jit, static_argnames="utd_ratio")
+    def update(self, _observations: Data, utd_ratio: int):
 
         new_agent = self
         for i in range(utd_ratio):
+            breakpoint()
 
             def slice(x):
                 assert x.shape[0] % utd_ratio == 0
                 batch_size = x.shape[0] // utd_ratio
                 return x[batch_size * i : batch_size * (i + 1)]
 
-            mini_batch = jax.tree_util.tree_map(slice, batch)
+            mini_batch = jax.tree_util.tree_map(slice, _observations)
             new_agent, critic_info = new_agent.update_critic(mini_batch)
 
         new_agent, actor_info = new_agent.update_actor(mini_batch)

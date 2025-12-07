@@ -156,6 +156,11 @@ flags.DEFINE_integer(
     "Number of actions to sample for the policy.",
 )
 flags.DEFINE_bool(
+    "final_step_sparse_reward",
+    False,
+    "Use sparse reward for the final step.",
+)
+flags.DEFINE_bool(
     "use_wrist_view",
     True,
     "Use Wrist view camera."
@@ -566,7 +571,8 @@ def train_agent(_):
         dataset = get_libero_tfrecord_dataset(
             tfrecord_regexp=FLAGS.config.libero_tfrecord_regexp, use_wrist_view=FLAGS.use_wrist_view, 
             use_language=FLAGS.use_lang, config=pi_config, is_pi=True, **FLAGS.config.dataset_kwargs,
-            task_name=FLAGS.task_name,
+            task_name=FLAGS.task_name, 
+            final_step_sparse_reward=FLAGS.final_step_sparse_reward,
         )
         # breakpoint()
         libero_config = get_libero_config()
@@ -645,72 +651,86 @@ def train_agent(_):
     # breakpoint()
 
     # TODO: Remove hardcode and init with flags appropriately #
-    num_trajectories_to_collect = 10
+    num_trajectories_to_collect = 1
 
     timer = Timer()
 
     ### EXPO agent training ###
     ### Online training ###
-    for i in range(FLAGS.num_online_epochs + 1):
-        data_collection_rng_key, rng = jax.random.split(rng)
-        env_data_collection_policy_fn = get_policy_fn(
-            agent=agent,
-            rng=data_collection_rng_key,
-            timer=timer,
-        )
-
-        trajectories = []
-        for traj_index in range(num_trajectories_to_collect):
-            timer.tick("trajectory_sampling_time")
-            traj = data_collection_trajectory_sampler.sample(
-                env_data_collection_policy_fn,
-                num_episodes=1,
-                replay_buffer=state_replay_buffer,
-                calc_mc_return_fn=functools.partial(calc_mc_return_fn, discount=FLAGS.config.agent_kwargs.discount, reward_bias=FLAGS.reward_bias),
-                store_max_trajectory_reward=True,
-                terminate_on_success=FLAGS.config.get(
-                    "early_terminate_on_success", False
-                ),
-            )[0]
-            timer.tock("trajectory_sampling_time")
-            print(timer.get_total_times(reset=False))
-            # LOG: `traj` statistics #
-            # breakpoint()
-            trajectories.append(traj)
-        
-        breakpoint()
-
-        if FLAGS.config.image_observations:
-            # Save trajectory as tfrecord
-            save_trajectory_as_tfrecord(
-                trajectory=traj,
-                path=tf.io.gfile.join(
-                    save_dir,
-                    "image_replay_buffer",
-                    f"episode_{online_trajectories_added}.tfrecord",
-                ),
+    for i in range(FLAGS.num_offline_epochs + FLAGS.num_online_epochs + 1):
+        if i >= FLAGS.num_offline_epochs and FLAGS.num_online_epochs > 0:
+            logging.info("Switching to online training...")
+            data_collection_rng_key, rng = jax.random.split(rng)
+            env_data_collection_policy_fn = get_policy_fn(
+                agent=agent,
+                rng=data_collection_rng_key,
+                timer=timer,
             )
-        online_trajectories_added += 1
-        online_env_steps_this_epoch += len(traj["rewards"])
 
-        # Finished collecting trajectories
-        # LOG: Construct buffers using the trajectories #
-        # LOG: Looks like two iterators are constructed, one for online trajectories and `dataset` from previous definition, for offline dataset #
-        online_env_steps += online_env_steps_this_epoch
-        # Recreate the image replay buffer iterator to include the new trajectories
-        timer.tick("recreate_image_replay_buffer_iterator")
-        data_paths = glob_to_path_list(
-            tf.io.gfile.join(save_dir, "image_replay_buffer", "*.tfrecord")
-        )
-        image_replay_buffer = ImageReplayBufferPi(
-            data_paths=data_paths,
-            seed=FLAGS.seed,
-            train=True,
-            task_name=FLAGS.task_name,
-            use_wrist_view=FLAGS.use_wrist_view, 
-            use_language=FLAGS.use_lang, config=pi_config,
-            **FLAGS.config.image_replay_buffer_kwargs,
-        )
+            trajectories = []
+            for traj_index in range(num_trajectories_to_collect):
+                timer.tick("trajectory_sampling_time")
+                traj = data_collection_trajectory_sampler.sample(
+                    env_data_collection_policy_fn,
+                    num_episodes=1,
+                    replay_buffer=state_replay_buffer,
+                    calc_mc_return_fn=functools.partial(calc_mc_return_fn, discount=FLAGS.config.agent_kwargs.discount, reward_bias=FLAGS.reward_bias),
+                    store_max_trajectory_reward=True,
+                    terminate_on_success=FLAGS.config.get(
+                        "early_terminate_on_success", False
+                    ),
+                )[0]
+                timer.tock("trajectory_sampling_time")
+                print(timer.get_total_times(reset=False))
+                # LOG: `traj` statistics #
+                # breakpoint()
+                trajectories.append(traj)
+
+                if FLAGS.config.image_observations:
+                    # Save trajectory as tfrecord
+                    save_trajectory_as_tfrecord(
+                        trajectory=traj,
+                        path=tf.io.gfile.join(
+                            save_dir,
+                            "image_replay_buffer",
+                            f"episode_{online_trajectories_added}.tfrecord",
+                        ),
+                    )
+                online_trajectories_added += 1
+                online_env_steps_this_epoch += len(traj["rewards"])
+
+            # Finished collecting trajectories
+            # LOG: Construct buffers using the trajectories #
+            # LOG: Looks like two iterators are constructed, one for online trajectories and `dataset` from previous definition, for offline dataset #
+            online_env_steps += online_env_steps_this_epoch
+            # Recreate the image replay buffer iterator to include the new trajectories
+            timer.tick("recreate_image_replay_buffer_iterator")
+            data_paths = glob_to_path_list(
+                tf.io.gfile.join(save_dir, "image_replay_buffer", "*.tfrecord")
+            )
+            image_replay_buffer = ImageReplayBufferPi(
+                data_paths=data_paths,
+                seed=FLAGS.seed,
+                train=True,
+                task_name=FLAGS.task_name,
+                use_wrist_view=FLAGS.use_wrist_view, 
+                use_language=FLAGS.use_lang, config=pi_config,
+                **FLAGS.config.image_replay_buffer_kwargs,
+            )
+        
+        ### Offline training ###
+        else:
+            # Sample an offline batch and do an update #
+            batch = next(offline_train_iterator_for_critic)
+            batch = shard_batch(batch, sharding)
+            batch = set_batch_masks(
+                batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
+            )
+            agent.update(batch, utd_ratio=FLAGS.config.utd_ratio)
+
+            
+
+        breakpoint()
 
 if __name__ == "__main__":
     app.run(train_agent)
