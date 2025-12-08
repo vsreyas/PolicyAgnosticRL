@@ -200,13 +200,39 @@ class PiPolicy(BasePolicy):
     # ------------------------------------------------------------------------------------
     # INFERENCE
     # ------------------------------------------------------------------------------------
-    def sample_actions(self, _observations: Data, repeat=1, cache_dir=None, timer=None, argmax=False, 
-                       processed_obs=False, normalized=False, return_obs= False, **kwargs):
+    def sample_actions(self, _observations: Data | Batch, repeat=1, cache_dir=None, timer=None, argmax=False, 
+                       processed_obs=False, normalized=False, return_obs= False, obs_key: str | None = None, infer=True, **kwargs):
         with sharding.set_mesh(self.mesh):
             if not processed_obs:
-                observations = self.convert_to_openpi_format_infer(_observations)
                 # breakpoint()
-                obs = self.input_data_transforms(observations)
+                # if infer:
+                #     observations = self.convert_to_openpi_format_infer(_observations)
+                # else:
+                #     observations = self.convert_to_openpi_format(_observations, obs_key=obs_key)
+                # # breakpoint()
+                # obs = self.input_data_transforms(observations)
+                if infer:
+                    observations = self.convert_to_openpi_format_infer(_observations, obs_key=obs_key)
+
+                    # 2) Apply the same input transforms as sample_actions
+                    obs = self.input_data_transforms(observations)
+
+                    # 3) Wrap into OpenPI Observation (still NumPy here is fine;
+                    #    preprocess_observation inside the JIT will turn them into jax.Arrays)
+                    # obs_ = _model.Observation.from_dict(obs)
+
+                    # 4) Key JIT cache by batch size (same pattern as _infer_cache)
+                    #    choose any reliable field to read batch size from:
+                    # batch_size = obs_.tokenized_prompt.shape[0]
+                    batch_size = obs['state'].shape[0]
+                else:
+                    observations = self.convert_to_openpi_format(_observations, obs_key=obs_key)
+
+                    obs = (_model.Observation.from_dict(observations), observations["actions"])
+
+                    batch_size = observations['actions'].shape[0]
+
+
             else:
                 obs = _observations
 
@@ -215,9 +241,8 @@ class PiPolicy(BasePolicy):
                 obs = flatten_repeat(obs)  
             outputs = {
                 "state": obs["state"],
-                }
-            
-            batch_size = obs['state'].shape[0]
+                }            
+
             # breakpoint()
             seed = kwargs.pop("seed")
             
@@ -266,103 +291,6 @@ class PiPolicy(BasePolicy):
     # ------------------------------------------------------------------------------------
     # Get VLM output from the model #
     # ------------------------------------------------------------------------------------
-    # def get_vlm_output(self, rng, observations):
-    #     with sharding.set_mesh(self.mesh):
-            # model = nnx.merge(self.train_state.model_def, self.train_state.params)
-            # model.eval()
-
-    #         batch_shape = observations['image'].shape[0]
-
-            # observations = self.convert_to_openpi_format_infer(observations)
-            # obs = self.input_data_transforms(observations)
-            # obs_ = _model.Observation.from_dict(obs)
-    #         observation = _model.preprocess_observation(rng, obs_, train=False)
-
-    #         noise = jax.random.normal(noise_rng, )
-    #         time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
-    #         time_expanded = time[..., None, None]
-    #         x_t = time_expanded * noise + (1 - time_expanded) * actions
-    #         u_t = noise - actions
-
-    #         # one big forward pass of prefix + suffix at once
-    #         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation) # LOG: Encode images and language #
-    #         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
-    #         input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
-    #         ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
-    #         attn_mask = make_attn_mask(input_mask, ar_mask)
-    #         positions = jnp.cumsum(input_mask, axis=1) - 1
-    #         (prefix_out, suffix_out), _ = self.PaliGemma.llm(
-    #             [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
-    #         )
-    #         # breakpoint()
-    #         # prefix_tokens, prefix_mask, prefix_ar_mask = model.embed_prefix(obs_)
-    #         breakpoint()
-    #         return prefix_tokens, prefix_mask, prefix_ar_mask
-
-    # def get_vlm_output(
-    #     self,
-    #     rng,
-    #     _observations: Data,
-    # ): # TODO: Add return typecheck #
-    #     with sharding.set_mesh(self.mesh):
-    #         model = nnx.merge(self.train_state.model_def, self.train_state.params)
-    #         model.eval()
-
-    #         observations = self.convert_to_openpi_format_infer(_observations)
-    #         obs = self.input_data_transforms(observations)
-    #         obs_ = _model.Observation.from_dict(obs)
-    #         observation = _model.preprocess_observation(None, obs_, train=False)
-
-    #         # first fill KV cache with a forward pass of the prefix
-    #         prefix_tokens, prefix_mask, prefix_ar_mask = model.embed_prefix(observation)
-    #         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
-    #         positions = jnp.cumsum(prefix_mask, axis=1) - 1
-    #         _, kv_cache = model.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
-
-    #         # breakpoint()
-    #         return kv_cache
-
-        # def step(carry):
-        #     x_t, time = carry
-        #     suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = model.embed_suffix(
-        #         observation, x_t, jnp.broadcast_to(time, batch_size)
-        #     )
-        #     # `suffix_attn_mask` is shape (b, suffix_len, suffix_len) indicating how the suffix tokens can attend to each
-        #     # other
-        #     suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
-        #     # `prefix_attn_mask` is shape (b, suffix_len, prefix_len) indicating how the suffix tokens can attend to the
-        #     # prefix tokens
-        #     prefix_attn_mask = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
-        #     # `combined_mask` is shape (b, suffix_len, prefix_len + suffix_len) indicating how the suffix tokens (which
-        #     # generate the queries) can attend to the full prefix + suffix sequence (which generates the keys and values)
-        #     full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
-        #     assert full_attn_mask.shape == (
-        #         batch_size,
-        #         suffix_tokens.shape[1],
-        #         prefix_tokens.shape[1] + suffix_tokens.shape[1],
-        #     )
-        #     # `positions` is shape (b, suffix_len) indicating the positions of the suffix tokens
-        #     positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
-
-        #     (prefix_out, suffix_out), _ = self.PaliGemma.llm(
-        #         [None, suffix_tokens],
-        #         mask=full_attn_mask,
-        #         positions=positions,
-        #         kv_cache=kv_cache,
-        #         adarms_cond=[None, adarms_cond],
-        #     )
-        #     assert prefix_out is None
-        #     v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
-
-        #     return x_t + dt * v_t, time + dt
-
-        # def cond(carry):
-        #     x_t, time = carry
-        #     # robust to floating-point error
-        #     return time >= -dt / 2
-
-        # x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
-        # return x_0
     
     def _build_vlm_jit(self):
         """
@@ -410,22 +338,33 @@ class PiPolicy(BasePolicy):
     def get_vlm_output(
         self,
         rng,
-        _observations: Data,
+        _observations: Data | Batch,
+        infer=True,
+        obs_key: str = None,
     ):
         with sharding.set_mesh(self.mesh):
             # 1) Convert your env obs → OpenPI format
-            observations = self.convert_to_openpi_format_infer(_observations)
+            if infer:
+                observations = self.convert_to_openpi_format_infer(_observations, obs_key=obs_key)
 
-            # 2) Apply the same input transforms as sample_actions
-            obs = self.input_data_transforms(observations)
+                # 2) Apply the same input transforms as sample_actions
+                obs = self.input_data_transforms(observations)
 
-            # 3) Wrap into OpenPI Observation (still NumPy here is fine;
-            #    preprocess_observation inside the JIT will turn them into jax.Arrays)
-            obs_ = _model.Observation.from_dict(obs)
+                # 3) Wrap into OpenPI Observation (still NumPy here is fine;
+                #    preprocess_observation inside the JIT will turn them into jax.Arrays)
+                obs_ = _model.Observation.from_dict(obs)
 
-            # 4) Key JIT cache by batch size (same pattern as _infer_cache)
-            #    choose any reliable field to read batch size from:
-            batch_size = obs_.tokenized_prompt.shape[0]
+                # 4) Key JIT cache by batch size (same pattern as _infer_cache)
+                #    choose any reliable field to read batch size from:
+                batch_size = obs_.tokenized_prompt.shape[0]
+            else:
+                observations = self.convert_to_openpi_format(_observations, obs_key=obs_key)
+
+                obs_ = (_model.Observation.from_dict(observations), observations["actions"])
+
+                batch_size = observations['actions'].shape[0]
+
+            
 
             if batch_size not in self._vlm_cache:
                 self._vlm_cache[batch_size] = self._build_vlm_jit()
@@ -587,7 +526,7 @@ class PiPolicy(BasePolicy):
         else:
             return _model.Observation.from_dict(out)
     
-    def convert_to_openpi_format(self, out_new):
+    def convert_to_openpi_format(self, out_new, obs_key: str = "observations"): # Assumes out_new to be a `Batch` type #
         """
         Converts your NEW nested output format into the OLD OpenPI-style format.
         No copies are made — only dict references.
@@ -598,7 +537,7 @@ class PiPolicy(BasePolicy):
         # ------------------------------------------------
         # 1. State & Actions
         # ------------------------------------------------
-        old["state"] = out_new["observations"]["proprio"]
+        old["state"] = out_new[obs_key]["proprio"]
         old["actions"] = out_new["actions"]
 
         # ------------------------------------------------
@@ -612,7 +551,7 @@ class PiPolicy(BasePolicy):
         }
 
         old["image"] = {
-            oldname: out_new["observations"][newname]
+            oldname: out_new[obs_key][newname]
             for newname, oldname in CAM_REVERSE.items()
         }
 
@@ -620,7 +559,7 @@ class PiPolicy(BasePolicy):
         # 3. Image Masks
         # ------------------------------------------------
         old["image_mask"] = {
-            oldname: out_new["observations_image_mask"][newname]
+            oldname: out_new[obs_key + "_image_mask"][newname]
             for newname, oldname in CAM_REVERSE.items()
         }
 
@@ -634,12 +573,21 @@ class PiPolicy(BasePolicy):
             old["token_loss_mask"]       = out_new["token_loss_mask"]
         return old
     
-    def convert_to_openpi_format_infer(self, out_new):
+    def convert_to_openpi_format_infer(self, out_new, obs_key: str | None = None, *args, **kwargs): # Assumes out_new to be a `Data` type #
         """
         Converts your NEW nested output format into the OLD OpenPI-style format.
         No copies are made — only dict references.
         """
+        if obs_key is not None:
+            prompt = out_new["prompt_bytes"]
+            prompt = batch_decode_prompt_bytes(prompt)
+            out_new = out_new[obs_key]
+            out_new["prompt"] = prompt
 
+            state_dim = kwargs.get("state_dim", 8)
+            out_new["proprio"] = out_new["proprio"][:, :state_dim]
+            # breakpoint()
+        
         old = {}
 
         # ------------------------------------------------
@@ -803,3 +751,14 @@ def unflatten_repeat(tree, repeat: int):
 
     return jax.tree.map(_unflatten, tree)
 
+
+def decode_prompt_bytes(prompt_bytes: np.ndarray) -> str:
+    # prompt_bytes: (MAX_PROMPT_BYTES,) uint8
+    # Drop trailing zeros
+    non_zero = np.trim_zeros(prompt_bytes, 'b')  # 'b' trims both ends
+    b = non_zero.tobytes()
+    return b.decode("utf-8")
+
+# For a batch:
+def batch_decode_prompt_bytes(prompt_bytes_batch: np.ndarray) -> list[str]:
+    return [decode_prompt_bytes(prompt_bytes_batch[idx, :]) for idx in range(prompt_bytes_batch.shape[0])]

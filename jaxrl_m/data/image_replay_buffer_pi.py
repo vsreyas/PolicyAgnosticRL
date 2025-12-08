@@ -558,6 +558,26 @@ class ImageReplayBufferPi:
         num_samples = tf.shape(out["prompt"])[0]
         clip_emb = tf.repeat(clip_emb[None, :], num_samples, axis=0)
         out['observations']["language"] = clip_emb
+
+        # Keep prompt for inference #
+        MAX_PROMPT_BYTES = 256
+        def encode_prompt_to_bytes(prompt_str: tf.Tensor) -> tf.Tensor:
+            # prompt_str: scalar tf.string
+            b = tf.io.encode_base64(prompt_str)  # or tf.strings.unicode_encode if you prefer
+            b = tf.io.decode_base64(b)          # ensure raw bytes, no newline, etc.
+            byte_values = tf.io.decode_raw(b, tf.uint8)  # [L]
+            byte_values = byte_values[:MAX_PROMPT_BYTES]
+            pad_len = MAX_PROMPT_BYTES - tf.shape(byte_values)[0]
+            padded = tf.pad(byte_values, [[0, pad_len]])
+            return padded  # [MAX_PROMPT_BYTES]
+        
+        encoded_prompts = tf.map_fn(
+            encode_prompt_to_bytes,
+            out["prompt"],
+            fn_output_signature=tf.TensorSpec([MAX_PROMPT_BYTES], tf.uint8),
+        )
+        out["prompt_bytes"] = encoded_prompts
+        # breakpoint()
         out.pop("prompt")
 
         # breakpoint()

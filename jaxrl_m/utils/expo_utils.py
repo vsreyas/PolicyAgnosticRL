@@ -244,5 +244,19 @@ def repeat_observations(observations, N, axis=0):
         return jnp.repeat(jnp.expand_dims(observations, axis), N, axis=axis)
     elif isinstance(observations, str):
         return [observations] * N
+    elif isinstance(observations, jax.Array):
+        return jnp.repeat(jnp.expand_dims(observations, axis), N, axis=axis)
+    else:
+        raise ValueError(f"Unsupported type: {type(observations)}")
+
+def repeat_observations_batched(observations, N, axis=0):
+    if isinstance(observations, dict):
+        return {k: repeat_observations_batched(v, N) for k, v in observations.items()}
+    elif isinstance(observations, np.ndarray):
+        return jnp.repeat(observations, N, axis=axis)
+    elif isinstance(observations, str):
+        return observations
+    elif isinstance(observations, jax.Array):
+        return jnp.repeat(observations, N, axis=axis)
     else:
         raise ValueError(f"Unsupported type: {type(observations)}")
