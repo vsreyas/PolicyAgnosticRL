@@ -59,6 +59,111 @@ def compute_q(critic_fn, critic_params, observations, actions):
     q_values = q_values.min(axis=0)
     return q_values
 
+# ----------------------------------------------------------------------
+# Jitted inner steps for edit-actor and critic updates
+# ----------------------------------------------------------------------
+
+@partial(
+    jax.jit,
+    static_argnames=(
+        "entropy_scale",
+        "edit_action_scale",
+        "edit_actor_apply_fn",
+        "critic_apply_fn",
+        "temp_apply_fn",
+    ),
+)
+def _edit_actor_loss_and_grad(
+    actor_params,
+    critic_params,
+    temp_params,
+    vlm_output,
+    batch_actions,
+    dropout_key,
+    key,
+    key2,
+    entropy_scale: float,
+    edit_action_scale: float,
+    edit_actor_apply_fn,
+    critic_apply_fn,
+    temp_apply_fn,
+):
+    """Single jitted step for edit_actor: forward + loss + grad."""
+
+    def loss_fn(actor_params):
+        # [B, D_vlm + D_action]
+        edit_observations = jnp.concatenate([vlm_output, batch_actions], axis=1)
+
+        dist = edit_actor_apply_fn(
+            {"params": actor_params},
+            edit_observations,
+            training=True,
+            rngs={"dropout": dropout_key},
+        )
+        actions = dist.sample(seed=key)
+
+        log_probs = dist.log_prob(actions)
+        actions = actions * edit_action_scale
+        log_probs -= actions.shape[-1] * jnp.log(edit_action_scale)
+
+        actions = actions + batch_actions
+
+        qs = critic_apply_fn(
+            {"params": critic_params},
+            vlm_output,
+            actions,
+            True,
+            rngs={"dropout": key2},
+        )
+        q = qs.mean(axis=0)
+
+        temperature = temp_apply_fn({"params": temp_params})
+        edit_actor_loss = (entropy_scale * log_probs * temperature - q).mean()
+
+        metrics = {
+            "edit_q": q.mean(),
+            "edit_actor_loss": edit_actor_loss,
+            "entropy": -log_probs.mean(),
+        }
+        return edit_actor_loss, metrics
+
+    (loss, metrics), grads = jax.value_and_grad(
+        loss_fn, has_aux=True
+    )(actor_params)
+    return grads, metrics
+
+
+@partial(jax.jit, static_argnames=("critic_apply_fn",))
+def _critic_loss_and_grad(
+    critic_params,
+    vlm_output,
+    actions,
+    target_q,
+    key,
+    critic_apply_fn,
+):
+    """Single jitted step for critic: forward + loss + grad."""
+
+    def loss_fn(critic_params):
+        qs = critic_apply_fn(
+            {"params": critic_params},
+            vlm_output,
+            actions,
+            True,
+            rngs={"dropout": key},
+        )
+        critic_loss = ((qs - target_q) ** 2).mean()
+        metrics = {
+            "critic_loss": critic_loss,
+            "q": qs.mean(),
+        }
+        return critic_loss, metrics
+
+    (loss, metrics), grads = jax.value_and_grad(
+        loss_fn, has_aux=True
+    )(critic_params)
+    return grads, metrics
+
 
 @partial(jax.jit, static_argnames="apply_fn")
 def _sample_actions(rng, apply_fn, params, observations: np.ndarray) -> np.ndarray:
@@ -227,6 +332,9 @@ class ExpoPiLearner(Agent):
         )
 
         # breakpoint()
+
+        del dummy_observations, dummy_actions, edit_observations
+        del edit_actor_params, critic_params, temp_params
 
         return cls(
             rng=rng,
@@ -498,32 +606,49 @@ class ExpoPiLearner(Agent):
         vlm_output, _ = self.actor.get_vlm_output(rng, batch, obs_key=obs_key)
         vlm_output = jnp.mean(vlm_output[0], axis=1) # (batch_size, pi0_hidden_dims)
 
-        def edit_actor_loss_fn(actor_params) -> Tuple[jnp.ndarray, Dict[str, float]]:
-            edit_observations = jnp.concatenate([vlm_output, batch["actions"]], axis=1)
-            dist = self.edit_actor.apply_fn({"params": actor_params}, edit_observations, training=True, rngs={"dropout": dropout_key},)
-            actions = dist.sample(seed=key)
+        # def edit_actor_loss_fn(actor_params) -> Tuple[jnp.ndarray, Dict[str, float]]:
+        #     edit_observations = jnp.concatenate([vlm_output, batch["actions"]], axis=1)
+        #     dist = self.edit_actor.apply_fn({"params": actor_params}, edit_observations, training=True, rngs={"dropout": dropout_key},)
+        #     actions = dist.sample(seed=key)
 
-            log_probs = dist.log_prob(actions)
-            actions = actions * self.edit_action_scale
-            log_probs -= actions.shape[-1] * jnp.log(self.edit_action_scale)
+        #     log_probs = dist.log_prob(actions)
+        #     actions = actions * self.edit_action_scale
+        #     log_probs -= actions.shape[-1] * jnp.log(self.edit_action_scale)
 
-            actions += batch["actions"]
+        #     actions += batch["actions"]
 
         
-            qs = self.critic.apply_fn(
-                {"params": self.critic.params},
-                vlm_output,
-                actions,
-                True,
-                rngs={"dropout": key2},
-            )  # training=True
-            q = qs.mean(axis=0)
-            edit_actor_loss = (
-                self.entropy_scale * log_probs * self.temp.apply_fn({"params": self.temp.params}) - q
-            ).mean()
-            return edit_actor_loss, {"edit_q": q.mean(), "edit_actor_loss": edit_actor_loss, "entropy": -log_probs.mean()}
+        #     qs = self.critic.apply_fn(
+        #         {"params": self.critic.params},
+        #         vlm_output,
+        #         actions,
+        #         True,
+        #         rngs={"dropout": key2},
+        #     )  # training=True
+        #     q = qs.mean(axis=0)
+        #     edit_actor_loss = (
+        #         self.entropy_scale * log_probs * self.temp.apply_fn({"params": self.temp.params}) - q
+        #     ).mean()
+        #     return edit_actor_loss, {"edit_q": q.mean(), "edit_actor_loss": edit_actor_loss, "entropy": -log_probs.mean()}
 
-        grads, actor_info = jax.grad(edit_actor_loss_fn, has_aux=True)(self.edit_actor.params)
+        # grads, actor_info = jax.grad(edit_actor_loss_fn, has_aux=True)(self.edit_actor.params)
+
+        # Use JITted version #
+        grads, actor_info = _edit_actor_loss_and_grad(
+            self.edit_actor.params,
+            self.critic.params,
+            self.temp.params,
+            vlm_output,
+            batch["actions"],
+            dropout_key,
+            key,
+            key2,
+            self.entropy_scale,
+            self.edit_action_scale,
+            self.edit_actor.apply_fn,
+            self.critic.apply_fn,
+            self.temp.apply_fn,
+        )
         edit_actor = self.edit_actor.apply_gradients(grads=grads)
 
         return self.replace(edit_actor=edit_actor, rng=rng), actor_info
@@ -548,8 +673,8 @@ class ExpoPiLearner(Agent):
         )
         self.target_actor.train_state = self.target_actor.train_state.replace(params=target_score_params)
 
-        new_agent = self.replace(actor=self.actor, target_actor=self.target_actor, rng=rng)
-        return new_agent, actor_update_info
+        # new_agent = self.replace(actor=self.actor, target_actor=self.target_actor, rng=rng)
+        return self, actor_update_info
         
     def update_temperature(self, entropy: float) -> Tuple[Agent, Dict[str, float]]:
         def temperature_loss_fn(temp_params):
@@ -601,20 +726,31 @@ class ExpoPiLearner(Agent):
 
         target_q = batch["rewards"] + self.discount * batch["masks"] * next_qs # (batch_size, )
 
+        # key, rng = jax.random.split(rng)
+
+        # def critic_loss_fn(critic_params) -> Tuple[jnp.ndarray, Dict[str, float]]:
+        #     qs = self.critic.apply_fn(
+        #         {"params": critic_params},
+        #         current_vlm_output,
+        #         actions,
+        #         True,
+        #         rngs={"dropout": key},
+        #     )  # training=True
+        #     critic_loss = ((qs - target_q) ** 2).mean()
+        #     return critic_loss, {"critic_loss": critic_loss, "q": qs.mean()}
+
+        # grads, info = jax.grad(critic_loss_fn, has_aux=True)(self.critic.params)
+
+        # Use JITted version #
         key, rng = jax.random.split(rng)
-
-        def critic_loss_fn(critic_params) -> Tuple[jnp.ndarray, Dict[str, float]]:
-            qs = self.critic.apply_fn(
-                {"params": critic_params},
-                current_vlm_output,
-                actions,
-                True,
-                rngs={"dropout": key},
-            )  # training=True
-            critic_loss = ((qs - target_q) ** 2).mean()
-            return critic_loss, {"critic_loss": critic_loss, "q": qs.mean()}
-
-        grads, info = jax.grad(critic_loss_fn, has_aux=True)(self.critic.params)
+        grads, info = _critic_loss_and_grad(
+            self.critic.params,
+            current_vlm_output,
+            actions,
+            target_q,
+            key,
+            self.critic.apply_fn,
+        )
         critic = self.critic.apply_gradients(grads=grads)
 
         target_critic_params = optax.incremental_update(
@@ -703,3 +839,4 @@ class ExpoPiLearner(Agent):
         print(timer.get_total_times(reset=False))
 
         return new_agent, {**actor_info, **critic_info, **actor_update_info}
+        # return new_agent, actor_update_info

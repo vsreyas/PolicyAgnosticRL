@@ -114,6 +114,6 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false env -u PYOPENGL_PLATFORM python -m pdb ./tra
 
 EXPO related command
 ```
-XLA_PYTHON_CLIENT_PREALLOCATE=false env -u PYOPENGL_PLATFORM python -m pdb ./train_expo_pi.py --config=configs/libero_config.py:expo --task_name="put both moka pots on the stove" --num_online_epochs=0 --seed=0 --task_name="put both moka pots on the stove" --config.eval_interval=1 --config.batch_size=256 --config.agent_kwargs.batch_size=256 --environment_name=libero --wandb_experiment_name=expo_trial --num_edit_samples=4 --num_actions_to_sample=4 --num_offline_epochs=30 --final_step_sparse_reward=True
+XLA_PYTHON_CLIENT_PREALLOCATE=false env -u PYOPENGL_PLATFORM python -m pdb ./train_expo_pi.py --config=configs/libero_config.py:expo --task_name="put both moka pots on the stove" --num_online_epochs=0 --seed=0 --task_name="put both moka pots on the stove" --config.eval_interval=1 --config.batch_size=16 --config.agent_kwargs.batch_size=16 --environment_name=libero --wandb_experiment_name=expo_trial --num_edit_samples=4 --num_actions_to_sample=4 --num_offline_epochs=30 --final_step_sparse_reward=True
 
 ```

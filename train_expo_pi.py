@@ -728,6 +728,7 @@ def train_agent(_):
                 batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
             )
             agent, info = agent.update(batch, utd_ratio=FLAGS.config.utd_ratio, timer=timer)
+            print(timer.get_total_times(reset=True))
 
             
 
