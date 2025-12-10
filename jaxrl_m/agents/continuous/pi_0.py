@@ -114,7 +114,7 @@ class PiPolicy(BasePolicy):
             in_shardings=(
                 self.replicated_sharding,
                 self.train_state_sharding,
-                None,  # data sharding not needed if you pass replicated batch
+                self.replicated_sharding,
             ),
             out_shardings=(
                 self.train_state_sharding,

@@ -723,7 +723,7 @@ def train_agent(_):
             # Sample an offline batch and do an update #
             batch = next(offline_train_iterator_for_critic)
             # breakpoint()
-            batch = shard_batch(batch, sharding)
+            # batch = shard_batch(batch, sharding)
             batch = set_batch_masks(
                 batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
             )

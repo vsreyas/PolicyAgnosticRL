@@ -270,7 +270,8 @@ class ExpoPiLearner(Agent):
         # breakpoint()
         # TODO: Create actor and target actor with same params #
         actor = PiPolicy(rng=rng, config=config, is_target=False)
-        target_actor = PiPolicy(rng=rng, config=config, is_target=True)
+        # target_actor = PiPolicy(rng=rng, config=config, is_target=True)
+        target_actor = None
         
         if decay_steps is not None:
             actor_lr = optax.cosine_decay_schedule(actor_lr, decay_steps)
@@ -666,15 +667,17 @@ class ExpoPiLearner(Agent):
             seed, rng = jax.random.split(seed)
 
         actor_update_info = self.actor.update(batch)
+        # breakpoint()
 
         # Update target actor train_state with incremental parameter update #
-        target_score_params = optax.incremental_update(
-            self.actor.train_state.params, self.target_actor.train_state.params, self.actor_tau
-        )
-        self.target_actor.train_state = self.target_actor.train_state.replace(params=target_score_params)
+        # target_score_params = optax.incremental_update(
+        #     self.actor.train_state.params, self.target_actor.train_state.params, self.actor_tau
+        # )
+        # self.target_actor.train_state = self.target_actor.train_state.replace(params=target_score_params)
 
         # new_agent = self.replace(actor=self.actor, target_actor=self.target_actor, rng=rng)
-        return self, actor_update_info
+        new_agent = self.replace(actor=self.actor, rng=rng)
+        return new_agent, actor_update_info
         
     def update_temperature(self, entropy: float) -> Tuple[Agent, Dict[str, float]]:
         def temperature_loss_fn(temp_params):
@@ -819,7 +822,7 @@ class ExpoPiLearner(Agent):
 
             mini_batch = jax.tree_util.tree_map(slice, _observations)
             # breakpoint()
-            new_agent, critic_info = new_agent.update_critic(mini_batch, infer=True, obs_key="next_observations")
+            # new_agent, critic_info = new_agent.update_critic(mini_batch, infer=True, obs_key="next_observations")
         timer.tock("update_critic_time")
         # breakpoint()
         timer.tick("update_actor_time")
@@ -828,15 +831,15 @@ class ExpoPiLearner(Agent):
         # breakpoint()
 
         timer.tick("update_edit_actor_time")
-        if self.n_edit_samples > 0:
-            new_agent, actor_info = new_agent.update_edit_actor(mini_batch)
-            # breakpoint()
-            new_agent, temp_info = new_agent.update_temperature(actor_info["entropy"])
-            # breakpoint()
-            actor_info.update(temp_info)
+        # if self.n_edit_samples > 0:
+        #     new_agent, actor_info = new_agent.update_edit_actor(mini_batch)
+        #     # breakpoint()
+        #     new_agent, temp_info = new_agent.update_temperature(actor_info["entropy"])
+        #     # breakpoint()
+        #     actor_info.update(temp_info)
         timer.tock("update_edit_actor_time")
         timer.tock("total_update_time")
         print(timer.get_total_times(reset=False))
 
-        return new_agent, {**actor_info, **critic_info, **actor_update_info}
-        # return new_agent, actor_update_info
+        # return new_agent, {**actor_info, **critic_info, **actor_update_info}
+        return new_agent, actor_update_info
