@@ -29,6 +29,7 @@ from openpi.training.config import TrainConfig, DataConfig
 import openpi.models.model as _model
 from openpi.training.data_loader import DataLoader
 from openpi.models.pi0 import make_attn_mask
+import openpi.shared.array_typing as at
 from typing import Callable
 
 
@@ -73,6 +74,7 @@ class PiPolicy(BasePolicy):
         self.train_rng, init_rng = jax.random.split(rng)
 
         # Create mesh and sharding
+        # breakpoint()
         self.mesh = sharding.make_mesh(config.fsdp_devices)
         self.replicated_sharding = jax.sharding.NamedSharding(
             self.mesh, jax.sharding.PartitionSpec()
@@ -201,7 +203,9 @@ class PiPolicy(BasePolicy):
     # INFERENCE
     # ------------------------------------------------------------------------------------
     def sample_actions(self, _observations: Data | Batch, repeat=1, cache_dir=None, timer=None, argmax=False, 
-                       processed_obs=False, normalized=False, return_obs= False, obs_key: str | None = None, infer=True, **kwargs):
+                       processed_obs=False, normalized=False, return_obs= False, obs_key: str | None = None, infer=True,
+                       params: Optional[at.Params] = None,
+                        **kwargs):
         with sharding.set_mesh(self.mesh):
             if not processed_obs:
                 # breakpoint()
@@ -255,7 +259,7 @@ class PiPolicy(BasePolicy):
                 self._infer_cache[batch_size] = self._build_infer_jit()
 
             infer_fn = self._infer_cache[batch_size]
-            actions = infer_fn(self.train_state.params, obs_, rng)
+            actions = infer_fn(params if params is not None else self.train_state.params, obs_, rng)
             # actions = self._pinfer(self.train_state.params, obs, seed)
 
             outputs["actions"] = actions

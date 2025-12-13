@@ -12,6 +12,10 @@ from flax import struct
 import flax.linen as nn
 from flax.training.train_state import TrainState
 
+# Openpi imports #
+import openpi.shared.array_typing as at
+import jax.tree_util as jtu
+
 import numpy as np
 
 # from expo.agents.agent import Agent
@@ -58,6 +62,15 @@ def compute_q(critic_fn, critic_params, observations, actions):
     q_values = critic_fn({'params': critic_params}, observations, actions)
     q_values = q_values.min(axis=0)
     return q_values
+
+def _ema_host(old_target, new_source, tau: float):
+    """Host-side EMA:
+    - old_target: host array (np.ndarray)
+    - new_source: possibly device array (JAX), converted to host
+    - tau: EMA coefficient
+    """
+    new_source_host = np.asarray(new_source)  # brings device array to host if needed
+    return (1.0 - tau) * old_target + tau * new_source_host
 
 # ----------------------------------------------------------------------
 # Jitted inner steps for edit-actor and critic updates
@@ -173,9 +186,11 @@ def _sample_actions(rng, apply_fn, params, observations: np.ndarray) -> np.ndarr
 
 
 class ExpoPiLearner(Agent):
+    actor: PiPolicy
     critic: TrainState
     target_critic: TrainState
     target_actor: PiPolicy
+    # target_actor_params: at.Params = struct.field(pytree_node=False)
     edit_actor: TrainState
     temp: TrainState
     action_dim: int = struct.field(pytree_node=False)
@@ -197,6 +212,7 @@ class ExpoPiLearner(Agent):
         pytree_node=False
     )  # See M in RedQ https://arxiv.org/abs/2101.05982
     backup_entropy: bool = struct.field(pytree_node=False)
+    
 
     @classmethod
     def create(
@@ -270,8 +286,13 @@ class ExpoPiLearner(Agent):
         # breakpoint()
         # TODO: Create actor and target actor with same params #
         actor = PiPolicy(rng=rng, config=config, is_target=False)
-        # target_actor = PiPolicy(rng=rng, config=config, is_target=True)
-        target_actor = None
+        target_actor = PiPolicy(rng=rng, config=config, is_target=True)
+        # target_actor = None
+        # target_actor_params = jax.tree.map(
+        #     # lambda x: x.copy(),
+        #     lambda x: np.asarray(jax.device_get(x), dtype=x.dtype),
+        #     actor.train_state.params,
+        # )
         
         if decay_steps is not None:
             actor_lr = optax.cosine_decay_schedule(actor_lr, decay_steps)
@@ -343,6 +364,7 @@ class ExpoPiLearner(Agent):
             critic=critic,
             target_critic=target_critic,
             target_actor=target_actor, 
+            # target_actor_params=target_actor_params,
             edit_actor=edit_actor,
             action_dim=action_dim,
             action_horizon=action_horizon,
@@ -670,13 +692,50 @@ class ExpoPiLearner(Agent):
         # breakpoint()
 
         # Update target actor train_state with incremental parameter update #
-        # target_score_params = optax.incremental_update(
-        #     self.actor.train_state.params, self.target_actor.train_state.params, self.actor_tau
+        target_score_params = optax.incremental_update(
+            self.actor.train_state.params, self.target_actor.train_state.params, self.actor_tau
+        )
+        self.target_actor.train_state = self.target_actor.train_state.replace(params=target_score_params)
+        # new_target_params = optax.incremental_update(
+        #     self.actor.train_state.params,
+        #     self.target_actor_params,
+        #     self.actor_tau,
         # )
-        # self.target_actor.train_state = self.target_actor.train_state.replace(params=target_score_params)
+        # # Try doing in two steps #
+        # new_agent = self.replace(
+        #     actor=self.actor, 
+        #     rng=rng
+        # )
+        # new_agent = new_agent.replace(target_actor_params=new_target_params)
+        # new_agent = self.replace(
+        #     actor=self.actor, 
+        #     target_actor_params=new_target_params, 
+        #     rng=rng
+        # )
 
-        # new_agent = self.replace(actor=self.actor, target_actor=self.target_actor, rng=rng)
-        new_agent = self.replace(actor=self.actor, rng=rng)
+        # # 2. Do host-side EMA for target_actor_params
+        # #    - Bring current actor params to host
+        # actor_params_host = jax.device_get(self.actor.train_state.params)
+
+        # #    - Make an EMA fn with tau baked in
+        # ema_fn = partial(_ema_host, tau=self.actor_tau)
+
+        # #    - Update the *host* target params tree
+        # new_target_params = jtu.tree_map(
+        #     ema_fn,
+        #     self.target_actor_params,  # old target (host)
+        #     actor_params_host,         # new source (host copy)
+        # )
+
+        # # 3. Return a new agent with updated target params + rng
+        # new_agent = self.replace(
+        #     actor=self.actor,
+        #     target_actor_params=new_target_params,
+        #     rng=rng,
+        # )
+
+        new_agent = self.replace(actor=self.actor, target_actor=self.target_actor, rng=rng)
+        # new_agent = self.replace(actor=self.actor, rng=rng)
         return new_agent, actor_update_info
         
     def update_temperature(self, entropy: float) -> Tuple[Agent, Dict[str, float]]:
@@ -822,7 +881,7 @@ class ExpoPiLearner(Agent):
 
             mini_batch = jax.tree_util.tree_map(slice, _observations)
             # breakpoint()
-            # new_agent, critic_info = new_agent.update_critic(mini_batch, infer=True, obs_key="next_observations")
+            new_agent, critic_info = new_agent.update_critic(mini_batch, infer=True, obs_key="next_observations")
         timer.tock("update_critic_time")
         # breakpoint()
         timer.tick("update_actor_time")
@@ -831,15 +890,15 @@ class ExpoPiLearner(Agent):
         # breakpoint()
 
         timer.tick("update_edit_actor_time")
-        # if self.n_edit_samples > 0:
-        #     new_agent, actor_info = new_agent.update_edit_actor(mini_batch)
-        #     # breakpoint()
-        #     new_agent, temp_info = new_agent.update_temperature(actor_info["entropy"])
-        #     # breakpoint()
-        #     actor_info.update(temp_info)
+        if self.n_edit_samples > 0:
+            new_agent, actor_info = new_agent.update_edit_actor(mini_batch)
+            # breakpoint()
+            new_agent, temp_info = new_agent.update_temperature(actor_info["entropy"])
+            # breakpoint()
+            actor_info.update(temp_info)
         timer.tock("update_edit_actor_time")
         timer.tock("total_update_time")
         print(timer.get_total_times(reset=False))
 
-        # return new_agent, {**actor_info, **critic_info, **actor_update_info}
-        return new_agent, actor_update_info
+        return new_agent, {**actor_info, **critic_info, **actor_update_info}
+        # return new_agent, actor_update_info

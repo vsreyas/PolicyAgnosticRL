@@ -512,41 +512,43 @@ def train_agent(_):
 
     # Get PI config #
     pi_config = get_config("pi05_libero_custom_low_mem")
+    # breakpoint()
+    pi_config.fsdp_devices = 2 # Try out with model parallel
     pi_config.exp_name = FLAGS.wandb_experiment_name
     pi_config.overwrite = True
 
-    # # LOG: WANDB setup #
-    # if FLAGS.wandb_project_name is not None:
-    #     wandb_config = WandBLogger.get_default_config()
-    #     wandb_config.update(
-    #         {
-    #             "project": FLAGS.wandb_project_name,
-    #             "exp_descriptor": FLAGS.wandb_experiment_name,
-    #             "tag": None,
-    #             "group": FLAGS.wandb_group,
-    #         }
-    #     )
-    #     wandb_logger = WandBLogger(
-    #         wandb_config=wandb_config,
-    #         variant=FLAGS.config.to_dict(),
-    #         debug=FLAGS.debug,
-    #     )
-    save_dir = tf.io.gfile.join(
-        (
-            os.path.abspath(FLAGS.config.save_dir)
-            if "gs://" not in FLAGS.config.save_dir
-            else FLAGS.config.save_dir
-        ),
-        # wandb_logger.config.project,
-        # wandb_logger.config.exp_descriptor,
-        f"seed_{FLAGS.seed}",
-    )
-    # else:
-    #     wandb_logger = None
-    #     save_dir = tf.io.gfile.join(
-    #         os.path.abspath(FLAGS.config.save_dir),
-    #     )
-    #     config.wandb_enabled = False
+    # LOG: WANDB setup #
+    if FLAGS.wandb_project_name is not None:
+        wandb_config = WandBLogger.get_default_config()
+        wandb_config.update(
+            {
+                "project": FLAGS.wandb_project_name,
+                "exp_descriptor": FLAGS.wandb_experiment_name,
+                "tag": None,
+                "group": FLAGS.wandb_group,
+            }
+        )
+        wandb_logger = WandBLogger(
+            wandb_config=wandb_config,
+            variant=FLAGS.config.to_dict(),
+            debug=FLAGS.debug,
+        )
+        save_dir = tf.io.gfile.join(
+            (
+                os.path.abspath(FLAGS.config.save_dir)
+                if "gs://" not in FLAGS.config.save_dir
+                else FLAGS.config.save_dir
+            ),
+            # wandb_logger.config.project,
+            # wandb_logger.config.exp_descriptor,
+            f"seed_{FLAGS.seed}",
+        )
+    else:
+        wandb_logger = None
+        save_dir = tf.io.gfile.join(
+            os.path.abspath(FLAGS.config.save_dir),
+        )
+        config.wandb_enabled = False
 
     # breakpoint()
 
@@ -627,7 +629,7 @@ def train_agent(_):
 
     ### Sharding Data ###
     example_batch = next(offline_train_iterator_for_critic)
-    example_batch = shard_batch(example_batch, sharding)
+    # example_batch = shard_batch(example_batch, sharding)
     
     ### Create trajectory sampler ###
     data_collection_trajectory_sampler = TrajSampler(
@@ -639,6 +641,7 @@ def train_agent(_):
     )
 
     ### Create EXPO agent #
+    # LOG: sharded batch is used to calibrate batch size in `create` method of `ExpoPiLearner` class #
     rng, construct_rng = jax.random.split(rng)
     agent = ExpoPiLearner.create(
         config=pi_config,
@@ -723,7 +726,7 @@ def train_agent(_):
             # Sample an offline batch and do an update #
             batch = next(offline_train_iterator_for_critic)
             # breakpoint()
-            # batch = shard_batch(batch, sharding)
+            batch = shard_batch(batch, sharding)
             batch = set_batch_masks(
                 batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
             )
@@ -732,7 +735,7 @@ def train_agent(_):
 
             
 
-        breakpoint()
+        # breakpoint()
 
 if __name__ == "__main__":
     app.run(train_agent)
