@@ -33,6 +33,7 @@ import openpi.shared.array_typing as at
 from typing import Callable
 
 
+
 from jaxrl_m.common.typing import Batch, Data, PRNGKey
 import logging
 import numpy as np
@@ -79,7 +80,8 @@ class PiPolicy(BasePolicy):
         self.replicated_sharding = jax.sharding.NamedSharding(
             self.mesh, jax.sharding.PartitionSpec()
         )
-        self.data_sharding: Optional[jax.sharding.Sharding] = None
+        # self.data_sharding: Optional[jax.sharding.Sharding] = None
+        self.data_sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec(sharding.DATA_AXIS))
 
         checkpoint_manager, resuming = _checkpoints.initialize_checkpoint_dir(
             self.config.checkpoint_dir,
@@ -97,6 +99,8 @@ class PiPolicy(BasePolicy):
             self.train_state, self.train_state_sharding = init_train_state(
             self.config, init_rng, self.mesh, resume=resuming
         )
+
+        # breakpoint()
 
         # Print trainable params
         self.print_trainable_params()
@@ -207,6 +211,8 @@ class PiPolicy(BasePolicy):
                        params: Optional[at.Params] = None,
                         **kwargs):
         with sharding.set_mesh(self.mesh):
+            if timer is not None:
+                timer.tick("processing_time")
             if not processed_obs:
                 # breakpoint()
                 # if infer:
@@ -239,13 +245,20 @@ class PiPolicy(BasePolicy):
 
             else:
                 obs = _observations
+            
+            if timer is not None:
+                timer.tock("processing_time")
 
+            if timer is not None:
+                timer.tick("repeat_tree_time")
             if repeat > 1:
                 obs = repeat_tree(obs, repeat)
                 obs = flatten_repeat(obs)  
             outputs = {
                 "state": obs["state"],
                 }            
+            if timer is not None:
+                timer.tock("repeat_tree_time")
 
             # breakpoint()
             seed = kwargs.pop("seed")
@@ -259,10 +272,18 @@ class PiPolicy(BasePolicy):
                 self._infer_cache[batch_size] = self._build_infer_jit()
 
             infer_fn = self._infer_cache[batch_size]
+            # breakpoint()
+            if timer is not None:
+                timer.tick("infer_fn_time")
             actions = infer_fn(params if params is not None else self.train_state.params, obs_, rng)
+            if timer is not None:
+                timer.tock("infer_fn_time")
+            # breakpoint()
             # actions = self._pinfer(self.train_state.params, obs, seed)
 
             outputs["actions"] = actions
+            if timer is not None:
+                timer.tick("output_transforms_time")
             # print("actions shape: ", actions.shape)
             outputs = jax.tree.map(lambda x: np.asarray(x), outputs)
             if normalized:
@@ -271,6 +292,8 @@ class PiPolicy(BasePolicy):
                 outputs = self.output_data_transforms(outputs)
             if repeat > 1:
                 outputs = unflatten_repeat(outputs,repeat)
+            if timer is not None:
+                timer.tock("output_transforms_time")
 
             if outputs['actions'].shape[0] == 1 and repeat==1:
                 outputs['actions'] = outputs['actions'][0]
@@ -332,7 +355,8 @@ class PiPolicy(BasePolicy):
             _vlm,
             in_shardings=(
                 self.params_sharding,      # params
-                self.replicated_sharding,  # rng
+                # self.replicated_sharding,  # obs
+                self.data_sharding,
             ),
             out_shardings=(self.replicated_sharding, self.replicated_sharding),
         )
@@ -345,6 +369,7 @@ class PiPolicy(BasePolicy):
         _observations: Data | Batch,
         infer=True,
         obs_key: str = None,
+        params: Optional[at.Params] = None,
     ):
         with sharding.set_mesh(self.mesh):
             # 1) Convert your env obs → OpenPI format
@@ -376,7 +401,8 @@ class PiPolicy(BasePolicy):
             vlm_fn = self._vlm_cache[batch_size]
 
             # 5) Call the compiled function
-            out1, kv_cache = vlm_fn(self.train_state.params, obs_)
+            params = params if params is not None else self.train_state.params
+            out1, kv_cache = vlm_fn(params, obs_)
 
             return out1, kv_cache
 
@@ -398,7 +424,8 @@ class PiPolicy(BasePolicy):
             _infer,
             in_shardings=(
                 self.params_sharding,      # params
-                None, 
+                # None, 
+                self.data_sharding,
                 self.replicated_sharding,  # rng
             ),
             out_shardings=self.replicated_sharding,

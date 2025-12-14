@@ -27,6 +27,8 @@ import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
 import openpi.training.weight_loaders as _weight_loaders
 
+
+from jaxrl_m.utils.train_state_utils import TrainState
 from jaxrl_m.common.typing import Params
 
 def init_logging():
@@ -140,7 +142,7 @@ def init_train_state(
 @at.typecheck
 def init_train_state_for_target(
     config: _config.TrainConfig, init_rng: at.KeyArrayLike, mesh: jax.sharding.Mesh, *, resume: bool
-) -> tuple[training_utils.TrainState, Any]:
+) -> tuple[TrainState, Any]: # -> tuple[training_utils.TrainState, Any]:
     tx = optax.set_to_zero()
 
     def init(rng: at.KeyArrayLike, partial_params: at.Params | None = None) -> training_utils.TrainState:
@@ -159,9 +161,15 @@ def init_train_state_for_target(
         params = nnx.state(model)
         # Convert frozen params to bfloat16.
         params = nnx_utils.state_map(params, config.freeze_filter, lambda p: p.replace(p.value.astype(jnp.bfloat16)))
+
+        target_params = jax.tree.map(
+            lambda x: x.astype(jnp.bfloat16).copy(),
+            params
+        )
+
         opt_state = tx.init(params)
 
-        return training_utils.TrainState(
+        return TrainState(
             step=0,
             params=params,
             model_def=nnx.graphdef(model),
@@ -169,6 +177,7 @@ def init_train_state_for_target(
             opt_state=opt_state,
             ema_decay=config.ema_decay,
             ema_params=None if config.ema_decay is None else params,
+            # target_params=target_params,
         )
 
     train_state_shape = jax.eval_shape(init, init_rng)

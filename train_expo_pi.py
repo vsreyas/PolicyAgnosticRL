@@ -718,6 +718,7 @@ def train_agent(_):
                 task_name=FLAGS.task_name,
                 use_wrist_view=FLAGS.use_wrist_view, 
                 use_language=FLAGS.use_lang, config=pi_config,
+                # final_step_sparse_reward=FLAGS.final_step_sparse_reward,
                 **FLAGS.config.image_replay_buffer_kwargs,
             )
         
