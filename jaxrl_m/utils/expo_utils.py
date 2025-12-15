@@ -27,6 +27,8 @@ from functools import partial
 
 from jaxrl_m.common.traj import calc_return_to_go
 
+import openpi.models.model as _model
+
 # from jaxrl_m.types import PRNGKey
 
 from typing import Any, Optional, Type, Callable, Sequence
@@ -249,14 +251,65 @@ def repeat_observations(observations, N, axis=0):
     else:
         raise ValueError(f"Unsupported type: {type(observations)}")
 
+# def repeat_observations_batched(observations, N, axis=0):
+#     if isinstance(observations, dict):
+#         return {k: repeat_observations_batched(v, N) for k, v in observations.items()}
+#     elif isinstance(observations, np.ndarray):
+#         return jnp.repeat(observations, N, axis=axis)
+#     elif isinstance(observations, str):
+#         return observations
+#     elif isinstance(observations, jax.Array):
+#         return jnp.repeat(observations, N, axis=axis)
+#     else:
+#         raise ValueError(f"Unsupported type: {type(observations)}")
+    
+# def repeat_observations_openpi(obs: _model.Observation, N: int, axis: int = 0) -> _model.Observation:
+#     """
+#     Repeats all array fields within an Observation instance N times along the specified axis.
+#     """
+#     def _repeat_leaf(x):
+#         # Handle None fields (e.g. optional masks)
+#         if x is None:
+#             return None
+#         # Handle JAX and NumPy arrays
+#         if isinstance(x, (jax.Array, np.ndarray)):
+#             return jnp.repeat(x, N, axis=axis)
+#         # Pass through other types (strings, etc. if any exist)
+#         return x
+
+#     return jax.tree.map(_repeat_leaf, obs)
+
 def repeat_observations_batched(observations, N, axis=0):
+    """
+    Repeats the batch N times by tiling (stacking copies of the full batch).
+    Input:  [A, B] (Batch size 2)
+    Output: [A, B, A, B] (Batch size 4)
+    """
     if isinstance(observations, dict):
-        return {k: repeat_observations_batched(v, N) for k, v in observations.items()}
-    elif isinstance(observations, np.ndarray):
-        return jnp.repeat(observations, N, axis=axis)
+        return {k: repeat_observations_batched(v, N, axis=axis) for k, v in observations.items()}
+    elif isinstance(observations, (np.ndarray, jax.Array)):
+        # Tiling: Concatenate N copies of the array
+        return jnp.concatenate([observations] * N, axis=axis)
     elif isinstance(observations, str):
         return observations
-    elif isinstance(observations, jax.Array):
-        return jnp.repeat(observations, N, axis=axis)
     else:
-        raise ValueError(f"Unsupported type: {type(observations)}")
+        # Fallback for other scalar types or unexpected structures
+        return observations
+
+def repeat_observations_openpi(obs: _model.Observation, N: int, axis: int = 0) -> _model.Observation:
+    """
+    Repeats all array fields within an Observation instance N times by tiling.
+    Input:  [A, B]
+    Output: [A, B, A, B]
+    """
+    def _tile_leaf(x):
+        # Handle None fields (e.g. optional masks)
+        if x is None:
+            return None
+        # Handle JAX and NumPy arrays
+        if isinstance(x, (jax.Array, np.ndarray)):
+            return jnp.concatenate([x] * N, axis=axis)
+        # Pass through other types (strings, etc.)
+        return x
+
+    return jax.tree.map(_tile_leaf, obs)
