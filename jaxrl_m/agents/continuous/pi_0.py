@@ -322,7 +322,7 @@ class PiPolicy(BasePolicy):
     # Get VLM output from the model #
     # ------------------------------------------------------------------------------------
     
-    def _build_vlm_jit(self):
+    def _build_vlm_jit(self, replicate_data_sharding: bool = False):
         """
         Build and JIT-compile a function that runs the VLM prefix and
         returns the KV cache, given an Observation.
@@ -354,12 +354,17 @@ class PiPolicy(BasePolicy):
 
             return vlm_output, kv_cache
 
+        if replicate_data_sharding:
+            data_sharding = self.replicated_sharding
+        else:
+            data_sharding = self.data_sharding
+
         compiled = jax.jit(
             _vlm,
             in_shardings=(
                 self.params_sharding,      # params
                 # self.replicated_sharding,  # obs
-                self.data_sharding,
+                data_sharding,
             ),
             out_shardings=(self.replicated_sharding, self.replicated_sharding),
         )
@@ -369,39 +374,31 @@ class PiPolicy(BasePolicy):
     def get_vlm_output(
         self,
         rng,
-        _observation: _model.Observation,
+        _observation: _model.Observation | Data,
         infer=True,
         obs_key: str = None,
-        processed_obs = False,
+        processed_obs = True,
         params: Optional[at.Params] = None,
     ):
         with sharding.set_mesh(self.mesh):
-            # if not processed_obs:
-            #     # 1) Convert your env obs → OpenPI format
-            #     if infer:
-            #         observations = self.convert_to_openpi_format_infer(_observations, obs_key=obs_key)
+            if not processed_obs:
+                # 1) Convert your env obs → OpenPI format
+                if infer:
+                    observations = self.convert_to_openpi_format_infer(_observation, obs_key=obs_key)
 
-            #         # 2) Apply the same input transforms as sample_actions
-            #         obs = self.input_data_transforms(observations)
+                    # 2) Apply the same input transforms as sample_actions
+                    obs = self.input_data_transforms(observations)
 
-            #         # 3) Wrap into OpenPI Observation (still NumPy here is fine;
-            #         #    preprocess_observation inside the JIT will turn them into jax.Arrays)
-            #         obs_ = _model.Observation.from_dict(obs)
-
-            #         # 4) Key JIT cache by batch size (same pattern as _infer_cache)
-            #         #    choose any reliable field to read batch size from:
-            #         batch_size = obs_.tokenized_prompt.shape[0]
-            #     else:
-            #         observations = self.convert_to_openpi_format(_observations, obs_key=obs_key)
-
-            #         obs_ = (_model.Observation.from_dict(observations), observations["actions"])
-
-            #         batch_size = observations['actions'].shape[0]
+                    # 3) Wrap into OpenPI Observation (still NumPy here is fine;
+                    #    preprocess_observation inside the JIT will turn them into jax.Arrays)
+                    _observation = _model.Observation.from_dict(obs)
+                else:
+                    raise NotImplementedError("Not implemented get_vlm_output for non-infer case")
 
             batch_size = _observation.state.shape[0]
 
             if batch_size not in self._vlm_cache:
-                self._vlm_cache[batch_size] = self._build_vlm_jit()
+                self._vlm_cache[batch_size] = self._build_vlm_jit(replicate_data_sharding=not processed_obs)
 
             vlm_fn = self._vlm_cache[batch_size]
 

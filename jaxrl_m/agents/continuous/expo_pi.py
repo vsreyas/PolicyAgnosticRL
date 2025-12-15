@@ -550,6 +550,14 @@ class ExpoPiLearner(Agent):
         # seed = kwargs.pop("seed")
         # # Split seed #
         # seed, rng = jax.random.split(seed)
+        # Process some data #
+        # observations = self.actor.convert_to_openpi_format_infer(_observations)
+        # observations = self.actor.input_data_transforms(observations)
+        # observations = _model.Observation.from_dict(observations)
+
+        # breakpoint()
+
+
         seed = kwargs.pop("seed", None)
         seed, rng = jax.random.split(seed)
         timer = kwargs.pop("timer", None)
@@ -562,7 +570,8 @@ class ExpoPiLearner(Agent):
         if not is_target:
             actions = self.actor.sample_actions(observations, seed=rng) # (N, action_horizon, action_dim)
         else:
-            actions = self.actor.sample_actions(observations, seed=rng, params=self.target_actor.train_state.params) # (N, action_horizon, action_dim)
+            # actions = self.actor.sample_actions(observations, seed=rng, params=self.target_actor.train_state.params) # (N, action_horizon, action_dim)
+            actions = self.target_actor.sample_actions(observations, seed=rng) # (N, action_horizon, action_dim)
         # actions = self.target_actor.sample_actions(observations, seed=rng) # (N, action_horizon, action_dim)
         # timer.tock("sample_actions_time")
         # breakpoint()
@@ -575,9 +584,10 @@ class ExpoPiLearner(Agent):
         # Do a forward pass to get VLM output #
         seed, rng = jax.random.split(rng)
         if not is_target:
-            vlm_output, _ = self.actor.get_vlm_output(rng, observations)
+            vlm_output, _ = self.actor.get_vlm_output(rng, _observations, processed_obs=False, infer=True)
         else:
-            vlm_output, _ = self.actor.get_vlm_output(rng, observations, params=self.target_actor.train_state.params)
+            # vlm_output, _ = self.actor.get_vlm_output(rng, observations, params=self.target_actor.train_state.params)
+            vlm_output, _ = self.target_actor.get_vlm_output(rng, _observations, processed_obs=False, infer=True)
         # vlm_output: (N, 256 * num_images + 200 (tokens), pi0_hidden_dims)
         # breakpoint()
         # Take mean across tokens as representation from VLM #
@@ -608,8 +618,14 @@ class ExpoPiLearner(Agent):
                 r_samples = r_samples.reshape(-1, self.action_horizon, self.action_dim // self.action_horizon) # (n_edit_samples, action_horizon, action_dim)
                 actions = jnp.concatenate([actions, r_samples], axis=0) # (N + n_edit_samples, action_horizon, action_dim)
 
+                # Repeat vlm_output
+                vlm_output_repeated = repeat_observations_batched(vlm_output, self.N + self.n_edit_samples, axis=0)
+            else:
+                vlm_output_repeated = repeat_observations_batched(vlm_output, self.N, axis=0)
+
+
             actions = actions.reshape(-1, self.action_dim) # (N + n_edit_samples, action_horizon * action_dim) # Accounting for the fact that self.action_dim = action_horizon * action_dim in this class #
-            qs = compute_q(self.target_critic.apply_fn, target_params, observations, actions)
+            qs = compute_q(self.target_critic.apply_fn, target_params, vlm_output_repeated, actions)
             # Keep only first action in chunk for choosing next action #
             actions = actions.reshape(self.N + self.n_edit_samples, self.action_horizon, self.action_dim // self.action_horizon)
             actions = actions[:, 0, :] # (N + n_edit_samples, action_dim)

@@ -548,7 +548,7 @@ def train_agent(_):
         save_dir = tf.io.gfile.join(
             os.path.abspath(FLAGS.config.save_dir),
         )
-        config.wandb_enabled = False
+        FLAGS.config.wandb_enabled = False
 
     # breakpoint()
 
@@ -655,6 +655,9 @@ def train_agent(_):
 
     # TODO: Remove hardcode and init with flags appropriately #
     num_trajectories_to_collect = 1
+    online_env_steps = 0
+    online_trajectories_added = 0
+    online_env_steps_this_epoch = 0
 
     timer = Timer()
 
@@ -662,6 +665,7 @@ def train_agent(_):
     ### Online training ###
     for i in range(FLAGS.num_offline_epochs + FLAGS.num_online_epochs + 1):
         if i >= FLAGS.num_offline_epochs and FLAGS.num_online_epochs > 0:
+            timer.tick("online_iter_total")
             logging.info("Switching to online training...")
             data_collection_rng_key, rng = jax.random.split(rng)
             env_data_collection_policy_fn = get_policy_fn(
@@ -721,13 +725,50 @@ def train_agent(_):
                 # final_step_sparse_reward=FLAGS.final_step_sparse_reward,
                 **FLAGS.config.image_replay_buffer_kwargs,
             )
+            timer.tock("recreate_image_replay_buffer_iterator")
+
+            # Get trajectory statistics
+            # LOG: Log some statistics for the collected trajectories #
+            mean_trajectory_return = np.mean(
+                [np.sum(t["rewards"]) for t in trajectories]
+            )
+            mean_trajectory_length = np.mean([len(t["rewards"]) for t in trajectories])
+            mean_max_reward = np.mean([np.max(t["rewards"]) for t in trajectories])
+            if wandb_logger is not None:
+                wandb_logger.log(
+                    {
+                        "train_env": {
+                            "mean_trajectory_return": mean_trajectory_return,
+                            "mean_trajectory_length": mean_trajectory_length,
+                            "mean_max_reward": mean_max_reward,
+                        },
+                        "online_env_steps": online_env_steps,
+                        "online_trajectories_added": online_trajectories_added,
+                    },
+                    step=i,
+                )
+            #########################################################
+
+            # Create online iterator #
+            online_train_iterator_for_critic = image_replay_buffer.iterator(
+                batch_size=FLAGS.config.agent_kwargs.batch_size
+            )
+            # Sample a batch from online and do update #
+            # TODO: Once this works, do a clean online + offline update here #
+            batch = next(online_train_iterator_for_critic)
+            batch = set_batch_masks(
+                batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
+            )
+            agent, info = agent.update(batch, utd_ratio=FLAGS.config.utd_ratio, timer=timer)
+            timer.tock("online_iter_total")
+            print(timer.get_total_times(reset=True))
         
         ### Offline training ###
         else:
             # Sample an offline batch and do an update #
             batch = next(offline_train_iterator_for_critic)
             # breakpoint()
-            batch = shard_batch(batch, sharding)
+            # batch = shard_batch(batch, sharding)
             batch = set_batch_masks(
                 batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
             )

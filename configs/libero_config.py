@@ -191,6 +191,7 @@ def get_config(config_string):
     # Expo Config #
     expo_config = deepcopy(BASE_EXPO_CONFIG)
     expo_config["agent_kwargs"]["batch_size"] = 256
+    expo_config["image_replay_buffer_kwargs"] = dict()
     ###############
 
 

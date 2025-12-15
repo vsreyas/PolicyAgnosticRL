@@ -104,7 +104,8 @@ class ImageReplayBufferPi:
         self.use_language = use_language
         self.use_wrist_view = use_wrist_view
         
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = "cuda:0" if torch.cuda.is_available() else "cpu" # For multi-gpu case
         self._clip_model, self._clip_preprocess = clip.load("ViT-B/32", device=device)
         self._clip_model.eval()
         self._clip_device = device
