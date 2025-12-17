@@ -4,19 +4,122 @@ from typing import Dict, Iterable, List, Optional, Union
 import os
 import numpy as np
 import tensorflow as tf
+
 from absl import logging
 
 import torch
 import clip
 
-from jaxrl_m.data.tf_augmentations import augment as augment_fn
-from jaxrl_m.data.tf_goal_relabeling import GOAL_RELABELING_FUNCTIONS
 import json
 from openpi.training.config import get_config
+print("Imports 1")
 import openpi.transforms as _transforms
-import openpi.models.model as _model
 import jax
 from PIL import Image
+print("Imports 2")
+
+
+### Debugging setup ###
+def inspect_tfrecords():
+    TFRECORD_PATTERN = "/data/hf_cache/datasets/LIBERO/libero_10_tf/*.tfrecord"
+
+    PROTO_TYPE_SPEC = {
+        "observations/images0": tf.uint8,
+        "observations/images1": tf.uint8,  # Assuming wrist view exists
+        "observations/state": tf.float32,
+        "actions": tf.float32,
+        "language": tf.string,
+        "rewards": tf.float32,
+        "masks": tf.float32,
+        "mc_returns": tf.float32,
+    }
+
+    # 1. Get files
+    files = glob.glob(TFRECORD_PATTERN)
+    if not files:
+        print(f"❌ No files found matching: {TFRECORD_PATTERN}")
+        return
+    
+    print(f"✅ Found {len(files)} files. Inspecting the first one: {os.path.basename(files[0])}\n")
+
+    # 2. Create a basic dataset
+    dataset = tf.data.TFRecordDataset(files)
+
+    # 3. Take one example and inspect it
+    for raw_record in dataset.take(1):
+        print("--- RAW FEATURE KEYS FOUND IN PROTO ---")
+        # Parse the raw Example proto object to see exactly what keys exist on disk
+        example = tf.train.Example()
+        example.ParseFromString(raw_record.numpy())
+        found_keys = list(example.features.feature.keys())
+        for k in sorted(found_keys):
+            print(f" • {k}")
+        print("-" * 40 + "\n")
+
+        print("--- DECODING TENSORS ---")
+        
+        # 4. Parse the tensors
+        # We assume every feature is a FixedLenFeature of type string (bytes), 
+        # which is how `tf.io.serialize_tensor` saves them.
+        features_dict = {
+            k: tf.io.FixedLenFeature([], tf.string)
+            for k in found_keys
+        }
+        
+        parsed_features = tf.io.parse_single_example(raw_record, features_dict)
+
+        out = {}
+        
+        for key in sorted(found_keys):
+            # 1. Get the raw bytes
+            raw_bytes = parsed_features[key]
+            
+            # 2. Check if we have a known dtype for this key in PROTO_TYPE_SPEC
+            dtype = PROTO_TYPE_SPEC.get(key)
+            
+            try:
+                if dtype is None:
+                    # If we don't know the dtype, we can't parse the tensor, just print bytes info
+                    print(f"❓ [{key}]: Unknown dtype in spec. Raw bytes len: {len(raw_bytes.numpy())}")
+                elif dtype == tf.string:
+                    # Strings are usually just stored directly
+                    val = raw_bytes.numpy()
+                    print(f"📝 [{key}] (String): {val}")
+                else:
+                    # It's a serialized tensor
+                    tensor = tf.io.parse_tensor(raw_bytes, out_type=dtype)
+
+                    out[key] = tensor
+                    if tensor is None:
+                        print(f"⚠️  [{key}]: Parse failed (returned None). Check dtype.")
+                    else:
+                        print(f"📦 [{key}]: Shape={tuple(tensor.shape)}, Dtype={tensor.dtype.name}")
+                        
+                        # logic to print stats if it helps
+                        if key == "observations/state":
+                            print(f"    -> First step values: {tensor[0].numpy()}")
+                        elif "images" in key:
+                            print(f"    -> Range: [{np.min(tensor)}, {np.max(tensor)}]")
+
+            except Exception as e:
+                print(f"❌ [{key}]: Error decoding - {e}")
+            
+            # breakpoint()
+        
+        # breakpoint()
+
+        # libero tfrecords spec
+        # actions: (T, 7)
+        # masks: (T,)
+        # mc_returns: (T,)
+        # observations/images0: (T + 1, 224, 224, 3)
+        # observations/images1: (T + 1, 224, 224, 3)
+        # observations/state: (T + 1, 15)
+        # rewards: (T,): These are final timestep=1.0 reward and everything else decayed by 1.0 till start;
+        #   reward for final timestep: gamma; Then it goes like gamma^2, gamma^3, ... gamma^(T-1) till start;
+        # masks: always seem to be 1.0 till start;
+        # mc_returns: discount_cumsum(rewards)
+        
 
 def save_image_tensor_as_png(tensor, path: str):
     """Saves a single image tensor as PNG."""
@@ -118,6 +221,7 @@ class ImageReplayBufferPi:
             *self.data_config.data_transforms.inputs,
             _transforms.Normalize(self.data_norm_stats, use_quantiles=self.data_config.use_quantile_norm),
             *self.data_config.model_transforms.inputs,]
+        # breakpoint()
         self.data_transforms = _transforms.compose(self.data_transforms)
         self.task_name = task_name
         self.use_8D = use_8D
@@ -166,7 +270,9 @@ class ImageReplayBufferPi:
             dataset = dataset.filter(self._proto_filter)
 
         # yields trajectories
-        dataset = dataset.map(self._decode_example, num_parallel_calls=tf.data.AUTOTUNE)
+        # dataset = dataset.map(self._decode_example, num_parallel_calls=tf.data.AUTOTUNE)
+        # DEBUGGING #
+        dataset = dataset.map(self._decode_example, num_parallel_calls=None)
 
         # cache before add_goals because add_goals introduces randomness
         if self.cache:
@@ -222,6 +328,7 @@ class ImageReplayBufferPi:
     }
 
     def _decode_example(self, example_proto):
+        # breakpoint()
         # decode the example proto according to PROTO_TYPE_SPEC
         if self.goal_relabeling_strategy is None:
             self.PROTO_TYPE_SPEC["rewards"] = tf.float32
@@ -247,6 +354,27 @@ class ImageReplayBufferPi:
                 parsed_tensors[key] = parsed_features[key]  # raw string bytes
             else:
                 parsed_tensors[key] = tf.io.parse_tensor(parsed_features[key], dtype)
+        
+        # ### DEBUGGER SETUP FOR `_decode_example` FUNCTION ###
+        # def debug_hook(rewards, masks, mc_returns, state_tf, actions_tf, image_tf):
+        #     # These arguments are now standard Numpy arrays
+        #     print("\n>>> HIT BREAKPOINT <<<")
+        #     # print(f"Parsed tensors: {parsed_tensors.keys()}")
+            
+        #     # This will pause execution here. 
+        #     # You can inspect variables 'rew', 'mask', etc. in your terminal.
+        #     import pdb; pdb.set_trace()
+            
+        #     # Return dummy value to satisfy TF graph requirements
+        #     return np.array(0.0, dtype=np.float32)
+        
+        # _ = tf.py_function(
+        #         func=debug_hook, 
+        #         inp=[parsed_tensors["rewards"], parsed_tensors["masks"], parsed_tensors["mc_returns"], parsed_tensors["observations/state"], parsed_tensors["actions"], parsed_tensors["observations/images0"]], 
+        #         Tout=tf.float32
+        # )
+        # ##########################################################################################
+
         # Repeat prompt for each timestep (tokenizer doesn't handle batching)
         out = {}
 
@@ -256,51 +384,74 @@ class ImageReplayBufferPi:
         # for k, v in parsed_tensors.items():
         #     tf.print("KEY:", k, "SHAPE:", tf.shape(v))
         
-        state_tf = parsed_tensors["observations/state"][:-1] #drop the last state to align dimensions
+        # LOG: state_tf: T+1, image_tf: T+1, rest are all T in parsed_tensors #
+        # LOG: Below transformation accounts for this #
+        state_tf = parsed_tensors["observations/state"][:-1]
+        state_tf_ns = parsed_tensors["observations/state"][1:]
         # tf.print("state tf shape: ", tf.shape(state_tf))
         actions_tf = parsed_tensors["actions"]
-        image_tf = [parsed_tensors["observations/images0"][:-1], parsed_tensors['observations/images1'][:-1]]
+        image_tf = [] # Do the same as `state_tf` above to drop last time step
+        image_tf.append(parsed_tensors["observations/images0"][:-1])
+        image_tf.append(parsed_tensors['observations/images1'][:-1])
+        image_tf_ns = []
+        image_tf_ns.append(parsed_tensors["observations/images0"][1:])
+        image_tf_ns.append(parsed_tensors['observations/images1'][1:])
+        # Handle the extra time step later
 
-        # breakpoint()
-        
-        
         ah = self.config.model.action_horizon
         T = tf.shape(state_tf)[0]
 
         # number of valid windows = T - (ah - 1)
         W = T - ah + 1
-        start_idx = tf.range(W)  
-        # if 'rewards' in parsed_tensors:
-        #     rewards_tf = tf.gather(parsed_tensors["rewards"], start_idx)[: -1]
-        #     masks_tf = tf.gather(parsed_tensors["masks"], start_idx)[: -1]
-        #     mc_returns_tf = tf.gather(parsed_tensors["mc_returns"], start_idx)[: -1]
-        # breakpoint()
+        start_idx = tf.range(W)
+        start_idx_ns = tf.range(1, W+1) # For next states/images;
+
         if 'rewards' in parsed_tensors:
-            rewards_tf = tf.gather(parsed_tensors["rewards"], start_idx)[: -1]
-            masks_tf = tf.gather(parsed_tensors["masks"], start_idx)[: -1]
-            mc_returns_tf = tf.gather(parsed_tensors["mc_returns"], start_idx)[: -1]
+            # Each tensor below has shape (T,); W = T - ah + 1: Maximum action chunk index #
+            rewards_tf = parsed_tensors["rewards"]
+            masks_tf = parsed_tensors["masks"]
+            mc_returns_tf = parsed_tensors["mc_returns"]
+
+            # rewards_tf = tf.gather(parsed_tensors["rewards"], start_idx)[: -1]
+            # masks_tf = tf.gather(parsed_tensors["masks"], start_idx)[: -1]
+            # mc_returns_tf = tf.gather(parsed_tensors["mc_returns"], start_idx)[: -1]
             # breakpoint()
 
-            # Optionally override rewards: 0 at all steps, 1 at final step
+            # Optionally override rewards: 0 at all steps, 1 at final step; build rewards, masks, and mc_returns tensors;
             if self.final_step_sparse_reward:
+                # NOTE: Use this specifically for offline data for now; We assume online data already handles rewards appropriately; #
+                # NOTE: Semantics of rewards in buffer #
+                # rewards: (T,) that have alredy taken out last timestep of 1.0 reward and now simply decay by gamma till start;
+                # masks: (T,): always seem to be 1.0 till start;
+                # mc_returns: (T,): discount_cumsum(rewards)
+                # To account for this, we fist add a dummy timestep to rewards, masks, and mc_returns;
+
                 # breakpoint()
-                # rewards_tf has shape [W-1]; we use its shape to build the new vector
-                num_steps = tf.shape(rewards_tf)[0]
+                # T_rew = tf.shape(rewards_tf)[0] # T
+                # extended_rewards = tf.concat([tf.zeros([T_rew], dtype=tf.float32), [1.0]], axis=0) # (T + 1,)
+                # extended_masks = tf.concat([tf.ones([T_rew], dtype=tf.float32), [0.0]], axis=0) # (T + 1,)
+                # gamma = tf.constant(self.discount, dtype=tf.float32)
+                # rev_rewards = tf.reverse(extended_rewards, axis=[0])
+                # def scan_fn(acc, r):
+                #     return r + gamma * acc
+                # rev_returns = tf.scan(scan_fn, rev_rewards)
+                # extended_returns = tf.reverse(rev_returns, axis=[0])
+
+
+                num_steps = tf.shape(rewards_tf)[0] # (T,)
                 # Start with all zeros
-                rewards = tf.zeros_like(rewards_tf)
+                rewards = tf.zeros_like(rewards_tf) # (T,)
                 # Set last index to 1.0
                 last_idx = num_steps - 1
                 rewards = tf.tensor_scatter_nd_update(
                     rewards,
                     indices=tf.reshape(last_idx, [1, 1]),  # [[last_idx]]
                     updates=tf.constant([1.0], dtype=rewards.dtype),
-                )
-                out["rewards"] = rewards
+                ) # Set last timestep reward to 1.0 rest 0.0
+                
                 rewards_tf = rewards
-                # Keep masks / mc_returns as-is (or adjust later if you want them consistent)
-                out["masks"] = masks_tf
-                # out["mc_returns"] = mc_returns_tf
 
+                # Keep masks / mc_returns as-is (or adjust later if you want them consistent)
                 gamma = tf.constant(self.discount, dtype=rewards_tf.dtype)
                 rev_rewards = tf.reverse(rewards_tf, axis=[0])
                 
@@ -313,44 +464,77 @@ class ImageReplayBufferPi:
                 )
 
                 mc_returns_tf = tf.reverse(rev_returns, axis=[0])
-            else:
-                out["rewards"] = rewards_tf
-                out["masks"] = masks_tf
-                out["mc_returns"] = mc_returns_tf
+
+                # Update masks_tf
+                masks = tf.ones_like(rewards_tf)
+                masks = tf.tensor_scatter_nd_update(
+                    masks,
+                    indices=tf.reshape(last_idx, [1, 1]),
+                    updates=tf.constant([0.0], dtype=masks.dtype),
+                )
+                masks_tf = masks
+        
+            # Fix code with regard to action chunking #
+            # Reward at time `t` is sum of rewards for all actions in the action chunk starting at time `t` #
+            # Sum rewards over the window [t : t + ah] for each starting timestep
+            rewards_tf_chunked = tf.map_fn(
+                lambda t: tf.reduce_sum(rewards_tf[t : t + ah]),
+                start_idx,
+                fn_output_signature=tf.float32,
+            )
+            # rewards_tf_chunked = rewards_tf_chunked[:-1]
+
+            masks_tf_chunked = tf.map_fn(
+                lambda t: tf.reduce_max(masks_tf[t : t + ah]),
+                start_idx,
+                fn_output_signature=tf.float32,
+            )
+            # masks_tf_chunked = masks_tf_chunked[:-1]
+
+            mc_returns_tf = tf.gather(mc_returns_tf, start_idx)
+            # mc_returns_tf = mc_returns_tf[:-1]
+            
+            out["rewards"] = rewards_tf_chunked # (W=T - ah + 1,)
+            out["masks"] = masks_tf_chunked # (W=T - ah + 1,)
+            out["mc_returns"] = mc_returns_tf # (W=T - ah + 1,)
 
         actions_tf = tf.map_fn(
             lambda t: actions_tf[t : t + ah],
             start_idx,
             fn_output_signature=tf.float32,
-        )
+        ) # (W=T - ah + 1, ah)
 
         # breakpoint()
 
-        state_tf = tf.gather(state_tf, start_idx)
-        image_tf[0] = tf.gather(image_tf[0], start_idx)
-        image_tf[1] = tf.gather(image_tf[1], start_idx)
-        length = tf.shape(state_tf)[0]
-        prompt_tf = tf.repeat(parsed_tensors["language"][None], repeats=length)  # shape: (length,)
-        # tf.print(prompt_tf)
-        #  # ===== DEBUG SHAPE PRINTS =====
-        # tf.print("----- DEBUG SHAPES -----")
-        # tf.print("state_tf shape:", tf.shape(state_tf))
-        # tf.print("actions_tf shape:", tf.shape(actions_tf))
-        # tf.print("image_tf[0] shape:", tf.shape(image_tf[0]))   # base camera
-        # tf.print("image_tf[1] shape:", tf.shape(image_tf[1]))   # wrist camera
-        # tf.print("prompt_tf shape:", tf.shape(prompt_tf))
-        # tf.print("start_idx shape:", tf.shape(start_idx))
-        # tf.print("length:", length)
-        # tf.print("------------------------")
+        # Get all tensors at corresponding timesteps #
+        state_tf = tf.gather(state_tf, start_idx) # (W+1=T - ah, state_dim)
+        image_tf[0] = tf.gather(image_tf[0], start_idx) # (W+1=T - ah, H, W, C)
+        image_tf[1] = tf.gather(image_tf[1], start_idx) # (W+1=T - ah, H, W, C)
+        state_tf_ns = tf.gather(state_tf_ns, start_idx_ns) # (W=T - ah, state_dim)
+        image_tf_ns[0] = tf.gather(image_tf_ns[0], start_idx_ns) # (W=T - ah, H, W, C)
+        image_tf_ns[1] = tf.gather(image_tf_ns[1], start_idx_ns) # (W=T - ah, H, W, C)
+        length = tf.shape(actions_tf)[0] # (W=T - ah + 1,)
+        prompt_tf = tf.repeat(parsed_tensors["language"][None], repeats=length)  # shape: (length,) # (W=T - ah + 1,)
         out['prompt'] = prompt_tf
 
-        # breakpoint()
-
+        ### DEBUG ###
+        # def debug_hook(state, image0, image1, prompt):
+        #     print("\n>>> HIT BREAKPOINT <<<")
+        #     import pdb; pdb.set_trace()
+        #     return np.array(0.0, dtype=np.float32)
+        # _ = tf.py_function(
+        #         func=debug_hook, 
+        #         inp=[state_tf, image_tf[0], image_tf[1], prompt_tf], 
+        #         Tout=tf.float32
+        # )
+        ##########################################################################################
         
         def _apply_data_transforms_numpy(
             state, actions,
             img0, img1,
             prompt,
+            # Next states/images
+            state_ns, image0_ns, image1_ns,
         ):  
             if hasattr(state, "numpy"):
                 state = state.numpy()
@@ -362,16 +546,27 @@ class ImageReplayBufferPi:
                 img1 = img1.numpy()
             if hasattr(prompt, "numpy"):
                 prompt = prompt.numpy()
+            if hasattr(state_ns, "numpy"):
+                state_ns = state_ns.numpy()
+            if hasattr(image0_ns, "numpy"):
+                image0_ns = image0_ns.numpy()
+            if hasattr(image1_ns, "numpy"):
+                image1_ns = image1_ns.numpy()
 
             if img0.ndim == 4:   # [T,H,W,C]
                 img0 = img0[:, ::-1, ::-1, :]
                 img1 = img1[:, ::-1, ::-1, :]
+                image0_ns = image0_ns[:, ::-1, ::-1, :]
+                image1_ns = image1_ns[:, ::-1, ::-1, :]
             else:                # [H,W,C]
                 img0 = img0[::-1, ::-1, :]
                 img1 = img1[::-1, ::-1, :]
+                image0_ns = image0_ns[::-1, ::-1, :]
+                image1_ns = image1_ns[::-1, ::-1, :]
 
             if self.use_8D and state.shape[-1] != 8:
                 state = convert_state_15_to_8(state)
+                state_ns = convert_state_15_to_8(state_ns)
 
             # Reconstruct EXACT input dict
             input_dict = {
@@ -384,6 +579,16 @@ class ImageReplayBufferPi:
             
             # Apply OpenPI transform chain
             out = self.data_transforms(input_dict)
+
+            # Apply to next states/images
+            input_dict_ns = {
+                "observation/state": state_ns,
+                "observation/image": image0_ns,
+                "observation/wrist_image": image1_ns,
+                "prompt": prompt,
+            }
+            out_ns = self.data_transforms(input_dict_ns)
+
             if "token_ar_mask" not in out:
                 out["token_ar_mask"] = np.zeros_like(out["tokenized_prompt_mask"], dtype=np.int32)
 
@@ -409,16 +614,30 @@ class ImageReplayBufferPi:
                 out["tokenized_prompt_mask"],          # 9
                 out["token_ar_mask"],                  # 10
                 out["token_loss_mask"],                # 11
+
+                # Next states/images
+                out_ns["state"],                          # 12
+
+                out_ns["image"]["base_0_rgb"],            # 13
+                out_ns["image"]["left_wrist_0_rgb"],      # 14
+                out_ns["image"]["right_wrist_0_rgb"],     # 15
+
+                out_ns["image_mask"]["base_0_rgb"],       # 16
+                out_ns["image_mask"]["left_wrist_0_rgb"], # 17
+                out_ns["image_mask"]["right_wrist_0_rgb"],# 18
             ]
 
         outputs = tf.py_function(
             func=_apply_data_transforms_numpy,
             inp=[
-                state_tf,
-                actions_tf,
-                image_tf[0],
-                image_tf[1],
-                prompt_tf,
+                state_tf, # (W+1,)
+                actions_tf, # (W,)
+                image_tf[0], # (W+1, H, W, C)
+                image_tf[1], # (W+1, H, W, C)
+                prompt_tf, # (W,)
+                state_tf_ns, # (W,)
+                image_tf_ns[0], # (W, H, W, C)
+                image_tf_ns[1], # (W, H, W, C)
             ],
             Tout=[
                 tf.float32,  # state
@@ -436,109 +655,135 @@ class ImageReplayBufferPi:
                 tf.bool,     # tokenized_prompt_mask
                 tf.int32,     # token_ar_mask
                 tf.bool,     # token_loss_mask
+
+                tf.float32,  # next state
+
+                # Next images
+                tf.float32,  # base_0_rgb
+                tf.float32,  # left_wrist_0_rgb
+                tf.float32,  # right_wrist_0_rgb
+
+                # Next image masks
+                tf.bool,     # mask base
+                tf.bool,     # mask left
+                tf.bool,     # mask right
             ]
         )
         # breakpoint()
 
+        ### DEBUGGER SETUP FOR `_decode_example` FUNCTION ###
+        # def debug_hook(states, actions, image_base, image_left, image_right, image_mask_base, image_mask_left, image_mask_right, tokenized_prompt, tokenized_prompt_mask, token_ar_mask, token_loss_mask):
+        #     # These arguments are now standard Numpy arrays
+        #     print("\n>>> HIT BREAKPOINT <<<")
+        #     # print(f"Parsed tensors: {parsed_tensors.keys()}")
+            
+        #     # This will pause execution here. 
+        #     # You can inspect variables 'rew', 'mask', etc. in your terminal.
+        #     import pdb; pdb.set_trace()
+            
+        #     # Return dummy value to satisfy TF graph requirements
+        #     return np.array(0.0, dtype=np.float32)
+        
+        # _ = tf.py_function(
+        #         func=debug_hook, 
+        #         inp=[*outputs], 
+        #         Tout=tf.float32
+        # )
+        ##########################################################################################
+
         idx = 0
         out['observations'] = {}
         out['observations']["proprio"] = outputs[idx]; idx += 1
-        # tf.print("state: ", tf.shape(out['state']))
-        out["actions"] = outputs[idx][:-1]; idx += 1 #drop the last action to align dimensions
-        # tf.print("actions: ", tf.shape(out['actions']))
+        out["actions"] = outputs[idx]; idx += 1 #drop the last action to align dimensions
 
         
         out['observations']["image"] = outputs[idx]; idx += 1
-        # tf.print("image:1:", tf.shape(out["image"]["base_0_rgb"]))
         out['observations']["wrist_image"] = outputs[idx]; idx += 1
-        # tf.print("image: 2:" ,tf.shape(out["image"]["left_wrist_0_rgb"]))
         out['observations']["image_3"] = outputs[idx]; idx += 1
-        # tf.print("image:3:", tf.shape(out["image"]["right_wrist_0_rgb"]))
 
 
         out["observations_image_mask"] = {}
         out["observations_image_mask"]["image"] = outputs[idx]; idx += 1
-        # tf.print("im mask :1:",out["image_mask"]["base_0_rgb"])
         out["observations_image_mask"]["wrist_image"] = outputs[idx]; idx += 1
-        # tf.print(tf.shape(out["image_mask"]["left_wrist_0_rgb"]))
         out["observations_image_mask"]["image_3"] = outputs[idx]; idx += 1
-        # tf.print(tf.shape(out["image_mask"]["right_wrist_0_rgb"]))
 
-        out["tokenized_prompt"] = outputs[idx][:-1]; idx += 1
-        out["tokenized_prompt_mask"]= outputs[idx][:-1]; idx += 1
-        out["token_ar_mask"] = outputs[idx][:-1]; idx += 1
-        out["token_loss_mask"] = outputs[idx][:-1]; idx += 1
+        out["tokenized_prompt"] = outputs[idx]; idx += 1
+        out["tokenized_prompt_mask"]= outputs[idx]; idx += 1
+        out["token_ar_mask"] = outputs[idx]; idx += 1
+        out["token_loss_mask"] = outputs[idx]; idx += 1
         
-        out['prompt'] = out['prompt'][:-1]
+        out['prompt'] = out['prompt']
 
+        # Apply to next states/images
         out['next_observations'] = {}
+        out['next_observations']["proprio"] = outputs[idx]; idx += 1
+
+        out['next_observations']["image"] = outputs[idx]; idx += 1
+        out['next_observations']["wrist_image"] = outputs[idx]; idx += 1
+        out['next_observations']["image_3"] = outputs[idx]; idx += 1
+
         out['next_observations_image_mask'] = {}
-        # tf.print("========== TRANSFORM OUTPUT SHAPES ==========\n",
+        out['next_observations_image_mask']["image"] = outputs[idx]; idx += 1
+        out['next_observations_image_mask']["wrist_image"] = outputs[idx]; idx += 1
+        out['next_observations_image_mask']["image_3"] = outputs[idx]; idx += 1
 
-        #     # ---- STATE ----
-        #     "state shape:", tf.shape(out["state"]), "\n",
-        #     "actions shape:", tf.shape(out["actions"]), "\n",
 
-        #     # ---- IMAGES ----
-        #     "image/base_0_rgb shape:", tf.shape(out["image"]["base_0_rgb"]), "\n",
-        #     "image/left_wrist_0_rgb shape:", tf.shape(out["image"]["left_wrist_0_rgb"]), "\n",
-        #     "image/right_wrist_0_rgb shape:", tf.shape(out["image"]["right_wrist_0_rgb"]), "\n",
 
-        #     # ---- IMAGE MASKS ----
-        #     "image_mask/base_0_rgb shape:", tf.shape(out["image_mask"]["base_0_rgb"]), "\n",
-        #     "image_mask/left_wrist_0_rgb shape:", tf.shape(out["image_mask"]["left_wrist_0_rgb"]), "\n",
-        #     "image_mask/right_wrist_0_rgb shape:", tf.shape(out["image_mask"]["right_wrist_0_rgb"]), "\n",
+        # out['next_observations'] = {}
+        # out['next_observations_image_mask'] = {}
 
-        #     # ---- TOKENS ----
-        #     "tokenized_prompt shape:", tf.shape(out["tokenized_prompt"]), "\n",
-        #     "tokenized_prompt_mask shape:", tf.shape(out["tokenized_prompt_mask"]), "\n",
-        #     "token_ar_mask shape:", tf.shape(out["token_ar_mask"]), "\n",
-        #     "token_loss_mask shape:", tf.shape(out["token_loss_mask"]), "\n",
+        # # if 'rewards' in parsed_tensors:
+        # #     out["rewards"] = rewards_tf
+        # #     out["masks"] = masks_tf
+        # #     out["mc_returns"] = mc_returns_tf
 
-        #     # ---- PROMPT ----
-        #     "prompt shape:", tf.shape(out["prompt"]), "\n",
-
-        #     # Footer
-        #     "============================================"
-        # )
-        if 'rewards' in parsed_tensors:
-            out["rewards"] = rewards_tf
-            out["masks"] = masks_tf
-            out["mc_returns"] = mc_returns_tf
-
-        states = out['observations']["proprio"]
-        out['observations']["proprio"] = states[:-1]
+        # states = out['observations']["proprio"]
+        # out['observations']["proprio"] = states[:-1]
         
-        out['next_observations']["proprio"] = states[1:]
+        # out['next_observations']["proprio"] = states[1:]
         # breakpoint()
         # if self.states_only:
         #     parsed_tensors["observations/images0"] = None
         #     parsed_tensors["next_observations/images0"] = None
         # else:
-        if not self.states_only:
-            # images = out["image"]
-            # parsed_tensors["observations/images0"] = images[:-1]
-            # parsed_tensors["next_observations/images0"] = images[1:]
-            # if self.use_wrist_view:
-            #     wrist_images = parsed_tensors["observations/images1"]
-            #     parsed_tensors["observations/images1"] = wrist_images[:-1]
-            #     parsed_tensors["next_observations/images1"] = wrist_images[1:]
-            for cam in out["observations_image_mask"].keys():
-                img = out['observations'][cam]
+        # if not self.states_only:
+        #     # images = out["image"]
+        #     # parsed_tensors["observations/images0"] = images[:-1]
+        #     # parsed_tensors["next_observations/images0"] = images[1:]
+        #     # if self.use_wrist_view:
+        #     #     wrist_images = parsed_tensors["observations/images1"]
+        #     #     parsed_tensors["observations/images1"] = wrist_images[:-1]
+        #     #     parsed_tensors["next_observations/images1"] = wrist_images[1:]
+        #     for cam in out["observations_image_mask"].keys():
+        #         img = out['observations'][cam]
                 
-                out['observations'][cam] = img[:-1]
-                out['next_observations'][cam] = img[1:]
+        #         out['observations'][cam] = img[:-1]
+        #         out['next_observations'][cam] = img[1:]
                 
 
-                mask = out["observations_image_mask"][cam]
-                out["observations_image_mask"][cam] = mask[:-1]
-                out['next_observations_image_mask'][cam] = mask[1:]
-                # tf.print("here 2")
+        #         mask = out["observations_image_mask"][cam]
+        #         out["observations_image_mask"][cam] = mask[:-1]
+        #         out['next_observations_image_mask'][cam] = mask[1:]
+        #         # tf.print("here 2")
 
-        out['terminals'] = tf.zeros([W-1], dtype=tf.bool)
-        # # terminals[-1] = True
-        out['truncates'] = tf.zeros([W-1], dtype=tf.bool)
-        # truncates[-1] = True
+        terminals = tf.zeros([W], dtype=tf.bool)
+        last_idx = W - 1
+        terminals = tf.tensor_scatter_nd_update(
+            terminals,
+            indices=tf.reshape(last_idx, [1, 1]),  # [[last_idx]]
+            updates=tf.constant([True], dtype=terminals.dtype),
+        ) # Set last timestep reward to 1.0 rest 0.0
+        out['terminals'] = terminals
+        out['truncates'] = tf.zeros([W], dtype=tf.bool)
+        last_idx = W - 1
+        truncates = tf.zeros([W], dtype=tf.bool)
+        truncates = tf.tensor_scatter_nd_update(
+            truncates,
+            indices=tf.reshape(last_idx, [1, 1]),  # [[last_idx]]
+            updates=tf.constant([True], dtype=truncates.dtype),
+        ) # Set last timestep reward to 1.0 rest 0.0
+        out['truncates'] = truncates
+
         def _encode_clip(text_tensor):
             """Run CLIP text encoder and return a 512-D embedding (or) use a cached embedding dict."""
             # Convert TF string to Python str
@@ -699,6 +944,7 @@ class ImageReplayBufferPi:
 
 
 def save_trajectory_as_tfrecord(trajectory: Dict[str, np.ndarray], path: str):
+    # breakpoint()
     def tensor_feature(value):
         return tf.train.Feature(
             bytes_list=tf.train.BytesList(value=[tf.io.serialize_tensor(value).numpy()])
@@ -733,6 +979,10 @@ def save_trajectory_as_tfrecord(trajectory: Dict[str, np.ndarray], path: str):
         print("no language")
     # else:
         # language_bytes = "".encode("utf-8")
+    
+    # Append the last step of 'next_observations' to 'observations' for dumping to tfrecord #
+    # Goes properly with the convention followed after refactor of ImageReplayBufferPi #
+    trajectory["observations"].append(trajectory["next_observations"][-1])
 
     with tf.io.TFRecordWriter(path) as writer:
         example = tf.train.Example(
@@ -768,18 +1018,18 @@ def save_trajectory_as_tfrecord(trajectory: Dict[str, np.ndarray], path: str):
                     #     )
                     # ),
                     "actions": tensor_feature(
-                        np.array(trajectory["actions"][:-1], dtype=np.float32)
+                        np.array(trajectory["actions"], dtype=np.float32) # DO NOT drop last step
                     ),
                     **(
                         {
                             "rewards": tensor_feature(
-                                np.array(trajectory["rewards"][:-1], dtype=np.float32)
+                                np.array(trajectory["rewards"], dtype=np.float32) # DO NOT drop last step
                             ),
                             "masks": tensor_feature(
-                                np.array(trajectory["masks"][:-1], dtype=np.float32)
+                                np.array(trajectory["masks"], dtype=np.float32) # DO NOT drop last step
                             ),
                             "mc_returns": tensor_feature(
-                                np.array(trajectory["mc_returns"][:-1], dtype=np.float32)
+                                np.array(trajectory["mc_returns"], dtype=np.float32) # DO NOT drop last step
                             ),
                         }
                         if "rewards" in trajectory
@@ -866,6 +1116,9 @@ if __name__ == "__main__":
     import glob
     import numpy as np
 
+    tf.config.set_visible_devices([], 'GPU')
+    inspect_tfrecords()
+
     # -------------------------------
     # Load config
     # -------------------------------
@@ -880,11 +1133,13 @@ if __name__ == "__main__":
     # Locate TFRecords
     # -------------------------------
     # tfrecord_dir = "/data/hf_cache/datasets/LIBERO/libero_10_tf"
-    tfrecord_dir = "/home/sreyasv/Projects/PolicyAgnosticRL/results/image_replay_buffer"
-    data_paths = sorted(glob.glob(os.path.join(tfrecord_dir, "*.tfrecord")))
+    # tfrecord_dir = "/home/sreyasv/Projects/PolicyAgnosticRL/results/image_replay_buffer"
 
-    if not data_paths:
-        raise FileNotFoundError(f"No TFRecord files found in {tfrecord_dir}")
+    # data_paths = sorted(glob.glob(os.path.join(tfrecord_dir, "*.tfrecord")))
+    data_paths = "/data/hf_cache/datasets/LIBERO/libero_10_tf/*.tfrecord"
+
+    # if not data_paths:
+    #     raise FileNotFoundError(f"No TFRecord files found in {tfrecord_dir}")
 
     print(f"[INFO] Found {len(data_paths)} TFRecord files.")
     print("[INFO] Using first 5 files for integration test.\n")
@@ -911,6 +1166,8 @@ if __name__ == "__main__":
     #   (Observation, actions)
     # -------------------------------
     output = next(iterator)
+
+    # breakpoint()
 
     print("\n========== BATCH STRUCTURE ==========\n")
     print("output keys: ", output.keys())

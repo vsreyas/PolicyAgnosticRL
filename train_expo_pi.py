@@ -12,6 +12,7 @@ import jax.numpy as jnp
 import numpy as np
 import seaborn as sns
 import tensorflow as tf
+
 import wandb
 from absl import app, flags, logging
 from matplotlib import pyplot as plt
@@ -185,190 +186,6 @@ def shard_batch(batch, base_sharding):
 
     return jax.tree_map(shard_array, batch)
 
-def add_empty_observation_history_axis_to_batch(batch: Batch) -> Batch:
-    """
-    Add empty chunking dimension to observations, next_observations, and actions.
-
-    This is used for DDPM, because it assumes observation history.
-
-    Args:
-        batch: Training batch.
-
-    Returns:
-        Batch with empty observation history axis.
-    """
-    for key in ["observations", "next_observations", "actions"]:
-        # First dimension is batch size, second dimension is chunking dimension
-        batch[key] = jax.tree_map(lambda x: x[:, None], batch[key])
-    return batch
-
-
-def unbatch_observation_history_axis(batch: Batch) -> Batch:
-    """
-    Remove the observation history axis from the batch.
-
-    Args:
-        batch: Training batch.
-
-    Returns:
-        Batch without observation history axis.
-    """
-    for key in ["observations", "next_observations", "actions"]:
-        batch[key] = jax.tree_map(lambda x: x[:, 0], batch[key])
-    return batch
-
-
-def preprocess_batch_with_action_optimization(
-    batch: Batch,
-    critic_agent,
-    local_optimization_steps: int,
-    local_optimization_step_size: float,
-    optimize_critic_ensemble_min: bool,
-    action_space_low: gym.Space,
-    action_space_high: gym.Space,
-    improve_actions_with_global_optimization: bool,
-    base_policy_agent: Optional[flax.struct.PyTreeNode] = None,
-    num_base_policy_actions: int = 32,
-    num_actions_to_keep: int = 10,
-    distill_argmax: bool = True,
-    rng: Optional[jax.random.PRNGKey] = None,
-) -> Dict[str, jnp.ndarray]:
-    """
-    Preprocess the batch with Action Optimization.
-
-    Args:
-        batch: Training batch.
-        critic_agent: Critic agent (e.g. Cal-QL).
-        local_optimization_steps: Number of gradient steps.
-        local_optimization_step_size: Step size.
-        optimize_critic_ensemble_min: Whether gradient steps are taken w.r.t. minimum or mean.
-        action_space_low: Low bound of the action space.
-        action_space_high: High bound of the action space.
-        improve_actions_with_global_search: Whether to use global optimization.
-        base_policy_agent: Base policy agent.
-        num_base_policy_actions: Number of actions to sample for global optimization.
-        num_actions_to_keep: Number of actions to keep for global optimization.
-        distill_argmax: Whether to only keep the best action from the candidate set. If False, will
-            sample from a softmax over action candidates.
-        rng: Random seed.
-
-    Returns:
-        Batch after applying action optimization to the actions.
-    """
-
-    # assert (
-    #     len(batch["actions"].shape) == 3 and batch["actions"].shape[1] == 1
-    # ), f"This function assumes an empty action chunking axis. Found actions with shape {batch['actions'].shape}"
-
-    # if isinstance(batch["observations"], dict):
-    #     if "image" in batch["observations"]:
-    #         assert (
-    #             len(batch["observations"]["image"].shape) == 5
-    #             and batch["observations"]["image"].shape[1] == 1
-    #         ), f"This function assumes an empty observation history axis. Found images with shape {batch['observations']['image'].shape}"
-    #     else:
-    #         assert (
-    #             batch["observations"]["state"].ndim == 3
-    #             and batch["observations"]["state"].shape[1] == 1
-    #         ), f"This function assumes an empty observation history axis. Found states with shape {batch['observations']['state'].shape}"
-    # else:
-    #     assert (
-    #         len(batch["observations"].shape) == 3
-    #         and batch["observations"].shape[1] == 1
-    #     ), f"This function assumes an empty observation history axis. Found observations with shape {batch['observations'].shape}"
-
-    # Unbatch the dataset
-    # batch = unbatch_observation_history_axis(batch)
-    observations = batch["observations"]
-
-    if improve_actions_with_global_optimization:
-        assert base_policy_agent is not None
-        assert rng is not None
-        rng, key = jax.random.split(rng)
-        action_distribution, info = action_optimization_sample_actions(
-            observations,
-            critic_agent,
-            critic_state=critic_agent.state,
-            num_base_policy_actions=num_base_policy_actions,
-            num_actions_to_keep=num_actions_to_keep,
-            num_steps=local_optimization_steps,
-            step_size=local_optimization_step_size,
-            optimize_critic_ensemble_min=optimize_critic_ensemble_min,
-            rng=key,
-            action_space_low=action_space_low,
-            action_space_high=action_space_high,
-            argmax=distill_argmax,
-            dataset_actions_to_consider=batch["actions"],
-        )
-        batch["actions"] = action_distribution.sample(seed=rng)
-    else:
-        if isinstance(observations, dict) and "ddpm_actions" in observations:
-            observations = observations["state"]
-        local_optimization_results: LocalOptimizationState = (
-            take_local_optimization_steps(
-                observations,
-                batch["actions"],
-                critic=critic_agent,
-                critic_state=critic_agent.state,
-                num_steps=local_optimization_steps,
-                step_size=local_optimization_step_size,
-                optimize_critic_ensemble_min=optimize_critic_ensemble_min,
-                action_space_low=action_space_low,
-                action_space_high=action_space_high,
-            )
-        )
-        batch["actions"] = local_optimization_results.actions
-    # batch = add_empty_observation_history_axis_to_batch(batch)
-    return batch
-
-
-def get_robot_action_space(
-    normalization_action_mean: np.ndarray,
-    normalization_action_std: np.ndarray,
-    dof: int,
-) -> gym.spaces.Box:
-    original_action_space_low = np.array([-0.05, -0.05, -0.05, -0.25, -0.25, -0.25])[
-        :dof
-    ]
-    original_action_space_high = np.array([0.05, 0.05, 0.05, 0.25, 0.25, 0.25])[:dof]
-    return gym.spaces.Box(
-        np.concatenate(
-            [
-                (original_action_space_low - normalization_action_mean[:dof])
-                / normalization_action_std[:dof],
-                [0],
-            ]
-        ),
-        np.concatenate(
-            [
-                (original_action_space_high - normalization_action_mean[:dof])
-                / normalization_action_std[:dof],
-                [1],
-            ]
-        ),
-    )
-
-
-def get_base_policy_agent_pi(
-    base_policy_type: BasePolicyTypes,
-    rng: jax.random.PRNGKey,
-    config,
-    base_policy_path: Optional[str] = None,
-) -> BasePolicy:
-    base_policy_class = BASE_POLICY_TYPE_TO_CLASS[base_policy_type]
-    # TODO change this definition according to Pi 
-    base_policy_agent = base_policy_class(
-        rng=rng,
-        config=config,
-    )
-
-    if base_policy_path is not None:
-        base_policy_agent = base_policy_agent.restore_checkpoint(
-            base_policy_path
-        )
-
-    return base_policy_agent
-
 def sanitize_obs(obs):
     out = {}
     for k, v in obs.items():
@@ -428,18 +245,6 @@ def resize_images_to_100x100(images):
     batch_size = images.shape[0]
     return jax.image.resize(images, (batch_size, 100, 100, 3), method="cubic")
 
-
-def restart_agent_optimizer_state(agent):
-    assert hasattr(agent, "state") and isinstance(agent.state, JaxRLTrainState)
-    agent.state = agent.state.replace(
-        opt_states=JaxRLTrainState._tx_tree_map(
-            lambda tx: tx.init(agent.state.params), agent.state.txs
-        ),
-        step=0,
-    )
-    return agent
-
-
 def plot_q_values_over_trajectory_time_step(
     trajectories: List[Dict[str, List[Union[np.ndarray, Dict[str, np.ndarray]]]]],
     critic_agent,
@@ -495,6 +300,8 @@ def plot_q_values_over_trajectory_time_step(
 
 
 def train_agent(_):
+    # breakpoint()
+    
     if FLAGS.debug:
         breakpoint()
         # Disabling jit might be useful for debugging
@@ -692,6 +499,7 @@ def train_agent(_):
                 # LOG: `traj` statistics #
                 # breakpoint()
                 trajectories.append(traj)
+                # breakpoint()
 
                 if FLAGS.config.image_observations:
                     # Save trajectory as tfrecord
@@ -722,7 +530,7 @@ def train_agent(_):
                 task_name=FLAGS.task_name,
                 use_wrist_view=FLAGS.use_wrist_view, 
                 use_language=FLAGS.use_lang, config=pi_config,
-                # final_step_sparse_reward=FLAGS.final_step_sparse_reward,
+                final_step_sparse_reward=False, # Use rewards from environment and DO NOT override with sparse 0/1 rewards at final step #
                 **FLAGS.config.image_replay_buffer_kwargs,
             )
             timer.tock("recreate_image_replay_buffer_iterator")

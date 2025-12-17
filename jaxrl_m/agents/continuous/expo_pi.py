@@ -20,19 +20,6 @@ import jax.tree_util as jtu
 import numpy as np
 import copy
 
-# from expo.agents.agent import Agent
-# from expo.agents.sac.temperature import Temperature
-# from expo.data.dataset import Batch
-# from expo.distributions import TanhNormal
-# from expo.networks import (
-#     MLP,
-#     Ensemble,
-#     MLPResNetV2,
-#     StateActionValue,
-#     subsample_ensemble,
-# )
-# from expo.networks import DiffusionMLP, DDPM, FourierFeatures, cosine_beta_schedule, ddpm_sampler, ddpm_train_sampler, DiffusionMLPResNet, get_weight_decay_mask, vp_beta_schedule
-
 from jaxrl_m.utils.expo_utils import (
     TanhNormal,
     StateActionValue,
@@ -65,15 +52,6 @@ def compute_q(critic_fn, critic_params, observations, actions):
     q_values = critic_fn({'params': critic_params}, observations, actions)
     q_values = q_values.min(axis=0)
     return q_values
-
-def _ema_host(old_target, new_source, tau: float):
-    """Host-side EMA:
-    - old_target: host array (np.ndarray)
-    - new_source: possibly device array (JAX), converted to host
-    - tau: EMA coefficient
-    """
-    new_source_host = np.asarray(new_source)  # brings device array to host if needed
-    return (1.0 - tau) * old_target + tau * new_source_host
 
 # ----------------------------------------------------------------------
 # Jitted inner steps for edit-actor and critic updates
@@ -263,8 +241,6 @@ class ExpoPiLearner(Agent):
         ddpm_temperature: float = 1.0,
         beta_schedule: str = 'vp',
     ):
-        # breakpoint()
-
         # Assertions
         assert N >= n_edit_samples, f"N must be greater than or equal to n_edit_samples, got N={N} and n_edit_samples={n_edit_samples}"
         
@@ -286,37 +262,9 @@ class ExpoPiLearner(Agent):
         rng, actor_key, critic_key, temp_key = jax.random.split(rng, 4)
 
         # Init Pi0 model #
-        # breakpoint()
-        # TODO: Create actor and target actor with same params #
-        # config_copy = config.copy()
+        # Initialize target_actor as a PiPolicy object with is_target=True; This ensures optimizer states are not created for target_actor #
         target_actor = PiPolicy(rng=rng, config=config, is_target=True)
-        # target_actor = None
-        # breakpoint()
         actor = PiPolicy(rng=rng, config=config, is_target=False)
-        # breakpoint()
-        # breakpoint()
-        # target_actor = None
-        # breakpoint()
-        # target_actor_params = jax.tree.map(
-        #     lambda x: x.copy().astype(jnp.bfloat16),
-        #     # lambda x: np.asarray(jax.device_get(x), dtype=x.dtype),
-        #     actor.train_state.params,
-        # )
-        # Rely on the immutability of jax arrays to create a copy of the params #
-        # target_actor_params = actor.train_state.params
-        # params_sharding = actor.train_state_sharding.params
-
-        # target_actor_params = jax.tree.map(
-        #     lambda x: x.astype(jnp.bfloat16).copy(), 
-        #     actor.train_state.params
-        # )
-
-        # target_actor_params = jax.tree.map(
-            # lambda p, s: jax.device_put(p.astype(jnp.bfloat16).copy(), s),
-            # actor.train_state.params,
-            # params_sharding
-        # )
-        # breakpoint()
         
         if decay_steps is not None:
             actor_lr = optax.cosine_decay_schedule(actor_lr, decay_steps)
@@ -377,8 +325,6 @@ class ExpoPiLearner(Agent):
             tx=optax.adam(learning_rate=temp_lr),
         )
 
-        # breakpoint()
-
         del dummy_observations, dummy_actions, edit_observations
         del edit_actor_params, critic_params, temp_params
 
@@ -409,49 +355,6 @@ class ExpoPiLearner(Agent):
             num_min_qs=num_min_qs,
             backup_entropy=backup_entropy,
         )
-    
-
-    def eval_actions(self, observations):
-        rng = self.rng
-        observations = jnp.squeeze(observations)
-        assert len(observations.shape) == 1
-        observations = jax.device_put(observations)
-        observations = jnp.expand_dims(observations, axis = 0).repeat(self.N, axis = 0)
-
-        actor_params = self.target_actor.params
-        actions, rng = ddpm_sampler(self.actor.apply_fn, actor_params, self.T, rng, self.action_dim, observations, self.alphas, self.alpha_hats, self.betas, self.ddpm_temperature, self.M, self.clip_sampler)
-
-        diffusion_actions = actions
-
-        if self.N > 1:
-            key, rng = jax.random.split(rng)
-            target_params = subsample_ensemble(
-                key, self.target_critic.params, self.num_min_qs, self.num_qs
-            )
-
-            if self.n_edit_samples > 0:
-                key, rng = jax.random.split(rng, 2)
-
-                observations = jnp.concatenate([observations, jnp.expand_dims(observations[0], axis = 0).repeat(self.n_edit_samples, axis = 0)], axis=0)
-
-                r_observations = jnp.repeat(jnp.expand_dims(observations[0], axis = 0), self.n_edit_samples, axis=0)
-                d_actions = diffusion_actions.copy()[:self.n_edit_samples]
-                r_observations = jnp.concatenate([r_observations, d_actions], axis=1)
-                r_samples, rng =  _sample_actions(key, self.edit_actor.apply_fn, self.edit_actor.params, r_observations)
-                r_samples = r_samples * self.edit_action_scale + d_actions
-                actions = jnp.concatenate([actions, r_samples], axis=0)
-                
-            qs = compute_q(self.target_critic.apply_fn, target_params, observations, actions)
-            idx = jnp.argmax(qs)
-            action = actions[idx]
-
-        else:
-        
-            action = actions[0]
-
-        rng, _ = jax.random.split(rng, 2)
-        return np.array(action.squeeze()), self.replace(rng=rng)
-
 
     def sample_batch_actions(self, obs, is_target=False, *args, **kwargs):
         # Optional RNG + timer from kwargs (similar to sample_actions)
@@ -794,72 +697,6 @@ class ExpoPiLearner(Agent):
 
         return self.replace(critic=critic, target_critic=target_critic, rng=rng), info
 
-
-        
-
-
-
-        
-
-
-        # # Sample next actions from base policy #
-        # timer.tick("sample_batch_actions_time")
-        # next_actions = self.sample_batch_actions(batch, is_target=True, infer=True, obs_key=obs_key, return_first_action=False, timer=timer) # (batch_size, action_horizon, action_dim)
-        # timer.tock("sample_batch_actions_time")
-        # next_actions = next_actions.reshape(-1, self.action_dim) # (batch_size, action_horizon * action_dim)
-        # # Get vlm output for next observations #
-        # seed, rng = jax.random.split(rng)
-        # timer.tick("get_vlm_output_time")
-        # # next_vlm_output, _ = self.target_actor.get_vlm_output(rng, batch, infer=infer, obs_key="next_observations")
-        # next_vlm_output, _ = self.actor.get_vlm_output(rng, batch, infer=infer, obs_key="next_observations", params=self.target_actor.train_state.params)
-        # next_vlm_output = jnp.mean(next_vlm_output[0], axis=1) # (batch_size, pi0_hidden_dims)
-        # timer.tock("get_vlm_output_time")
-        # # Get current vlm_output #
-        # seed, rng = jax.random.split(rng)
-        # timer.tick("get_current_vlm_output_time")
-        # # current_vlm_output, _ = self.target_actor.get_vlm_output(rng, batch, infer=infer, obs_key="observations")
-        # current_vlm_output, _ = self.actor.get_vlm_output(rng, batch, infer=infer, obs_key="observations")
-        # current_vlm_output = jnp.mean(current_vlm_output[0], axis=1) # (batch_size, pi0_hidden_dims)
-        # timer.tock("get_current_vlm_output_time")
-        # actions = batch["actions"].reshape(-1, self.action_dim) # (batch_size, action_horizon * action_dim)
-
-        # seed, rng = jax.random.split(rng)
-
-        # timer.tick("compute_q_time")
-
-        # # Used only for REDQ.
-        # key, rng = jax.random.split(rng)
-        # target_params = subsample_ensemble(
-        #     key, self.target_critic.params, self.num_min_qs, self.num_qs
-        # )
-
-        # key, rng = jax.random.split(rng)
-        # next_qs = compute_q(self.target_critic.apply_fn, target_params, next_vlm_output, next_actions) # (batch_size, )
-        # timer.tock("compute_q_time")
-        # target_q = batch["rewards"] + self.discount * batch["masks"] * next_qs # (batch_size, )
-
-        # # Use JITted version #
-        # timer.tick("critic_loss_and_grad_time")
-        # key, rng = jax.random.split(rng)
-        # grads, info = _critic_loss_and_grad(
-        #     self.critic.params,
-        #     current_vlm_output,
-        #     actions,
-        #     target_q,
-        #     key,
-        #     self.critic.apply_fn,
-        # )
-        # critic = self.critic.apply_gradients(grads=grads)
-        # timer.tock("critic_loss_and_grad_time")
-
-        # target_critic_params = optax.incremental_update(
-        #     critic.params, self.target_critic.params, self.tau
-        # )
-        # target_critic = self.target_critic.replace(params=target_critic_params)
-
-        # return self.replace(critic=critic, target_critic=target_critic, rng=rng), info
-    
-
     def preproess_batch(self, batch: Batch, *args, **kwargs) -> Batch:
         action_dim = self.action_dim // self.action_horizon
         if batch['actions'].shape[-1] > action_dim:
@@ -875,11 +712,15 @@ class ExpoPiLearner(Agent):
     # @partial(jax.jit, static_argnames="utd_ratio")
     def update(self, _observations: Data, utd_ratio: int, *args, **kwargs):
         timer = kwargs.pop("timer", None)
+        update_only_critic = kwargs.pop("update_only_critic", False) # For warmstarting critic before starting online training #
+
         new_agent = self
         # breakpoint()
         timer.tick("total_update_time")
         timer.tick("update_critic_time")
 
+        
+        # We preprocess an entire batch to improve update inference latency #
         # Make a copy of the original observations #
         original_observations = copy.deepcopy(_observations)
 
@@ -904,8 +745,7 @@ class ExpoPiLearner(Agent):
         current_vlm_output, _ = self.actor.get_vlm_output(rng, _obs)
         current_vlm_output = jnp.mean(current_vlm_output[0], axis=1)
         batch['current_vlm_output'] = current_vlm_output
-
-        # breakpoint()
+        ##########################################################################################
 
         for i in range(utd_ratio):
             # breakpoint()
@@ -924,6 +764,10 @@ class ExpoPiLearner(Agent):
             new_agent, critic_info = new_agent.update_critic(mini_batch_obs, mini_batch_next_obs, mini_batch, infer=True, obs_key="next_observations", timer=timer, seed=seed)
         timer.tock("update_critic_time")
         # breakpoint()
+        
+        if update_only_critic:
+            return new_agent, {**critic_info}
+
         timer.tick("update_actor_time")
         new_agent, actor_update_info = new_agent.update_actor(mini_batch_original_obs)
         timer.tock("update_actor_time")
@@ -941,5 +785,3 @@ class ExpoPiLearner(Agent):
         print(timer.get_total_times(reset=False))
 
         return new_agent, {**actor_info, **critic_info, **actor_update_info}
-        # return new_agent, actor_update_info
-        # return new_agent, critic_info

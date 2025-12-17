@@ -485,6 +485,7 @@ class LiberoEnvWrapper(gym.Wrapper):
 
     def step(self, action):
         obs, reward, done, info = self.env.step(action)
+
         self.__step += 1
         if self.env.check_success():
             done = True
