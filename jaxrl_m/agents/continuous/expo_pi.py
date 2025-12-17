@@ -31,6 +31,7 @@ from jaxrl_m.utils.expo_utils import (
     repeat_observations,
     repeat_observations_batched,
     repeat_observations_openpi,
+    append_substr_to_dict_keys,
 )
 from jaxrl_m.common.typing import Batch, Data, PRNGKey
 
@@ -464,6 +465,7 @@ class ExpoPiLearner(Agent):
         seed = kwargs.pop("seed", None)
         seed, rng = jax.random.split(seed)
         timer = kwargs.pop("timer", None)
+        output_action_chunk = kwargs.pop("output_action_chunk", True)
         # timer.tick("total_sample_actions_time")
         # timer.tick("sample_actions_time")
         # Repeat observations to sample `N` actions#
@@ -531,7 +533,10 @@ class ExpoPiLearner(Agent):
             qs = compute_q(self.target_critic.apply_fn, target_params, vlm_output_repeated, actions)
             # Keep only first action in chunk for choosing next action #
             actions = actions.reshape(self.N + self.n_edit_samples, self.action_horizon, self.action_dim // self.action_horizon)
-            actions = actions[:, 0, :] # (N + n_edit_samples, action_dim)
+
+            if not output_action_chunk:
+                actions = actions[:, 0, :] # (N + n_edit_samples, action_dim)
+            
             idx = jnp.argmax(qs)
             action = actions[idx]
 
@@ -542,6 +547,8 @@ class ExpoPiLearner(Agent):
         
         # timer.tock("total_sample_actions_time")
         # print(timer.get_total_times(reset=False))
+
+        # breakpoint()
 
         rng, _ = jax.random.split(rng, 2)
         return np.array(action.squeeze())
@@ -729,7 +736,6 @@ class ExpoPiLearner(Agent):
         # Observations #
         observations = self.actor.convert_to_openpi_format_infer(batch, obs_key="observations")
         obs = self.actor.input_data_transforms(observations)
-        batch_size = obs['state'].shape[0]
         next_observations = self.actor.convert_to_openpi_format_infer(batch, obs_key="next_observations")
         next_obs = self.actor.input_data_transforms(next_observations)
         # Filter batch to only keep relevant information #
@@ -762,6 +768,7 @@ class ExpoPiLearner(Agent):
             mini_batch_original_obs = jax.tree_util.tree_map(slice, original_observations)
             # breakpoint()
             new_agent, critic_info = new_agent.update_critic(mini_batch_obs, mini_batch_next_obs, mini_batch, infer=True, obs_key="next_observations", timer=timer, seed=seed)
+            critic_info = append_substr_to_dict_keys(critic_info, "critic")
         timer.tock("update_critic_time")
         # breakpoint()
         
@@ -771,17 +778,21 @@ class ExpoPiLearner(Agent):
         timer.tick("update_actor_time")
         new_agent, actor_update_info = new_agent.update_actor(mini_batch_original_obs)
         timer.tock("update_actor_time")
+        actor_update_info = append_substr_to_dict_keys(actor_update_info, "actor")
         # # breakpoint()
 
         timer.tick("update_edit_actor_time")
         if self.n_edit_samples > 0:
             new_agent, actor_info = new_agent.update_edit_actor(mini_batch)
+            entropy = actor_info["entropy"]
+            actor_info = append_substr_to_dict_keys(actor_info, "edit_actor")
             # breakpoint()
-            new_agent, temp_info = new_agent.update_temperature(actor_info["entropy"])
+            new_agent, temp_info = new_agent.update_temperature(entropy)
+            temp_info = append_substr_to_dict_keys(temp_info, "temp")
             # breakpoint()
             actor_info.update(temp_info)
         timer.tock("update_edit_actor_time")
         timer.tock("total_update_time")
         print(timer.get_total_times(reset=False))
 
-        return new_agent, {**actor_info, **critic_info, **actor_update_info}
+        return new_agent, {**actor_info, **critic_info, **actor_update_info, **temp_info}

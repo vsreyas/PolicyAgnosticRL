@@ -376,6 +376,8 @@ BASE_EXPO_CONFIG = dict(
     ),
     num_epochs=100,
     num_train_steps_per_epoch=1000,
+    num_eval_episodes=4,
+    num_episodes_per_video=2,
     eval_interval=10,
     log_interval=10,
     save_interval=50,

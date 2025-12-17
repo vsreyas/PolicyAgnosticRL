@@ -313,3 +313,6 @@ def repeat_observations_openpi(obs: _model.Observation, N: int, axis: int = 0) -
         return x
 
     return jax.tree.map(_tile_leaf, obs)
+
+def append_substr_to_dict_keys(dict, substr):
+    return {substr + '/' + k: v for k, v in dict.items()}

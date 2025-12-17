@@ -21,7 +21,8 @@ print("Imports 2")
 
 ### Debugging setup ###
 def inspect_tfrecords():
-    TFRECORD_PATTERN = "/data/hf_cache/datasets/LIBERO/libero_10_tf/*.tfrecord"
+    # TFRECORD_PATTERN = "/data/hf_cache/datasets/LIBERO/libero_10_tf/*.tfrecord"
+    TFRECORD_PATTERN = "/home/skowshik/vla/codebase/PolicyAgnosticRL/libero_10_pi05_put_the_two_mocha_pots_on_the_stove/results_expo/seed_0/image_replay_buffer/*.tfrecord"
 
     PROTO_TYPE_SPEC = {
         "observations/images0": tf.uint8,
@@ -36,6 +37,7 @@ def inspect_tfrecords():
 
     # 1. Get files
     files = glob.glob(TFRECORD_PATTERN)
+    files = sorted(files)[0]
     if not files:
         print(f"❌ No files found matching: {TFRECORD_PATTERN}")
         return
@@ -106,7 +108,7 @@ def inspect_tfrecords():
             
             # breakpoint()
         
-        # breakpoint()
+        breakpoint()
 
         # libero tfrecords spec
         # actions: (T, 7)
