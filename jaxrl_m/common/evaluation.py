@@ -480,9 +480,12 @@ def evaluate_with_trajectories_libero(
     save_video: bool = False,
     max_episodes_for_video: int = 2,
     action_horizon: int = 10,
+    use_full_horizon_for_refill: bool = False,
 ):
     H = action_horizon
     half_H = max(1, H // 2)
+    if use_full_horizon_for_refill:
+        half_H = H
 
     trajectories = [defaultdict(list)]
     episode_count = 0
@@ -497,13 +500,26 @@ def evaluate_with_trajectories_libero(
     current_action_index = 0          # where we are inside current horizon
     current_action_sequence = None    # shape (H, D) or (1, D)
 
+    q_vs_mc_returns_vals = []
+    current_vlm_output = None
+    curr_episode_q_vs_mc_returns_vals = []
+
     while episode_count < num_episodes:
+        # print("q_vs_mc_returns_vals", len(q_vs_mc_returns_vals))
+        # print("curr_episode_q_vs_mc_returns_vals", len(curr_episode_q_vs_mc_returns_vals))
+        # print("--------------------------------")
         # ---------------------------------------------------------
         # 1. Call policy when we need a refill
         # ---------------------------------------------------------
         if current_action_sequence is None or current_action_index >= half_H:
             # print("Calling policy check")
-            current_action_sequence = policy_fn(observations)
+            # breakpoint()
+            try:
+                current_action_sequence, current_vlm_output = policy_fn(observations)
+                curr_episode_q_vs_mc_returns_vals.append((current_vlm_output, current_action_sequence))
+            except Exception as e:
+                print(f"Error in policy_fn: {e}")
+                current_action_sequence = policy_fn(observations)
 
             # Expect one env. If policy returns (1, H, D) → (H, D)
             if isinstance(current_action_sequence, np.ndarray):
@@ -579,6 +595,13 @@ def evaluate_with_trajectories_libero(
         # 5. Episode end handling
         # ---------------------------------------------------------
         if dones:
+            if episode_count < num_episodes:
+                if len(curr_episode_q_vs_mc_returns_vals) > 0:
+                    q_vs_mc_returns_vals.append(curr_episode_q_vs_mc_returns_vals)
+                    # breakpoint()
+                    current_vlm_output = None
+                    curr_episode_q_vs_mc_returns_vals = []
+            
             episode_count += 1
             step_index = 0
             log_progress = True
@@ -589,6 +612,7 @@ def evaluate_with_trajectories_libero(
 
             if episode_count < num_episodes:
                 trajectories.append(defaultdict(list))
+                
                 observations = env.reset()
                 if isinstance(observations, tuple) and len(observations) == 2:
                     observations, _ = observations
@@ -602,7 +626,11 @@ def evaluate_with_trajectories_libero(
                 f"Completed {episode_count} out of {num_episodes} eval episodes..."
             )
 
-    return trajectories
+    # breakpoint()
+    if len(q_vs_mc_returns_vals) > 0:
+        return trajectories, q_vs_mc_returns_vals
+    else:
+        return trajectories
 
 
 # --- utility ---

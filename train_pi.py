@@ -1508,22 +1508,22 @@ def train_agent(_):
                 #     initial_qs = agent.forward_critic(
                 #         initial_states, initial_actions, rng=None, train=False
                 #     ).mean(axis=0)
-                #     mc_returns = jax.tree_map(
-                #         lambda t: calc_return_to_go(
-                #             rewards=np.array(t["reward"]) * FLAGS.reward_scale
-                #             + FLAGS.reward_bias,
-                #             masks=1 - np.array(t["done"]),
-                #             gamma=FLAGS.config.agent_kwargs.discount,
-                #             push_failed_to_min="maze" in FLAGS.environment_name
-                #             or FLAGS.environment_name == "real_robot",
-                #             min_reward=FLAGS.reward_bias,
-                #         ),
-                #         trajectories,
-                #         is_leaf=lambda x: isinstance(
-                #             x, dict
-                #         ),  # only map over traj in trajs
-                #     )
-                #     initial_mc_returns = jax.tree_map(lambda t: t[0], mc_returns)
+                    # mc_returns = jax.tree_map(
+                    #     lambda t: calc_return_to_go(
+                    #         rewards=np.array(t["reward"]) * FLAGS.reward_scale
+                    #         + FLAGS.reward_bias,
+                    #         masks=1 - np.array(t["done"]),
+                    #         gamma=FLAGS.config.agent_kwargs.discount,
+                    #         push_failed_to_min="maze" in FLAGS.environment_name
+                    #         or FLAGS.environment_name == "real_robot",
+                    #         min_reward=FLAGS.reward_bias,
+                    #     ),
+                    #     trajectories,
+                    #     is_leaf=lambda x: isinstance(
+                    #         x, dict
+                    #     ),  # only map over traj in trajs
+                    # )
+                    # initial_mc_returns = jax.tree_map(lambda t: t[0], mc_returns)
 
                 #     timer.tock("q-mc calculation")
                 #     if FLAGS.plot_q_values_over_trajectory_figure:

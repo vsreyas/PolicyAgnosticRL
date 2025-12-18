@@ -46,6 +46,7 @@ class TrajSampler(object):
                                 replay buffer.
         """
         trajectories = []
+        q_vs_mc_returns_vals = []
         H = self.action_horizon
         half_H = max(1, H // 2)
 
@@ -65,6 +66,8 @@ class TrajSampler(object):
             current_action_index = 0
             current_action_sequence = None
 
+            current_vlm_output = None
+            curr_episode_q_vs_mc_returns_vals = []
             while not done and step < self.max_traj_length:
                 observation_storing = copy.deepcopy(observation)
                 # if goal_relabel_fn is not None:
@@ -75,7 +78,11 @@ class TrajSampler(object):
                     if goal_relabel_fn is not None:
                         current_action_sequence = policy_fn(observation, info.get("goal"))
                     else:
-                        current_action_sequence = policy_fn(observation)
+                        try:
+                            current_action_sequence, current_vlm_output = policy_fn(observation)
+                        except Exception as e:
+                            print(f"Error in policy_fn: {e}")
+                            current_action_sequence = policy_fn(observation)
 
                     # Normalize shapes:
                     if isinstance(current_action_sequence, np.ndarray):
@@ -104,6 +111,10 @@ class TrajSampler(object):
                         )
 
                     current_action_index = 0
+
+                    if current_vlm_output is not None:
+                        curr_episode_q_vs_mc_returns_vals.append((current_vlm_output, current_action_sequence))
+
 
                 action = current_action_sequence[current_action_index]
                 current_action_index += 1
@@ -170,7 +181,13 @@ class TrajSampler(object):
                     replay_buffer.insert(transition)
 
             trajectories.append(trajectory)
-
+            
+            if len(curr_episode_q_vs_mc_returns_vals) > 0:
+                q_vs_mc_returns_vals.append(curr_episode_q_vs_mc_returns_vals)
+        
+        if len(q_vs_mc_returns_vals) > 0:
+            return trajectories, q_vs_mc_returns_vals
+        
         return trajectories
 
 
