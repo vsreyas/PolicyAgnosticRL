@@ -462,6 +462,7 @@ class ExpoPiLearner(Agent):
         # breakpoint()
 
 
+        debug_mode = kwargs.pop("debug_mode", False)
         seed = kwargs.pop("seed", None)
         seed, rng = jax.random.split(seed)
         timer = kwargs.pop("timer", None)
@@ -477,6 +478,13 @@ class ExpoPiLearner(Agent):
         else:
             # actions = self.actor.sample_actions(observations, seed=rng, params=self.target_actor.train_state.params) # (N, action_horizon, action_dim)
             actions = self.target_actor.sample_actions(observations, seed=rng) # (N, action_horizon, action_dim)
+        
+        if debug_mode:
+            actions = actions[0, :, :]
+            if not output_action_chunk:
+                actions = actions[0, :]
+            return actions
+        
         # actions = self.target_actor.sample_actions(observations, seed=rng) # (N, action_horizon, action_dim)
         # timer.tock("sample_actions_time")
         # breakpoint()

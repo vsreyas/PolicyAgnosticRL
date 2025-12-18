@@ -15,6 +15,7 @@ import numpy as np
 import optax
 import tqdm_loggable.auto as tqdm
 import wandb
+import orbax.checkpoint as ocp
 
 import openpi.models.model as _model
 import openpi.shared.array_typing as at
@@ -138,6 +139,7 @@ def init_train_state(
     )(init_rng, partial_params)
 
     return train_state, state_sharding
+    # partial_params['PaliGemma']['llm']['layers']['attn']['attn_vec_einsum_1'].keys()
 
 @at.typecheck
 def init_train_state_for_target(

@@ -222,7 +222,7 @@ def get_policy_fn(
         # breakpoint()
         actions = jax.device_get(
             agent.sample_actions(
-                observations, *args, **kwargs, timer=timer, output_action_chunk=True,
+                observations, *args, **kwargs, timer=timer, output_action_chunk=True, debug_mode=False
             )
         )
         # breakpoint()
@@ -495,6 +495,143 @@ def train_agent(_):
     ### Online training ###
     for i in range(FLAGS.num_offline_epochs + FLAGS.num_online_epochs + 1):
         if i >= FLAGS.num_offline_epochs and FLAGS.num_online_epochs > 0:
+            ### MOVE UP ONLY FOR DEBUGGING: Evaluation ###
+            if (
+                (i + 1) % FLAGS.config.eval_interval == 0
+            ) and eval_env is not None:
+                """eval"""
+                logging.info("Evaluating...")
+                timer.tick("evaluation/total")
+
+                if FLAGS.config.save_video:
+                    try:
+                        eval_env.start_recording(
+                            FLAGS.config.num_episodes_per_video,
+                            FLAGS.config.num_episodes_per_row,
+                        )
+                    except Exception as e:
+                        pass
+                if FLAGS.config.num_eval_episodes > 0:
+                    print("Evaluating...")
+                    if "libero" not in FLAGS.environment_name: 
+                        trajectories = evaluate_with_trajectories_vectorized(
+                            eval_policy_fn,
+                            eval_env,
+                            FLAGS.config.num_eval_episodes,
+                        )
+                    else:
+                        if FLAGS.num_parallel_envs != 1:
+                            trajectories = evaluate_with_trajectories_vectorized(
+                            eval_policy_fn,
+                            eval_env,
+                            FLAGS.config.num_eval_episodes,
+                        )
+                        else:
+                            trajectories = evaluate_with_trajectories_libero(
+                            eval_policy_fn,
+                            eval_env,
+                            FLAGS.config.num_eval_episodes,
+                            action_horizon=pi_config.model.action_horizon
+                            # action_horizon=1
+                        )
+
+                    if (FLAGS.environment_name == "calvin" or FLAGS.environment_name =='libero') and FLAGS.config.save_video:
+                        trajectories_to_save = trajectories[
+                            : FLAGS.config.num_episodes_per_video
+                        ]
+                        frames = []
+                        ind_traj = []
+                        for j, traj in enumerate(trajectories_to_save):
+                            trajectory_return = 0
+                            for transition, reward in zip(
+                                traj["observation"], traj["reward"]
+                            ):
+                                assert transition["image"].shape[-1] == 3
+                                if len(transition["image"].shape) == 4:
+                                    transition["image"] = transition["image"][0]
+                                image = transition["image"]  # .transpose(2, 0, 1)
+                                # Add text for reward and return so far
+                                trajectory_return += reward
+                                # image = np.flipud(image)
+                                image = np.ascontiguousarray(image) 
+                                frame = cv2.putText(
+                                    image,
+                                    f"reward: {reward}. return: {trajectory_return}",
+                                    (10, 10),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.3,
+                                    (0, 0, 0),
+                                    1,
+                                )
+                                ind_traj.append(frame)
+                                frame = frame.transpose(2, 0, 1)
+                                frames.append(frame)
+                            
+                            save_rollout_gif(ind_traj, save_dir, step_i=i, rollout_j=j)
+                            ind_traj = []
+                        
+                        del ind_traj, frames
+                        import gc; gc.collect()
+                    
+                    # print("Trajectory rewards: {}".format([np.sum(t["reward"]) for t in trajectories]))
+
+                    # eval_metrics = {
+                    #     "eval/average_return": np.mean(
+                    #         [np.sum(t["reward"]) for t in trajectories]
+                    #     ),
+                    #     "eval/average_episode_length": np.mean(
+                    #         [len(t["reward"]) for t in trajectories]
+                    #     ),
+                    #     **(
+                    #         {
+                    #             "eval/average_normalized_return": np.mean(
+                    #                 [
+                    #                     eval_env.get_normalized_score(np.sum(t["reward"]))
+                    #                     for t in trajectories
+                    #                 ]
+                    #             ),
+                    #             "eval/min_normalized_return": np.min(
+                    #                 [
+                    #                     eval_env.get_normalized_score(np.sum(t["reward"]))
+                    #                     for t in trajectories
+                    #                 ]
+                    #             ),
+                    #             "eval/max_normalized_return": np.max(
+                    #                 [
+                    #                     eval_env.get_normalized_score(np.sum(t["reward"]))
+                    #                     for t in trajectories
+                    #                 ]
+                    #             ),
+                    #         }
+                    #         if hasattr(eval_env, "get_normalized_score")
+                    #         else {}
+                    #     ),
+                    #     "eval/average_max_reward": np.mean(
+                    #         [np.max(t["reward"]) for t in trajectories]
+                    #     ),
+                    # }
+
+                    # debug_metrics = agent.get_debug_metrics(batch=batch, seed=eval_policy_fn_key)
+                    # if wandb_logger is not None:
+                    #     wandb_logger.log(eval_metrics, step=i)
+                    #     wandb_logger.log(
+                    #         {f"debug/{k}": float(v) for k, v in debug_metrics.items()},
+                    #         step=i,
+                    #     )
+                    
+                    del trajectories
+                    import gc; gc.collect()
+                # if FLAGS.config.save_video:
+                #     try:
+                #         eval_video = load_recorded_video(
+                #             video_path=eval_env.current_save_path
+                #         )
+                #         if wandb_logger is not None:
+                #             wandb_logger.log({"evaluation/video": eval_video}, step=i)
+                #     except Exception as e:
+                #         pass
+                timer.tock("evaluation/total")
+            
             timer.tick("online_iter_total")
             # logging.info("Switching to online training...")
 
@@ -616,222 +753,140 @@ def train_agent(_):
             timer.tock("online_iter_total")
             print(timer.get_total_times(reset=True))
 
-            ### Evaluation ###
-            if (
-                (i + 1) % FLAGS.config.eval_interval == 0
-            ) and eval_env is not None:
-                """eval"""
-                logging.info("Evaluating...")
-                timer.tick("evaluation/total")
+            # ### Evaluation ###
+            # if (
+            #     (i + 1) % FLAGS.config.eval_interval == 0
+            # ) and eval_env is not None:
+            #     """eval"""
+            #     logging.info("Evaluating...")
+            #     timer.tick("evaluation/total")
 
-                if FLAGS.config.save_video:
-                    try:
-                        eval_env.start_recording(
-                            FLAGS.config.num_episodes_per_video,
-                            FLAGS.config.num_episodes_per_row,
-                        )
-                    except Exception as e:
-                        pass
-                if FLAGS.config.num_eval_episodes > 0:
-                    print("Evaluating...")
-                    if "libero" not in FLAGS.environment_name: 
-                        trajectories = evaluate_with_trajectories_vectorized(
-                            eval_policy_fn,
-                            eval_env,
-                            FLAGS.config.num_eval_episodes,
-                        )
-                    else:
-                        if FLAGS.num_parallel_envs != 1:
-                            trajectories = evaluate_with_trajectories_vectorized(
-                            eval_policy_fn,
-                            eval_env,
-                            FLAGS.config.num_eval_episodes,
-                        )
-                        else:
-                            trajectories = evaluate_with_trajectories_libero(
-                            eval_policy_fn,
-                            eval_env,
-                            FLAGS.config.num_eval_episodes,
-                            action_horizon=pi_config.model.action_horizon
-                        )
+            #     if FLAGS.config.save_video:
+            #         try:
+            #             eval_env.start_recording(
+            #                 FLAGS.config.num_episodes_per_video,
+            #                 FLAGS.config.num_episodes_per_row,
+            #             )
+            #         except Exception as e:
+            #             pass
+            #     if FLAGS.config.num_eval_episodes > 0:
+            #         print("Evaluating...")
+            #         if "libero" not in FLAGS.environment_name: 
+            #             trajectories = evaluate_with_trajectories_vectorized(
+            #                 eval_policy_fn,
+            #                 eval_env,
+            #                 FLAGS.config.num_eval_episodes,
+            #             )
+            #         else:
+            #             if FLAGS.num_parallel_envs != 1:
+            #                 trajectories = evaluate_with_trajectories_vectorized(
+            #                 eval_policy_fn,
+            #                 eval_env,
+            #                 FLAGS.config.num_eval_episodes,
+            #             )
+            #             else:
+            #                 trajectories = evaluate_with_trajectories_libero(
+            #                 eval_policy_fn,
+            #                 eval_env,
+            #                 FLAGS.config.num_eval_episodes,
+            #                 # action_horizon=pi_config.model.action_horizon
+            #                 action_horizon=1
+            #             )
 
-                    # # log Q - MC
-                    # if hasattr(agent, "forward_critic"):
-                    #     timer.tick("q-mc calculation")
-                    #     initial_states = []
-                    #     for t in trajectories:
-                    #         observations = sanitize_obs(t["observation"][0])
-                    #         observations["image"] = resize_images_to_100x100(
-                    #             observations["image"]
-                    #         )
-                    #         if FLAGS.use_wrist_view:
-                    #             observations["wrist_image"] = resize_images_to_100x100(
-                    #                 observations["wrist_image"]
-                    #             )
-                    #         initial_states.append(observations)
+            #         if (FLAGS.environment_name == "calvin" or FLAGS.environment_name =='libero') and FLAGS.config.save_video:
+            #             trajectories_to_save = trajectories[
+            #                 : FLAGS.config.num_episodes_per_video
+            #             ]
+            #             frames = []
+            #             ind_traj = []
+            #             for j, traj in enumerate(trajectories_to_save):
+            #                 trajectory_return = 0
+            #                 for transition, reward in zip(
+            #                     traj["observation"], traj["reward"]
+            #                 ):
+            #                     assert transition["image"].shape[-1] == 3
+            #                     if len(transition["image"].shape) == 4:
+            #                         transition["image"] = transition["image"][0]
+            #                     image = transition["image"]  # .transpose(2, 0, 1)
+            #                     # Add text for reward and return so far
+            #                     trajectory_return += reward
+            #                     # image = np.flipud(image)
+            #                     image = np.ascontiguousarray(image) 
+            #                     frame = cv2.putText(
+            #                         image,
+            #                         f"reward: {reward}. return: {trajectory_return}",
+            #                         (10, 10),
+            #                         cv2.FONT_HERSHEY_SIMPLEX,
+            #                         0.3,
+            #                         (0, 0, 0),
+            #                         1,
+            #                     )
+            #                     ind_traj.append(frame)
+            #                     frame = frame.transpose(2, 0, 1)
+            #                     frames.append(frame)
                             
-                    #     breakpoint()
-                    #     initial_states = jax.tree_map(
-                    #         lambda *x: jnp.stack(x), *initial_states
-                    #     )
-                    #     initial_actions = [t["action"][0] for t in trajectories]
-                    #     initial_actions = jax.tree_map(
-                    #         lambda *x: jnp.stack(x), *initial_actions
-                    #     )
-                    #     initial_qs = agent.forward_critic(
-                    #         initial_states, initial_actions, rng=None, train=False
-                    #     ).mean(axis=0)
-                    #     mc_returns = jax.tree_map(
-                    #         lambda t: calc_return_to_go(
-                    #             rewards=np.array(t["reward"]) * FLAGS.reward_scale
-                    #             + FLAGS.reward_bias,
-                    #             masks=1 - np.array(t["done"]),
-                    #             gamma=FLAGS.config.agent_kwargs.discount,
-                    #             push_failed_to_min="maze" in FLAGS.environment_name
-                    #             or FLAGS.environment_name == "real_robot",
-                    #             min_reward=FLAGS.reward_bias,
-                    #         ),
-                    #         trajectories,
-                    #         is_leaf=lambda x: isinstance(
-                    #             x, dict
-                    #         ),  # only map over traj in trajs
-                    #     )
-                    #     initial_mc_returns = jax.tree_map(lambda t: t[0], mc_returns)
+            #                 save_rollout_gif(ind_traj, save_dir, step_i=i, rollout_j=j)
+            #                 ind_traj = []
+                        
+            #             del ind_traj, frames
+            #             import gc; gc.collect()
 
-                    #     timer.tock("q-mc calculation")
-                    #     if FLAGS.plot_q_values_over_trajectory_figure:
-                    #         timer.tick("q_values_over_trajectory")
-                    #         q_values_over_trajectory_time_step_figure = (
-                    #             plot_q_values_over_trajectory_time_step(
-                    #                 trajectories=trajectories,
-                    #                 critic_agent=agent,
-                    #                 sharding=sharding,
-                    #             )
-                    #         )
-                    #     else:
-                    #         q_values_over_trajectory_time_step_figure = None
-                        # timer.tock("q_values_over_trajectory")
-                        # if wandb_logger is not None:
-                        #     wandb.log(
-                        #         {
-                        #             "eval/initial state Q": wandb.Histogram(initial_qs),
-                        #             "eval/initial state MC": wandb.Histogram(
-                        #                 initial_mc_returns
-                        #             ),
-                        #             "eval/Q - MC": wandb.Histogram(
-                        #                 np.array(initial_qs) - np.array(initial_mc_returns)
-                        #             ),
-                        #             "eval/q_values_over_trajectory_time_step": q_values_over_trajectory_time_step_figure,
-                        #         },
-                        #         step=i,
-                        #     )
+            #         # eval_metrics = {
+            #         #     "eval/average_return": np.mean(
+            #         #         [np.sum(t["reward"]) for t in trajectories]
+            #         #     ),
+            #         #     "eval/average_episode_length": np.mean(
+            #         #         [len(t["reward"]) for t in trajectories]
+            #         #     ),
+            #         #     **(
+            #         #         {
+            #         #             "eval/average_normalized_return": np.mean(
+            #         #                 [
+            #         #                     eval_env.get_normalized_score(np.sum(t["reward"]))
+            #         #                     for t in trajectories
+            #         #                 ]
+            #         #             ),
+            #         #             "eval/min_normalized_return": np.min(
+            #         #                 [
+            #         #                     eval_env.get_normalized_score(np.sum(t["reward"]))
+            #         #                     for t in trajectories
+            #         #                 ]
+            #         #             ),
+            #         #             "eval/max_normalized_return": np.max(
+            #         #                 [
+            #         #                     eval_env.get_normalized_score(np.sum(t["reward"]))
+            #         #                     for t in trajectories
+            #         #                 ]
+            #         #             ),
+            #         #         }
+            #         #         if hasattr(eval_env, "get_normalized_score")
+            #         #         else {}
+            #         #     ),
+            #         #     "eval/average_max_reward": np.mean(
+            #         #         [np.max(t["reward"]) for t in trajectories]
+            #         #     ),
+            #         # }
 
-                    if (FLAGS.environment_name == "calvin" or FLAGS.environment_name =='libero') and FLAGS.config.save_video:
-                        trajectories_to_save = trajectories[
-                            : FLAGS.config.num_episodes_per_video
-                        ]
-                        frames = []
-                        ind_traj = []
-                        for j, traj in enumerate(trajectories_to_save):
-                            trajectory_return = 0
-                            for transition, reward in zip(
-                                traj["observation"], traj["reward"]
-                            ):
-                                assert transition["image"].shape[-1] == 3
-                                if len(transition["image"].shape) == 4:
-                                    transition["image"] = transition["image"][0]
-                                image = transition["image"]  # .transpose(2, 0, 1)
-                                # Add text for reward and return so far
-                                trajectory_return += reward
-                                # image = np.flipud(image)
-                                image = np.ascontiguousarray(image) 
-                                frame = cv2.putText(
-                                    image,
-                                    f"reward: {reward}. return: {trajectory_return}",
-                                    (10, 10),
-                                    cv2.FONT_HERSHEY_SIMPLEX,
-                                    0.3,
-                                    (0, 0, 0),
-                                    1,
-                                )
-                                ind_traj.append(frame)
-                                frame = frame.transpose(2, 0, 1)
-                                frames.append(frame)
-                            
-                            save_rollout_gif(ind_traj, save_dir, step_i=i, rollout_j=j)
-                            ind_traj = []
-                            
-                        # frames = np.array(frames)
-                        # wandb.log(
-                        #     {
-                        #         "video": wandb.Video(
-                        #             frames,
-                        #             fps=24,
-                        #             format="mp4",
-                        #         )
-                        #     },
-                        #     step=i,
-                        # )
-                        # print("video logged")
-                        del ind_traj, frames
-                        import gc; gc.collect()
-
-                    eval_metrics = {
-                        "eval/average_return": np.mean(
-                            [np.sum(t["reward"]) for t in trajectories]
-                        ),
-                        "eval/average_episode_length": np.mean(
-                            [len(t["reward"]) for t in trajectories]
-                        ),
-                        **(
-                            {
-                                "eval/average_normalized_return": np.mean(
-                                    [
-                                        eval_env.get_normalized_score(np.sum(t["reward"]))
-                                        for t in trajectories
-                                    ]
-                                ),
-                                "eval/min_normalized_return": np.min(
-                                    [
-                                        eval_env.get_normalized_score(np.sum(t["reward"]))
-                                        for t in trajectories
-                                    ]
-                                ),
-                                "eval/max_normalized_return": np.max(
-                                    [
-                                        eval_env.get_normalized_score(np.sum(t["reward"]))
-                                        for t in trajectories
-                                    ]
-                                ),
-                            }
-                            if hasattr(eval_env, "get_normalized_score")
-                            else {}
-                        ),
-                        "eval/average_max_reward": np.mean(
-                            [np.max(t["reward"]) for t in trajectories]
-                        ),
-                    }
-
-                    # debug_metrics = agent.get_debug_metrics(batch=batch, seed=eval_policy_fn_key)
-                    # if wandb_logger is not None:
-                    #     wandb_logger.log(eval_metrics, step=i)
-                    #     wandb_logger.log(
-                    #         {f"debug/{k}": float(v) for k, v in debug_metrics.items()},
-                    #         step=i,
-                    #     )
+            #         # debug_metrics = agent.get_debug_metrics(batch=batch, seed=eval_policy_fn_key)
+            #         # if wandb_logger is not None:
+            #         #     wandb_logger.log(eval_metrics, step=i)
+            #         #     wandb_logger.log(
+            #         #         {f"debug/{k}": float(v) for k, v in debug_metrics.items()},
+            #         #         step=i,
+            #         #     )
                     
-                    del trajectories
-                    import gc; gc.collect()
-                # if FLAGS.config.save_video:
-                #     try:
-                #         eval_video = load_recorded_video(
-                #             video_path=eval_env.current_save_path
-                #         )
-                #         if wandb_logger is not None:
-                #             wandb_logger.log({"evaluation/video": eval_video}, step=i)
-                #     except Exception as e:
-                #         pass
-                timer.tock("evaluation/total")
+            #         del trajectories
+            #         import gc; gc.collect()
+            #     # if FLAGS.config.save_video:
+            #     #     try:
+            #     #         eval_video = load_recorded_video(
+            #     #             video_path=eval_env.current_save_path
+            #     #         )
+            #     #         if wandb_logger is not None:
+            #     #             wandb_logger.log({"evaluation/video": eval_video}, step=i)
+            #     #     except Exception as e:
+            #     #         pass
+            #     timer.tock("evaluation/total")
         
         ### Offline training ###
         # Not really expo style as of now, but keep it here in case need to do this paradigm later #
