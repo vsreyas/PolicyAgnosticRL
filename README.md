@@ -118,7 +118,7 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false env -u PYOPENGL_PLATFORM python -m pdb ./tra
 
 
 # Debug mode
-XLA_PYTHON_CLIENT_PREALLOCATE=false env -u PYOPENGL_PLATFORM python -m pdb ./train_expo_pi.py --config=configs/libero_config.py:expo --task_name="put both moka pots on the stove" --num_online_epochs=3000 --seed=0 --task_name="put both moka pots on the stove" --config.eval_interval=1 --config.batch_size=32 --config.agent_kwargs.batch_size=32 --environment_name=libero --wandb_experiment_name=expo_trial --num_edit_samples=4 --num_actions_to_sample=8 --num_offline_epochs=0 --final_step_sparse_reward=True --critic_warmup_steps 2000 --online_trajectory_collection_frequency 100 --config.utd_ratio=8 --config.num_eval_episodes=2 --config.num_episodes_per_video=1 --config.eval_interval=50 | tee logs/debug.log
+CUDA_VISIBLE_DEVICES=0,1 XLA_PYTHON_CLIENT_PREALLOCATE=false env -u PYOPENGL_PLATFORM python -m pdb ./train_expo_pi.py --config=configs/libero_config.py:expo --task_name="put both moka pots on the stove" --num_online_epochs=10000 --seed=0 --task_name="put both moka pots on the stove" --config.eval_interval=1 --config.batch_size=64 --config.agent_kwargs.batch_size=64 --environment_name=libero --wandb_experiment_name=expo_trial --num_edit_samples=2 --num_actions_to_sample=2 --num_offline_epochs=0 --final_step_sparse_reward=True --critic_warmup_steps 2000 --online_trajectory_collection_frequency 100000 --config.utd_ratio=2 --config.num_eval_episodes=10 --config.num_episodes_per_video=1 --config.eval_interval=100 --reward_scale=1.0 --reward_bias=-0.1 | tee logs/debug.log
 
 ```
 

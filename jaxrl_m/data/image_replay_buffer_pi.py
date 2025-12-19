@@ -232,10 +232,12 @@ class ImageReplayBufferPi:
         
         dataset = self._construct_tf_dataset(data_paths, seed)
 
-        if train:
-            dataset = dataset.repeat()
-            if self.task_name is None:
-                dataset = dataset.shuffle(512, reshuffle_each_iteration=True)
+        self.train = train
+
+        # if train:
+        #     dataset = dataset.repeat()
+        #     if self.task_name is None:
+        #         dataset = dataset.shuffle(512, reshuffle_each_iteration=True)
 
 
             # if augment:
@@ -260,43 +262,67 @@ class ImageReplayBufferPi:
     ) -> tf.data.Dataset:
         # shuffle again using the dataset API so the files are read in a
         # different order every epoch
-        dataset = tf.data.Dataset.from_tensor_slices(data_paths).shuffle(
-            len(data_paths), seed
+        # dataset = tf.data.Dataset.from_tensor_slices(data_paths).shuffle(
+        #     len(data_paths), seed, reshuffle_each_iteration=True
+        # )
+
+        files = tf.data.Dataset.from_tensor_slices(data_paths).shuffle(
+            len(data_paths), seed=seed, reshuffle_each_iteration=True
         )
 
+        # Interleave: each filename -> dataset of windows (unbatched), then mix across files
+        def per_file(fn):
+            ds = tf.data.TFRecordDataset(fn)
+            if self.task_name is not None:
+                ds = ds.filter(self._proto_filter)
+            ds = ds.map(self._decode_example, num_parallel_calls=tf.data.AUTOTUNE)
+            ds = ds.unbatch()   # windows become elements here
+            return ds
+
+        dataset = files.interleave(
+            per_file,
+            cycle_length=tf.data.AUTOTUNE,
+            num_parallel_calls=tf.data.AUTOTUNE,
+            deterministic=not self.is_train,
+        )
+        
+        if self.is_train:
+            dataset = dataset.shuffle(512, seed=seed, reshuffle_each_iteration=True)
+            dataset = dataset.repeat()
+
         # yields raw serialized examples
-        dataset = tf.data.TFRecordDataset(dataset, num_parallel_reads=tf.data.AUTOTUNE)
+        # dataset = tf.data.TFRecordDataset(dataset, num_parallel_reads=tf.data.AUTOTUNE)
         
         # Filter to get single task dataset
-        if self.task_name is not None:
-            dataset = dataset.filter(self._proto_filter)
+        # if self.task_name is not None:
+            # dataset = dataset.filter(self._proto_filter)
 
         # yields trajectories
         # dataset = dataset.map(self._decode_example, num_parallel_calls=tf.data.AUTOTUNE)
         # DEBUGGING #
-        dataset = dataset.map(self._decode_example, num_parallel_calls=None)
+        # dataset = dataset.map(self._decode_example, num_parallel_calls=None)
 
         # cache before add_goals because add_goals introduces randomness
-        if self.cache:
-            dataset = dataset.cache()
+        # if self.cache:
+        #     dataset = dataset.cache()
 
         # dataset = dataset.map(self._add_goals, num_parallel_calls=tf.data.AUTOTUNE)
 
-        if self.states_only:
-            dataset = dataset.map(
-                lambda x: {
-                    k: (
-                        x[k]
-                        if k not in ["observations", "next_observations", "goals"]
-                        else x[k]["proprio"]
-                    )
-                    for k in x
-                },
-                num_parallel_calls=tf.data.AUTOTUNE,
-            )
+        # if self.states_only:
+        #     dataset = dataset.map(
+        #         lambda x: {
+        #             k: (
+        #                 x[k]
+        #                 if k not in ["observations", "next_observations", "goals"]
+        #                 else x[k]["proprio"]
+        #             )
+        #             for k in x
+        #         },
+        #         num_parallel_calls=tf.data.AUTOTUNE,
+        #     )
 
         # unbatch to yield individual transitions
-        dataset = dataset.unbatch()
+        # dataset = dataset.unbatch()
 
         return dataset
     

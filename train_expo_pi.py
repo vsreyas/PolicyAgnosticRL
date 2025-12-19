@@ -57,7 +57,7 @@ from jaxrl_m.utils.timer_utils import Timer
 from jaxrl_m.utils.train_utils import concatenate_batches, load_recorded_video
 from jaxrl_m.vision import encoders
 from jaxrl_m.utils.train_utils import preprocess_action, repack_action
-from jaxrl_m.agents.continuous.expo_pi import ExpoPiLearner, compute_q
+from jaxrl_m.agents.continuous.expo_pi import ExpoPiLearner, compute_q, compute_q_all
 from jaxrl_m.utils.expo_utils import calc_mc_return_fn
 
 try:
@@ -423,10 +423,10 @@ def train_agent(_):
     # Create replay buffer
     # LOG: Libero comes under this for now #
     if FLAGS.config.image_observations:
-        tf.io.gfile.makedirs(tf.io.gfile.join(save_dir, "image_replay_buffer"))
-        assert not tf.io.gfile.exists(
-            tf.io.gfile.join(save_dir, "image_replay_buffer", "episode_0.tfrecord")
-        ), f"Image replay buffer already exists! ({tf.io.gfile.join(save_dir, 'image_replay_buffer', 'episode_0.tfrecord')})"
+        # tf.io.gfile.makedirs(tf.io.gfile.join(save_dir, "image_replay_buffer"))
+        # assert not tf.io.gfile.exists(
+        #     tf.io.gfile.join(save_dir, "image_replay_buffer", "episode_0.tfrecord")
+        # ), f"Image replay buffer already exists! ({tf.io.gfile.join(save_dir, 'image_replay_buffer', 'episode_0.tfrecord')})"
         image_replay_buffer = None  # Will be created when switching to online training.
         state_replay_buffer = None
 
@@ -489,7 +489,7 @@ def train_agent(_):
 
 
     # TODO: Remove hardcode and init with flags appropriately #
-    num_trajectories_to_collect = 1
+    num_trajectories_to_collect = 5
     online_env_steps = 0
     online_trajectories_added = 0
     online_env_steps_this_epoch = 0
@@ -519,42 +519,64 @@ def train_agent(_):
                     debug_mode=debug_mode,
                 )
 
-                trajectories = []
-                q_vs_mc_returns_vals = []
-                for traj_index in range(num_trajectories_to_collect):
-                    timer.tick("trajectory_sampling_time")
-                    trajs, _q_vs_mc_returns_vals = data_collection_trajectory_sampler.sample(
-                        env_data_collection_policy_fn,
-                        num_episodes=1,
-                        replay_buffer=state_replay_buffer,
-                        calc_mc_return_fn=functools.partial(calc_mc_return_fn, discount=FLAGS.config.agent_kwargs.discount, reward_bias=FLAGS.reward_bias),
-                        store_max_trajectory_reward=True,
-                        terminate_on_success=FLAGS.config.get(
-                            "early_terminate_on_success", False
-                        ),
-                    )
-                    traj = trajs[0]
-                    _q_vs_mc_returns_vals = _q_vs_mc_returns_vals[0]
-                    timer.tock("trajectory_sampling_time")
-                    print(timer.get_total_times(reset=False))
-                    # LOG: `traj` statistics #
-                    # breakpoint()
-                    trajectories.append(traj)
-                    q_vs_mc_returns_vals.append(_q_vs_mc_returns_vals)
-                    # breakpoint()
+                # trajectories = []
+                # q_vs_mc_returns_vals = []
+                # for traj_index in range(num_trajectories_to_collect):
+                #     timer.tick("trajectory_sampling_time")
+                #     trajs, _q_vs_mc_returns_vals = data_collection_trajectory_sampler.sample(
+                #         env_data_collection_policy_fn,
+                #         num_episodes=1,
+                #         replay_buffer=state_replay_buffer,
+                #         calc_mc_return_fn=functools.partial(calc_mc_return_fn, discount=FLAGS.config.agent_kwargs.discount, reward_bias=FLAGS.reward_bias),
+                #         store_max_trajectory_reward=True,
+                #         terminate_on_success=FLAGS.config.get(
+                #             "early_terminate_on_success", False
+                #         ),
+                #     )
+                #     traj = trajs[0]
+                #     # breakpoint()
+                #     _q_vs_mc_returns_vals = _q_vs_mc_returns_vals[0]
+                #     timer.tock("trajectory_sampling_time")
+                #     print(timer.get_total_times(reset=False))
+                #     # LOG: `traj` statistics #
+                #     # breakpoint()
+                #     trajectories.append(traj)
+                #     q_vs_mc_returns_vals.append(_q_vs_mc_returns_vals)
+                #     # breakpoint()
 
-                    if FLAGS.config.image_observations:
-                        # Save trajectory as tfrecord
-                        save_trajectory_as_tfrecord(
-                            trajectory=traj,
-                            path=tf.io.gfile.join(
-                                save_dir,
-                                "image_replay_buffer",
-                                f"episode_{online_trajectories_added}.tfrecord",
-                            ),
-                        )
-                    online_trajectories_added += 1
-                    online_env_steps_this_epoch += len(traj["rewards"])
+                #     if FLAGS.config.image_observations:
+                #         # Save trajectory as tfrecord
+                #         save_trajectory_as_tfrecord(
+                #             trajectory=traj,
+                #             path=tf.io.gfile.join(
+                #                 save_dir,
+                #                 "image_replay_buffer",
+                #                 f"episode_{online_trajectories_added}.tfrecord",
+                #             ),
+                #         )
+                #     online_trajectories_added += 1
+                #     online_env_steps_this_epoch += len(traj["rewards"])
+                
+                # # Get trajectory statistics
+                # # LOG: Log some statistics for the collected trajectories #
+                # mean_trajectory_return = np.mean(
+                #     [np.sum(t["rewards"]) for t in trajectories]
+                # )
+                # mean_trajectory_length = np.mean([len(t["rewards"]) for t in trajectories])
+                # mean_max_reward = np.mean([np.max(t["rewards"]) for t in trajectories])
+                # if wandb_logger is not None:
+                #     wandb_logger.log(
+                #         {
+                #             "train_env": {
+                #                 "mean_trajectory_return": mean_trajectory_return,
+                #                 "mean_trajectory_length": mean_trajectory_length,
+                #                 "mean_max_reward": mean_max_reward,
+                #             },
+                #             "online_env_steps": online_env_steps,
+                #             "online_trajectories_added": online_trajectories_added,
+                #         },
+                #         step=i,
+                #     )
 
                 # Finished collecting trajectories
                 # LOG: Construct buffers using the trajectories #
@@ -576,27 +598,6 @@ def train_agent(_):
                     **FLAGS.config.image_replay_buffer_kwargs,
                 )
                 timer.tock("recreate_image_replay_buffer_iterator")
-
-                # Get trajectory statistics
-                # LOG: Log some statistics for the collected trajectories #
-                mean_trajectory_return = np.mean(
-                    [np.sum(t["rewards"]) for t in trajectories]
-                )
-                mean_trajectory_length = np.mean([len(t["rewards"]) for t in trajectories])
-                mean_max_reward = np.mean([np.max(t["rewards"]) for t in trajectories])
-                if wandb_logger is not None:
-                    wandb_logger.log(
-                        {
-                            "train_env": {
-                                "mean_trajectory_return": mean_trajectory_return,
-                                "mean_trajectory_length": mean_trajectory_length,
-                                "mean_max_reward": mean_max_reward,
-                            },
-                            "online_env_steps": online_env_steps,
-                            "online_trajectories_added": online_trajectories_added,
-                        },
-                        step=i,
-                    )
                 #########################################################
 
                 # Update online iterator #
@@ -615,6 +616,7 @@ def train_agent(_):
                 print("Critic warmup...Updating only critic")
                 # batch = offline_batch
                 batch = next(online_train_iterator)
+                # breakpoint()
                 batch = set_batch_masks(
                     batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
                 )
@@ -628,6 +630,21 @@ def train_agent(_):
                     batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
                 )
                 agent, info = agent.update(batch, utd_ratio=FLAGS.config.utd_ratio, timer=timer, seed=rng_update)
+            
+            # Log batch statistics #
+            # breakpoint()
+            batch_stats = {
+                "batch_stats/batch_size": len(batch),
+                "batch_stats/masks_mean": np.mean(batch["masks"]),
+                "batch_stats/mc_returns_mean": np.mean(batch["mc_returns"]),
+                "batch_stats/rewards_mean": np.mean(batch["rewards"]),
+                "batch_stats/rewards_min": np.min(batch["rewards"]),
+                "batch_stats/rewards_max": np.max(batch["rewards"]),
+                "batch_stats/terminals_mean": np.mean(batch["terminals"]),
+                "batch_stats/truncations_mean": np.mean(batch["truncates"]),
+            }
+            if wandb_logger is not None:
+                wandb_logger.log(batch_stats, step=i)
             
 
             # Log training metrics #
@@ -778,26 +795,66 @@ def train_agent(_):
                                 # Prepare input for critic #
                                 vlm_output = vlm_output.reshape(1, -1)
                                 action_sequence = action_sequence.reshape(1, -1)
-                                q_val = compute_q(agent.critic.apply_fn, params, vlm_output, action_sequence)
-                                qs.append(q_val)
+                                q_vals = compute_q_all(agent.critic.apply_fn, params, vlm_output, action_sequence)
+                                # breakpoint()
+                                qs.append(q_vals[0]) # Look at q1 specifically #
                             qs_across_trajectories.append(qs)
                     
-                        mc_returns = jax.tree_map(
-                            lambda t: calc_return_to_go(
-                                rewards=np.array(t["reward"]) * FLAGS.reward_scale
-                                + FLAGS.reward_bias,
-                                masks=1 - np.array(t["done"]),
-                                gamma=FLAGS.config.agent_kwargs.discount,
-                                push_failed_to_min="maze" in FLAGS.environment_name
-                                or FLAGS.environment_name == "real_robot",
+                        # mc_returns = jax.tree_map(
+                        #     lambda t: calc_return_to_go(
+                        #         rewards=np.array(t["reward"]), # * FLAGS.reward_scale
+                        #         # + FLAGS.reward_bias,
+                        #         masks=1 - np.array(t["done"]),
+                        #         gamma=FLAGS.config.agent_kwargs.discount,
+                        #         push_failed_to_min="maze" in FLAGS.environment_name
+                        #         or FLAGS.environment_name == "real_robot",
+                        #         min_reward=FLAGS.reward_bias,
+                        #     ),
+                        #     trajectories,
+                        #     is_leaf=lambda x: isinstance(
+                        #         x, dict
+                        #     ),  # only map over traj in trajs
+                        # )
+                        # initial_mc_returns = jax.tree_map(lambda t: t[0], mc_returns)
+
+                        H = pi_config.model.action_horizon  # chunk size
+                        gamma_step = FLAGS.config.agent_kwargs.discount
+
+                        gamma_chunk = gamma_step # ** H
+
+                        mc_returns = []
+                        for traj_i, t in enumerate(trajectories):
+                            # per-step rewards (same scaling/biasing you already do)
+                            r = np.asarray(t["reward"], dtype=np.float32) * FLAGS.reward_bias + FLAGS.reward_bias
+                            d = np.asarray(t["done"], dtype=np.bool_)  # per-step done flags
+
+                            # chunk starts: 0, H, 2H, ...
+                            starts = np.arange(0, len(r), H)
+
+                            # sum rewards inside each chunk; last chunk can be shorter automatically
+                            r_chunks = np.add.reduceat(r, starts)
+
+                            # chunk done/mask: mark chunk terminal if ANY step inside the chunk is done
+                            done_chunks = np.array([d[s : min(s + H, len(d))].any() for s in starts], dtype=np.float32)
+                            masks_chunks = 1.0 - done_chunks
+
+                            # assert alignment with the Q-values you logged per chunk
+                            assert len(r_chunks) == len(q_vs_mc_returns_vals[traj_i]), (
+                                f"traj {traj_i}: #reward_chunks={len(r_chunks)} != "
+                                f"#q_vs_mc_points={len(q_vs_mc_returns_vals[traj_i])} (H={H}, T={len(r)})"
+                            )
+
+                            mc = calc_return_to_go(
+                                rewards=r_chunks,
+                                masks=masks_chunks,
+                                gamma=gamma_chunk,
+                                push_failed_to_min=("maze" in FLAGS.environment_name) or (FLAGS.environment_name == "real_robot"),
                                 min_reward=FLAGS.reward_bias,
-                            ),
-                            trajectories,
-                            is_leaf=lambda x: isinstance(
-                                x, dict
-                            ),  # only map over traj in trajs
-                        )
-                        initial_mc_returns = jax.tree_map(lambda t: t[0], mc_returns)
+                            )
+                            mc_returns.append(mc)
+
+                        initial_mc_returns = [mc[0] for mc in mc_returns]
+                        # breakpoint()
 
                         # q_vs_mc_data_list = []
                         # for idx in range(len(trajectories)):
@@ -822,7 +879,9 @@ def train_agent(_):
                             
                             # ... [Your slicing logic] ...
                             # Ensure this logic matches your specific horizon/stride needs
-                            mc_return_slice = mc_return[pi_config.model.action_horizon::pi_config.model.action_horizon]
+                            # mc_return_slice = mc_return[pi_config.model.action_horizon::pi_config.model.action_horizon]
+                            mc_return_slice = mc_return
+                            assert len(mc_return_slice) == len(q_vals)
                             # Safety clip to matching length
                             min_len = min(len(mc_return_slice), len(q_vals))
                             
