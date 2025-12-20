@@ -802,25 +802,25 @@ class ImageReplayBufferPi:
 
         # Add episode ID and episode timestep
         # Priority: 1) stored_episode_id from TFRecord, 2) filename_episode_id from filename, 3) -1 as fallback
-        episode_id = tf.cond(
-            tf.not_equal(stored_episode_id, -1),
-            lambda: stored_episode_id,
-            lambda: tf.cond(
-                tf.not_equal(filename_episode_id, -1),
-                lambda: filename_episode_id,
-                lambda: tf.constant(-1, dtype=tf.int64)
-            )
-        )
-        # Repeat the episode ID for all windows in this trajectory
-        episode_ids = tf.fill([W], tf.cast(episode_id, tf.int32))
-        out['episode_id'] = episode_ids
+        # episode_id = tf.cond(
+        #     tf.not_equal(stored_episode_id, -1),
+        #     lambda: stored_episode_id,
+        #     lambda: tf.cond(
+        #         tf.not_equal(filename_episode_id, -1),
+        #         lambda: filename_episode_id,
+        #         lambda: tf.constant(-1, dtype=tf.int64)
+        #     )
+        # )
+        # # Repeat the episode ID for all windows in this trajectory
+        # episode_ids = tf.fill([W], tf.cast(episode_id, tf.int32))
+        # out['episode_id'] = episode_ids
         
-        # Episode timestep is the window start index within the trajectory
-        episode_timesteps = tf.cast(start_idx, tf.int32)
-        out['episode_timestep'] = episode_timesteps
+        # # Episode timestep is the window start index within the trajectory
+        # episode_timesteps = tf.cast(start_idx, tf.int32)
+        # out['episode_timestep'] = episode_timesteps
         
-        # Add timesteps (same as episode_timestep for now, represents position within episode)
-        out['timesteps'] = episode_timesteps
+        # # Add timesteps (same as episode_timestep for now, represents position within episode)
+        # out['timesteps'] = episode_timesteps
 
         # out['next_observations'] = {}
         # out['next_observations_image_mask'] = {}

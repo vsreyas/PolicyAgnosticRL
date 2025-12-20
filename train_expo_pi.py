@@ -587,6 +587,11 @@ def train_agent(_):
                 data_paths = glob_to_path_list(
                     tf.io.gfile.join(save_dir, "image_replay_buffer", "*.tfrecord")
                 )
+                # For debuggin #
+                # data_paths = sorted(data_paths)
+                # data_paths = [data_paths[0]]
+                #########################
+                # breakpoint()
                 image_replay_buffer = ImageReplayBufferPi(
                     data_paths=data_paths,
                     seed=FLAGS.seed,
@@ -616,7 +621,7 @@ def train_agent(_):
                 print("Critic warmup...Updating only critic")
                 # batch = offline_batch
                 batch = next(online_train_iterator)
-                # breakpoint()
+                breakpoint()
                 batch = set_batch_masks(
                     batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
                 )
@@ -825,7 +830,7 @@ def train_agent(_):
                         mc_returns = []
                         for traj_i, t in enumerate(trajectories):
                             # per-step rewards (same scaling/biasing you already do)
-                            r = np.asarray(t["reward"], dtype=np.float32) * FLAGS.reward_bias + FLAGS.reward_bias
+                            r = np.asarray(t["reward"], dtype=np.float32) * FLAGS.reward_scale + FLAGS.reward_bias
                             d = np.asarray(t["done"], dtype=np.bool_)  # per-step done flags
 
                             # chunk starts: 0, H, 2H, ...
@@ -896,6 +901,8 @@ def train_agent(_):
                         if len(all_q_values) > 0:
                             flat_q_values = np.concatenate(all_q_values, axis=0)
                             flat_mc_returns = np.concatenate(all_mc_returns, axis=0)
+                            np.save(f"flat_q_values_iter_{i}.npy", flat_q_values)
+                            np.save(f"flat_mc_returns_iter_{i}.npy", flat_mc_returns)
 
                             # Setup simple plot
                             plt.figure(figsize=(8, 6))
@@ -924,6 +931,7 @@ def train_agent(_):
                             buf.close()
                         else:
                             print("Warning: No data available for Q vs MC plot.")
+                    
 
                     # debug_metrics = agent.get_debug_metrics(batch=batch, seed=eval_policy_fn_key)
                     # if wandb_logger is not None:

@@ -226,8 +226,8 @@ class ExpoPiLearner(Agent):
         pi0_hidden_dims: int = 4096,
         rng : PRNGKey | None = None,
         actor_lr: float = 3e-4,
-        critic_lr: float = 3e-4,
-        temp_lr: float = 3e-4,
+        critic_lr: float = 1e-3,
+        temp_lr: float = 1e-3,
         hidden_dims: Sequence[int] = (256, 256, 256, 256),
         discount: float = 0.99,
         tau: float = 0.005,
@@ -255,7 +255,7 @@ class ExpoPiLearner(Agent):
         actor_layer_norm: bool = True,
         clip_sampler: bool = True,
         decay_steps: Optional[int] = int(3e6),
-        actor_tau: float = 0.001,
+        actor_tau: float = 0.003,
         actor_dropout_rate: Optional[float] = None,
         actor_num_blocks: int = 3,
         ddpm_temperature: float = 1.0,
@@ -516,14 +516,20 @@ class ExpoPiLearner(Agent):
         # Do a forward pass to get VLM output #
         seed, rng = jax.random.split(rng)
         if not is_target:
-            vlm_output, _ = self.actor.get_vlm_output(rng, _observations, processed_obs=False, infer=True)
+            vlm_output, _, processed_obs = self.actor.get_vlm_output(rng, _observations, processed_obs=False, infer=True, return_processed_obs=True)
         else:
             # vlm_output, _ = self.actor.get_vlm_output(rng, observations, params=self.target_actor.train_state.params)
-            vlm_output, _ = self.target_actor.get_vlm_output(rng, _observations, processed_obs=False, infer=True)
+            vlm_output, _, processed_obs = self.target_actor.get_vlm_output(rng, _observations, processed_obs=False, infer=True, return_processed_obs=True)
         # vlm_output: (N, 256 * num_images + 200 (tokens), pi0_hidden_dims)
         # breakpoint()
         # Take mean across tokens as representation from VLM #
         vlm_output = jnp.mean(vlm_output[0][:, :512, :], axis=1) # (N, pi0_hidden_dims)
+        # Append state here #
+        # state = _observations['proprio'][None, :8] # State dimension
+        # breakpoint()
+        state = processed_obs['state'][0, :8][None, :8] # State dimension
+        vlm_output = jnp.concatenate([vlm_output, state], axis=1) # (N, pi0_hidden_dims + state_dim)
+        # breakpoint()
 
         if debug_mode:
             actions = actions[0, :, :]

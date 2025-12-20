@@ -183,7 +183,7 @@ def evaluate_with_trajectories_vectorized(
 ):
     H = action_horizon
     half_H = max(1, H // 2)
-
+    
     trajectories = [[defaultdict(list)] for _ in range(env.num_envs)]
     num_envs = env.num_envs
     assert num_episodes % num_envs == 0
@@ -514,12 +514,15 @@ def evaluate_with_trajectories_libero(
         if current_action_sequence is None or current_action_index >= half_H:
             # print("Calling policy check")
             # breakpoint()
-            try:
-                current_action_sequence, current_vlm_output = policy_fn(observations)
-                curr_episode_q_vs_mc_returns_vals.append((current_vlm_output, current_action_sequence))
-            except Exception as e:
-                print(f"Error in policy_fn: {e}")
-                current_action_sequence = policy_fn(observations)
+            # try:
+            # breakpoint()
+            current_action_sequence, current_vlm_output = policy_fn(observations)
+            # state = observations['proprio'][:, :8] # State dimension
+            # breakpoint()
+            curr_episode_q_vs_mc_returns_vals.append((current_vlm_output, current_action_sequence))
+            # except Exception as e:
+            #     print(f"Error in policy_fn: {e}")
+            #     current_action_sequence = policy_fn(observations)
 
             # Expect one env. If policy returns (1, H, D) → (H, D)
             if isinstance(current_action_sequence, np.ndarray):

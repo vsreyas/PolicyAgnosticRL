@@ -378,6 +378,7 @@ class PiPolicy(BasePolicy):
         infer=True,
         obs_key: str = None,
         processed_obs = True,
+        return_processed_obs = False,
         params: Optional[at.Params] = None,
     ):
         with sharding.set_mesh(self.mesh):
@@ -405,6 +406,9 @@ class PiPolicy(BasePolicy):
             # 5) Call the compiled function
             params = params if params is not None else self.train_state.params
             out1, kv_cache = vlm_fn(params, _observation)
+
+            if return_processed_obs:
+                return out1, kv_cache, obs
 
             return out1, kv_cache
 
