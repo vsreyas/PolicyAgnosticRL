@@ -386,6 +386,7 @@ class ExpoPiLearner(Agent):
         obs_key = kwargs.pop("obs_key", "observations")
         return_first_action = kwargs.pop("return_first_action", False)
         output_only_base_actions = kwargs.pop("output_only_base_actions", False)
+        output_all_sampled_actions = kwargs.pop("output_all_sampled_actions", False)
 
         batch_size = obs.state.shape[0]
 
@@ -413,7 +414,10 @@ class ExpoPiLearner(Agent):
         actions = pi0_actions
 
         if output_only_base_actions:
-            return actions[:batch_size, :, :], vlm_output[:batch_size, :]
+            if output_all_sampled_actions:
+                return actions.reshape(batch_size, self.N, self.action_horizon, self.action_dim // self.action_horizon), vlm_output[:batch_size, :]
+            else:
+                return actions[:batch_size, :, :], vlm_output[:batch_size, :]
 
         if self.N > 1:
             key, rng = jax.random.split(rng)

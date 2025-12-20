@@ -122,3 +122,17 @@ CUDA_VISIBLE_DEVICES=0,1 XLA_PYTHON_CLIENT_PREALLOCATE=false env -u PYOPENGL_PLA
 
 ```
 
+# Caching
+```
+CUDA_VISIBLE_DEVICES=0,1 python -m pdb dump_vlm_actions.py \
+    --config=configs/libero_config.py:expo \
+    --task_name="put both moka pots on the stove" \
+    --output_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/outputs/vlm_actions_replay.pkl" \
+    --replay_buffer_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/libero_10_pi05_put_the_two_mocha_pots_on_the_stove/results_expo/seed_0/image_replay_buffer/episode_0.tfrecord" \
+    --num_actions_to_sample=4 \
+    --num_edit_samples=4 \
+    --seed=0 \
+    --config.agent_kwargs.batch_size=32 \
+    --config.batch_size=32
+
+```

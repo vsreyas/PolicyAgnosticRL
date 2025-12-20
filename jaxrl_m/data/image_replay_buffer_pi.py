@@ -372,14 +372,30 @@ class ImageReplayBufferPi:
             # Must match exactly: episode_<digits>.tfrecord
             is_match = tf.strings.regex_full_match(basename, r"episode_[0-9]+\.tfrecord")
 
-            # Extract digits if matched, else fallback
-            digits = tf.strings.regex_replace(basename, r"^episode_([0-9]+)\.tfrecord$", r"\1")
-
-            return tf.cond(
+            # FAIL if not matched (prints basename in the error)
+            check = tf.debugging.Assert(
                 is_match,
-                lambda: tf.strings.to_number(digits, out_type=tf.int64),
-                lambda: tf.constant(-1, dtype=tf.int64),
-            )
+                [
+                    "TFRecord filename must match 'episode_<id>.tfrecord' where <id> is digits. Got:",
+                    basename,
+                ],
+            )  # :contentReference[oaicite:1]{index=1}
+
+            # Ensure the assert runs in the tf.data graph before we proceed
+            with tf.control_dependencies([check]):  # :contentReference[oaicite:2]{index=2}
+                digits = tf.strings.regex_replace(
+                    basename, r"^episode_([0-9]+)\.tfrecord$", r"\1"
+                )
+                return tf.strings.to_number(digits, out_type=tf.int64)
+
+            # # Extract digits if matched, else fallback
+            # digits = tf.strings.regex_replace(basename, r"^episode_([0-9]+)\.tfrecord$", r"\1")
+
+            # return tf.cond(
+            #     is_match,
+            #     lambda: tf.strings.to_number(digits, out_type=tf.int64),
+            #     lambda: tf.constant(-1, dtype=tf.int64),
+            # )
         
         filename_episode_id = extract_episode_id(filename)
         
