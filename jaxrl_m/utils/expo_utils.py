@@ -3,20 +3,13 @@
 import functools
 from typing import Optional, Type
 
-import tensorflow_probability
-
-tfp = tensorflow_probability.substrates.jax
+import tensorflow_probability.substrates.jax as tfp
 tfd = tfp.distributions
+tfb = tfp.bijectors
 
 import flax.linen as nn
 import jax.numpy as jnp
 import numpy as np
-import functools
-
-
-tfp = tensorflow_probability.substrates.jax
-tfd = tfp.distributions
-tfb = tfp.bijectors
 
 import jax
 import jax.numpy as jnp

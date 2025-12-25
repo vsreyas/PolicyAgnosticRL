@@ -22,7 +22,7 @@ print("Imports 2")
 ### Debugging setup ###
 def inspect_tfrecords():
     # TFRECORD_PATTERN = "/data/hf_cache/datasets/LIBERO/libero_10_tf/*.tfrecord"
-    TFRECORD_PATTERN = "/home/skowshik/vla/codebase/PolicyAgnosticRL/libero_10_pi05_put_the_two_mocha_pots_on_the_stove/results_expo/seed_0/image_replay_buffer/*.tfrecord"
+    TFRECORD_PATTERN = "/home/skowshik/vla/codebase/PolicyAgnosticRL/SET_1_libero_10_pi05_put_the_two_mocha_pots_on_the_stove/results_expo/seed_0/image_replay_buffer/episode_1.tfrecord"
 
     PROTO_TYPE_SPEC = {
         "observations/images0": tf.uint8,
@@ -33,6 +33,8 @@ def inspect_tfrecords():
         "rewards": tf.float32,
         "masks": tf.float32,
         "mc_returns": tf.float32,
+        "terminals": tf.float32,
+        "truncates": tf.float32,
     }
 
     # 1. Get files
@@ -42,7 +44,7 @@ def inspect_tfrecords():
         print(f"❌ No files found matching: {TFRECORD_PATTERN}")
         return
     
-    print(f"✅ Found {len(files)} files. Inspecting the first one: {os.path.basename(files[0])}\n")
+    # print(f"✅ Found {len(files)} files. Inspecting the first one: {os.path.basename(files[0])}\n")
 
     # 2. Create a basic dataset
     dataset = tf.data.TFRecordDataset(files)
@@ -490,6 +492,8 @@ class ImageReplayBufferPi:
         ah = self.config.model.action_horizon
         T = tf.shape(state_tf)[0]
 
+        print(f"\n\n\nT in _decode_example: {T}\n\n\n")
+
         # number of valid windows = T - (ah - 1)
         W = T - ah + 1
         start_idx = tf.range(W)
@@ -574,7 +578,7 @@ class ImageReplayBufferPi:
             # rewards_tf_chunked = rewards_tf_chunked[:-1]
 
             masks_tf_chunked = tf.map_fn(
-                lambda t: tf.reduce_max(masks_tf[t : t + ah]),
+                lambda t: tf.reduce_min(masks_tf[t : t + ah]),
                 start_idx,
                 fn_output_signature=tf.float32,
             )
@@ -960,7 +964,8 @@ class ImageReplayBufferPi:
         return self.tf_dataset.batch(
                 batch_size,
                 num_parallel_calls=tf.data.experimental.AUTOTUNE,
-                drop_remainder=True,
+                # drop_remainder=True,
+                drop_remainder=False,
                 deterministic=not self.is_train,).prefetch(tf.data.AUTOTUNE).as_numpy_iterator()
         # for batch in tf_iter:
         #     flat = {}
@@ -1139,6 +1144,12 @@ def save_trajectory_as_tfrecord(trajectory: Dict[str, np.ndarray], path: str):
                             ),
                             "mc_returns": tensor_feature(
                                 np.array(trajectory["mc_returns"], dtype=np.float32) # DO NOT drop last step
+                            ),
+                            "terminals": tensor_feature(
+                                np.array(trajectory["terminals"], dtype=np.float32) # DO NOT drop last step
+                            ),
+                            "truncates": tensor_feature(
+                                np.array(trajectory["truncates"], dtype=np.float32) # DO NOT drop last step
                             ),
                         }
                         if "rewards" in trajectory

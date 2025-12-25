@@ -41,6 +41,7 @@ class WandBLogger(object):
         variant,
         wandb_output_dir=None,
         debug=False,
+        allow_val_change=False,
     ):
         self.config = wandb_config
         if self.config.unique_identifier == "":
@@ -78,6 +79,7 @@ class WandBLogger(object):
             name=self.config.exp_descriptor,
             save_code=True,
             mode=mode,
+            allow_val_change=allow_val_change,
         )
 
         if flags.FLAGS.is_parsed():

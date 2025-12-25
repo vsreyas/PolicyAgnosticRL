@@ -122,7 +122,7 @@ class TrajSampler(object):
                 step_variables = self._env.step(action)
                 if len(step_variables) == 5:
                     next_observation, r, terminated, truncated, info = step_variables
-                    done = terminated  # or truncated
+                    done = terminated or truncated
                 else:
                     assert len(step_variables) == 4
                     next_observation, r, done, info = step_variables
@@ -132,6 +132,7 @@ class TrajSampler(object):
                     actions=np.clip(action, -self.clip_action, self.clip_action),
                     rewards=r * self.reward_scale + self.reward_bias,
                     terminals=done,
+                    truncates=done,
                     masks=1.0 - done,
                 )
                 add_to(trajectory, transition)

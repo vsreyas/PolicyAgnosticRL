@@ -126,6 +126,8 @@ def main(_):
     # Get example batch to initialize agent
     logging.info("Getting example batch...")
     example_batch = next(dataset_iterator)
+
+    # breakpoint()
     
     # Create EXPO agent
     logging.info("Creating EXPO agent...")
@@ -142,6 +144,17 @@ def main(_):
     )
     
     logging.info("Agent created successfully")
+    del example_batch
+
+    # Reset data iterator
+    if FLAGS.replay_buffer_path:
+        dataset_iterator = replay_buffer.iterator(
+            batch_size=FLAGS.config.agent_kwargs.batch_size
+        )
+    else:
+        dataset_iterator = dataset.iterator(
+            batch_size=FLAGS.config.agent_kwargs.batch_size
+        )
     
     # Create timer for performance tracking
     timer = Timer()
@@ -217,8 +230,11 @@ def main(_):
                 next_actions, next_vlm_output = agent.sample_batch_actions(_next_obs, is_target=True, return_first_action=False, timer=timer, output_only_base_actions=True, output_all_sampled_actions=True, seed=sample_rng)
 
                 rng, sample_rng = jax.random.split(rng)
-                current_actions, current_vlm_output = agent.sample_batch_actions(_obs, is_target=True, return_first_action=False, timer=timer, output_only_base_actions=True, output_all_sampled_actions=True, seed=sample_rng)
+                _, current_vlm_output = agent.sample_batch_actions(_obs, is_target=True, return_first_action=False, timer=timer, output_only_base_actions=True, output_all_sampled_actions=True, seed=sample_rng)
                 
+                current_actions = batch['actions'][:, :, :7].reshape(batch_size, 1, pi_config.model.action_horizon, 7)
+                # breakpoint()
+
                 # Extract VLM output (mean across tokens)
                 # current_vlm_output = jnp.mean(current_vlm_output_full[0][:, :512, :], axis=1)
                 # next_vlm_output = jnp.mean(next_vlm_output_full[0][:, :512, :], axis=1)
@@ -258,10 +274,11 @@ def main(_):
                         'rewards': batch['rewards'][i],
                         'masks': batch['masks'][i],
                         # Optional: terminals and truncates if available
-                        'terminals': batch.get('terminals', np.zeros(batch_size, dtype=bool))[i],
-                        'truncates': batch.get('truncates', np.zeros(batch_size, dtype=bool))[i],
+                        'terminals': batch['terminals'][i],
+                        'truncates': batch['truncates'][i],
                         'next_actions': next_actions[i],
                         'next_vlm_output': next_vlm_output[i],
+                        'mc_returns': batch['mc_returns'][i],
                     }
                 
                 batch_count += 1
@@ -306,6 +323,9 @@ def main(_):
     masks = np.stack([critic_cache_data[k]['masks'] for k in keys_list])
     terminals = np.stack([critic_cache_data[k]['terminals'] for k in keys_list])
     truncates = np.stack([critic_cache_data[k]['truncates'] for k in keys_list])
+    mc_returns = np.stack([critic_cache_data[k]['mc_returns'] for k in keys_list])
+
+    # breakpoint()
     
     # Create final data structure
     final_data = {
@@ -324,6 +344,7 @@ def main(_):
         'masks': masks,
         'terminals': terminals,
         'truncates': truncates,
+        'mc_returns': mc_returns,
         'metadata': {
             'num_entries': len(keys_list),
             'num_batches_processed': batch_count,
@@ -342,6 +363,7 @@ def main(_):
                 'masks': 'Masks for bootstrapping (1 - done)',
                 'terminals': 'Terminal flags (done)',
                 'truncates': 'Truncation flags',
+                'mc_returns': 'MC returns',
             }
         }
     }
@@ -362,7 +384,7 @@ def main(_):
     logging.info(f"  Actions: {actions.shape}")
     logging.info(f"  Rewards: {rewards.shape}")
     logging.info(f"  Masks: {masks.shape}")
-    
+    logging.info(f"  MC returns: {mc_returns.shape}")
     # Print usage example
     print("\n" + "="*80)
     print("CRITIC UPDATE CACHE SAVED SUCCESSFULLY!")
