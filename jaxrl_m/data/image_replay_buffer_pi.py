@@ -478,15 +478,15 @@ class ImageReplayBufferPi:
         # LOG: state_tf: T+1, image_tf: T+1, rest are all T in parsed_tensors #
         # LOG: Below transformation accounts for this #
         state_tf = parsed_tensors["observations/state"][:-1]
-        state_tf_ns = parsed_tensors["observations/state"][1:]
+        state_tf_ns = parsed_tensors["observations/state"] #[:1:]
         # tf.print("state tf shape: ", tf.shape(state_tf))
         actions_tf = parsed_tensors["actions"]
         image_tf = [] # Do the same as `state_tf` above to drop last time step
+        image_tf.append(parsed_tensors['observations/images1']) #[:-1])
         image_tf.append(parsed_tensors["observations/images0"][:-1])
-        image_tf.append(parsed_tensors['observations/images1'][:-1])
         image_tf_ns = []
-        image_tf_ns.append(parsed_tensors["observations/images0"][1:])
-        image_tf_ns.append(parsed_tensors['observations/images1'][1:])
+        image_tf_ns.append(parsed_tensors["observations/images0"]) #[:1:])
+        image_tf_ns.append(parsed_tensors['observations/images1']) #[:1:])
         # Handle the extra time step later
 
         ah = self.config.model.action_horizon
@@ -497,7 +497,8 @@ class ImageReplayBufferPi:
         # number of valid windows = T - (ah - 1)
         W = T - ah + 1
         start_idx = tf.range(W)
-        start_idx_ns = tf.range(1, W+1) # For next states/images;
+        # THIS SHOULD BE THE NEXT STATE FOR CHUNKING: BUG FIX #
+        start_idx_ns = tf.range(ah, T + 1) # For next states/images;
 
         if 'rewards' in parsed_tensors:
             # Each tensor below has shape (T,); W = T - ah + 1: Maximum action chunk index #
