@@ -268,9 +268,13 @@ class ImageReplayBufferPi:
         #     len(data_paths), seed, reshuffle_each_iteration=True
         # )
 
-        files = tf.data.Dataset.from_tensor_slices(data_paths).shuffle(
-            len(data_paths), seed=seed, reshuffle_each_iteration=True
-        )
+        data_paths = sorted(data_paths)
+        files = tf.data.Dataset.from_tensor_slices(data_paths)
+        
+        if self.is_train:
+            files = files.shuffle(
+                len(data_paths), seed=seed, reshuffle_each_iteration=True
+            )
 
         # Interleave: each filename -> dataset of windows (unbatched), then mix across files
         def per_file(fn):
@@ -285,11 +289,17 @@ class ImageReplayBufferPi:
             ds = ds.unbatch()   # windows become elements here
             return ds
 
-        dataset = files.interleave(
+        # dataset = files.interleave(
+        #     per_file,
+        #     cycle_length=tf.data.AUTOTUNE,
+        #     num_parallel_calls=tf.data.AUTOTUNE,
+        #     deterministic=not self.is_train,
+        # )
+        dataset = files.flat_map(
             per_file,
-            cycle_length=tf.data.AUTOTUNE,
-            num_parallel_calls=tf.data.AUTOTUNE,
-            deterministic=not self.is_train,
+            # cycle_length=tf.data.AUTOTUNE,
+            # num_parallel_calls=tf.data.AUTOTUNE,
+            # deterministic=not self.is_train,
         )
         
         if self.is_train:
@@ -482,8 +492,8 @@ class ImageReplayBufferPi:
         # tf.print("state tf shape: ", tf.shape(state_tf))
         actions_tf = parsed_tensors["actions"]
         image_tf = [] # Do the same as `state_tf` above to drop last time step
-        image_tf.append(parsed_tensors['observations/images1']) #[:-1])
-        image_tf.append(parsed_tensors["observations/images0"][:-1])
+        image_tf.append(parsed_tensors['observations/images0'][:-1]) #[:-1])
+        image_tf.append(parsed_tensors["observations/images1"][:-1])
         image_tf_ns = []
         image_tf_ns.append(parsed_tensors["observations/images0"]) #[:1:])
         image_tf_ns.append(parsed_tensors['observations/images1']) #[:1:])
@@ -586,11 +596,62 @@ class ImageReplayBufferPi:
             # masks_tf_chunked = masks_tf_chunked[:-1]
 
             mc_returns_tf = tf.gather(mc_returns_tf, start_idx)
-            # mc_returns_tf = mc_returns_tf[:-1]
+            # rewards_tf: [T] step rewards
+            # masks_tf:   [T] step masks in {0,1} (0 means terminal at that step)
+            gamma = tf.constant(self.discount, dtype=rewards_tf.dtype)
+            ah = self.config.model.action_horizon
+
+            # ---- 1) immediate chunk reward at every start t: sum r[t:t+ah] ----
+            # frames: [W, ah] where W = T - ah + 1 (pad_end=False)
+            reward_frames = tf.signal.frame(
+                rewards_tf, frame_length=ah, frame_step=1, pad_end=False
+            )
+            rewards_chunk = tf.reduce_sum(reward_frames, axis=-1)  # [W]
+
+            # ---- 2) chunk mask at start t: min mask over the chunk ----
+            mask_frames = tf.signal.frame(
+                masks_tf, frame_length=ah, frame_step=1, pad_end=False
+            )
+            masks_chunk = tf.reduce_min(mask_frames, axis=-1)  # [W]
+
+            # ---- 3) stride-ah discounted return:
+            # R[t] = rewards_chunk[t] + gamma * masks_chunk[t] * R[t+ah]
+            def stride_chunk_mc_returns(rewards_chunk, masks_chunk, gamma, ah):
+                W = tf.shape(rewards_chunk)[0]
+                ta = tf.TensorArray(
+                    dtype=rewards_chunk.dtype,
+                    size=W,
+                    element_shape=tf.TensorShape([]),  # scalar each step
+                    clear_after_read=False,
+                )
+
+                i0 = W - 1
+
+                def cond(i, ta):
+                    return i >= 0
+
+                def body(i, ta):
+                    next_i = i + ah
+                    next_val = tf.cond(
+                        next_i < W,
+                        lambda: ta.read(next_i),
+                        lambda: tf.zeros([], dtype=rewards_chunk.dtype),
+                    )
+                    val = rewards_chunk[i] + gamma * masks_chunk[i] * next_val
+                    ta = ta.write(i, val)
+                    return i - 1, ta
+
+                _, ta = tf.while_loop(cond, body, [i0, ta])
+                return ta.stack()  # [W]
+
+            mc_returns_tf_chunked = stride_chunk_mc_returns(rewards_chunk, masks_chunk, gamma, ah)  # [W]
+
+
             
             out["rewards"] = rewards_tf_chunked # (W=T - ah + 1,)
             out["masks"] = masks_tf_chunked # (W=T - ah + 1,)
-            out["mc_returns"] = mc_returns_tf # (W=T - ah + 1,)
+            # out["mc_returns"] = mc_returns_tf # (W=T - ah + 1,)
+            out["mc_returns"] = mc_returns_tf_chunked # (W=T - ah + 1,)
 
         actions_tf = tf.map_fn(
             lambda t: actions_tf[t : t + ah],

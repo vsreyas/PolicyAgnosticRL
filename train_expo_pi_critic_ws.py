@@ -274,8 +274,8 @@ def load_vlm_cache(cache_path: str) -> Dict:
     # breakpoint()
     mean_vlm_outputs = np.mean(cache['current_vlm_outputs'], axis=0)
     std_vlm_outputs = np.std(cache['current_vlm_outputs'], axis=0)
-    cache['current_vlm_outputs'] = (cache['current_vlm_outputs'] - mean_vlm_outputs) / (std_vlm_outputs + 1e-8)
-    cache['next_vlm_outputs'] = (cache['next_vlm_outputs'] - mean_vlm_outputs) / (std_vlm_outputs + 1e-8)
+    # cache['current_vlm_outputs'] = (cache['current_vlm_outputs'] - mean_vlm_outputs) / (std_vlm_outputs + 1e-8)
+    # cache['next_vlm_outputs'] = (cache['next_vlm_outputs'] - mean_vlm_outputs) / (std_vlm_outputs + 1e-8)
 
     # Log cache statistics
     num_entries = len(cache['episode_ids'])
@@ -445,7 +445,11 @@ def train_critic(_):
         N=FLAGS.num_actions_to_sample,
         n_edit_samples=FLAGS.num_edit_samples,
         batch_size_dict_key='current_actions',
+        q_clip_low=FLAGS.config.q_clip_low,
+        q_clip_high=FLAGS.config.q_clip_high,
     )
+
+    # breakpoint()
 
     libero_config = get_libero_config()
     eval_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
@@ -471,7 +475,7 @@ def train_critic(_):
     )
 
     log_interval = 1
-    save_interval = 1000
+    save_interval = 10000
 
     for step in tqdm(range(FLAGS.num_train_steps), desc="Training critic"):
         timer.tick("total_step_time")
@@ -515,14 +519,14 @@ def train_critic(_):
     #     timer.tock("sample_batch_time")
         
         # Update critic
-        timer.tick("update_critic_time")
-        rng, update_rng = jax.random.split(rng)
-        agent, info = agent.update_critic_ws(
-            batch=batch,
-            seed=update_rng,
-            timer=timer,
-        )
-        timer.tock("update_critic_time")
+        # timer.tick("update_critic_time")
+        # rng, update_rng = jax.random.split(rng)
+        # agent, info = agent.update_critic_ws(
+        #     batch=batch,
+        #     seed=update_rng,
+        #     timer=timer,
+        # )
+        # timer.tock("update_critic_time")
         
         # timer.tock("total_step_time")
         
@@ -710,9 +714,10 @@ def train_critic(_):
                             # Prepare input for critic #
                             vlm_output = vlm_output.reshape(1, -1)
                             vlm_only = vlm_output[:, :2048]
-                            vlm_only = (vlm_only - mean_vlm_outputs) / (std_vlm_outputs + 1e-8)
+                            # vlm_only = (vlm_only - mean_vlm_outputs) / (std_vlm_outputs + 1e-8)
                             state_only = vlm_output[:, 2048:]
                             vlm_output = jnp.concatenate([vlm_only, state_only], axis=1)
+                            # vlm_output = state_only
                             action_sequence = action_sequence.reshape(1, -1)
                             q_vals = compute_q_all(agent.critic.apply_fn, params, vlm_output, action_sequence)
                             # breakpoint()

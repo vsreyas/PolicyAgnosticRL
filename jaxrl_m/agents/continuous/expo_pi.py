@@ -50,13 +50,13 @@ def decay_mask_fn(params):
 @partial(jax.jit, static_argnames=('critic_fn'))
 def compute_q(critic_fn, critic_params, observations, actions):
 
-    q_values = critic_fn({'params': critic_params}, observations, actions)
+    q_values = critic_fn({'params': critic_params}, observations, actions, False)
     q_values = q_values.min(axis=0)
     return q_values
 
 @partial(jax.jit, static_argnames=('critic_fn'))
 def compute_q_all(critic_fn, critic_params, observations, actions):
-    q_values = critic_fn({'params': critic_params}, observations, actions)
+    q_values = critic_fn({'params': critic_params}, observations, actions, False)
     # q_values = q_values
     return q_values
 
@@ -134,7 +134,7 @@ def _edit_actor_loss_and_grad(
     return grads, metrics
 
 
-@partial(jax.jit, static_argnames=("critic_apply_fn",))
+@partial(jax.jit, static_argnames=("critic_apply_fn", "q_clip_low", "q_clip_high"))
 def _critic_loss_and_grad(
     critic_params,
     vlm_output,
@@ -142,6 +142,8 @@ def _critic_loss_and_grad(
     target_q,
     key,
     critic_apply_fn,
+    q_clip_low,
+    q_clip_high,
 ):
     """Single jitted step for critic: forward + loss + grad."""
 
@@ -150,29 +152,35 @@ def _critic_loss_and_grad(
             {"params": critic_params},
             vlm_output,
             actions,
-            True,
+            False,
             rngs={"dropout": key},
         )
-        critic_loss = ((qs - target_q) ** 2).mean()
+        # jax.debug.breakpoint()
+        # jax.debug.print(f"qs: {qs.shape}")
+        # jax.debug.print("target_q: {target_q.shape}")
+        clipped_qs = jnp.clip(qs, q_clip_low, q_clip_high)
+        clipped_target_q = jnp.clip(target_q, q_clip_low, q_clip_high)
+        
+        critic_loss = ((clipped_qs - clipped_target_q) ** 2).mean()
         metrics = {
             "critic_loss": critic_loss,
-            "q_mean": qs.mean(),
-            "q_std": qs.std(),
-            "q_max": qs.max(),
-            "q_min": qs.min(),
-            "target_q_mean": target_q.mean(),
-            "target_q_std": target_q.std(),
-            "target_q_max": target_q.max(),
-            "target_q_min": target_q.min(),
-            "q_diff": (qs - target_q).mean(),
-            "q_diff_std": (qs - target_q).std(),
-            "q_diff_max": (qs - target_q).max(),
-            "q_diff_min": (qs - target_q).min(),
+            "q_mean": clipped_qs.mean(),
+            "q_std": clipped_qs.std(),
+            "q_max": clipped_qs.max(),
+            "q_min": clipped_qs.min(),
+            "target_q_mean": clipped_target_q.mean(),
+            "target_q_std": clipped_target_q.std(),
+            "target_q_max": clipped_target_q.max(),
+            "target_q_min": clipped_target_q.min(),
+            "q_diff": (clipped_qs - clipped_target_q).mean(),
+            "q_diff_std": (clipped_qs - clipped_target_q).std(),
+            "q_diff_max": (clipped_qs - clipped_target_q).max(),
+            "q_diff_min": (clipped_qs - clipped_target_q).min(),
         }
 
         num_heads = qs.shape[0]  # static at compile time
         for i in range(num_heads):
-            qi = qs[i]
+            qi = clipped_qs[i]
             metrics[f"q{i+1}_mean"] = qi.mean()
             metrics[f"q{i+1}_std"]  = qi.std()
             metrics[f"q{i+1}_max"]  = qi.max()
@@ -221,7 +229,8 @@ class ExpoPiLearner(Agent):
         pytree_node=False
     )  # See M in RedQ https://arxiv.org/abs/2101.05982
     backup_entropy: bool = struct.field(pytree_node=False)
-    
+    q_clip_low: float
+    q_clip_high: float
 
     @classmethod
     def create(
@@ -234,12 +243,12 @@ class ExpoPiLearner(Agent):
         action_horizon: int = 10,
         pi0_hidden_dims: int = 4096,
         rng : PRNGKey | None = None,
-        actor_lr: float = 3e-4,
-        critic_lr: float = 1e-3,
+        actor_lr: float = 1e-3,
+        critic_lr: float = 1e-4,
         temp_lr: float = 1e-3,
         hidden_dims: Sequence[int] = (256, 256, 256, 256),
         discount: float = 0.99,
-        tau: float = 0.005,
+        tau: float = 0.01,
         num_qs: int = 2,
         num_min_qs: Optional[int] = None,
         critic_dropout_rate: Optional[float] = None,
@@ -270,6 +279,8 @@ class ExpoPiLearner(Agent):
         ddpm_temperature: float = 1.0,
         beta_schedule: str = 'vp',
         batch_size_dict_key: str = 'actions',
+        q_clip_low: Optional[float] = -10000.0,
+        q_clip_high: Optional[float] = 10000.0,
     ):
         # Assertions
         assert N >= n_edit_samples, f"N must be greater than or equal to n_edit_samples, got N={N} and n_edit_samples={n_edit_samples}"
@@ -320,10 +331,11 @@ class ExpoPiLearner(Agent):
         critic_base_cls = partial(
             MLP,
             hidden_dims=hidden_dims,
-            activate_final=True,
+            activate_final=False,
             dropout_rate=critic_dropout_rate,
             use_layer_norm=critic_layer_norm,
             use_pnorm=use_pnorm,
+            activations=nn.swish,
         )
         critic_cls = partial(StateActionValue, base_cls=critic_base_cls)
         critic_def = Ensemble(critic_cls, num=num_qs)
@@ -335,7 +347,12 @@ class ExpoPiLearner(Agent):
                 mask=decay_mask_fn,
             )
         else:
-            tx = optax.adam(learning_rate=critic_lr)
+            # tx = optax.adam(learning_rate=critic_lr)
+            tx = optax.chain(
+                optax.clip_by_global_norm(1.0),
+                optax.adam(learning_rate=critic_lr),
+            )
+        
         critic = TrainState.create(
             apply_fn=critic_def.apply,
             params=critic_params,
@@ -386,6 +403,8 @@ class ExpoPiLearner(Agent):
             num_qs=num_qs,
             num_min_qs=num_min_qs,
             backup_entropy=backup_entropy,
+            q_clip_low=q_clip_low,
+            q_clip_high=q_clip_high,
         )
 
     def sample_batch_actions(self, obs, is_target=False, *args, **kwargs):
@@ -755,6 +774,8 @@ class ExpoPiLearner(Agent):
             target_q,
             key,
             self.critic.apply_fn,
+            self.q_clip_low,
+            self.q_clip_high,
         )
         # info.update({"target_q": target_q.mean()})
         # info.update({"next_qs": next_qs.mean()})
@@ -817,7 +838,9 @@ class ExpoPiLearner(Agent):
         rewards = batch['rewards']  # (batch_size,)
         # masks = batch['masks']  # (batch_size,)
         masks = 1.0 - jnp.logical_or(batch['terminals'], batch['truncates']).astype(jnp.float32)
-        # breakpoint()
+
+        # if bool(masks.sum() != len(masks)):
+        #     breakpoint()
         
         batch_size = current_actions_all.shape[0]
         N = next_actions_all.shape[1]  # Number of sampled actions
@@ -828,6 +851,7 @@ class ExpoPiLearner(Agent):
         key, rng = jax.random.split(rng)
         # Sample indices: (batch_size,) with values in [0, N)
         action_indices = jax.random.randint(key, shape=(batch_size,), minval=0, maxval=N)
+        # breakpoint()
         timer.tock("sample_action_indices")
         
         # Gather the selected actions and VLM outputs
@@ -868,9 +892,10 @@ class ExpoPiLearner(Agent):
         # Compute target Q values using next VLM outputs and next actions
         timer.tick("compute_target_q")
         key, rng = jax.random.split(rng)
-        target_params = subsample_ensemble(
-            key, self.target_critic.params, self.num_min_qs, self.num_qs
-        )
+        # target_params = subsample_ensemble(
+        #     key, self.target_critic.params, self.num_min_qs, self.num_qs
+        # )
+        target_params = self.target_critic.params
 
         next_qs_all = compute_q_all(self.target_critic.apply_fn, target_params, next_vlm_outputs_with_state, next_actions_flat)
         # breakpoint()
@@ -878,9 +903,14 @@ class ExpoPiLearner(Agent):
         # next_qs: (batch_size,)
         # next_qs = compute_q(self.target_critic.apply_fn, target_params, next_vlm_outputs_with_state, next_actions_flat)
         next_qs = next_qs_all.min(axis=0)
+        # next_qs = next_qs_all[0]
         
         # target_q: (batch_size,)
-        target_q = rewards + self.discount * masks * next_qs
+        # target_q = rewards + self.discount * masks * next_qs
+
+        # breakpoint()
+        target_q = batch['mc_returns']
+        target_q = target_q.reshape(1, -1)
         # target_q = batch["mc_returns"]
         timer.tock("compute_target_q")
         
@@ -894,9 +924,12 @@ class ExpoPiLearner(Agent):
             target_q,  # (batch_size,)
             key,
             self.critic.apply_fn,
+            self.q_clip_low,
+            self.q_clip_high,
         )
 
         # ---- norms ----
+        # grads_clipped, _ = self.critic.tx.update(grads, self.critic.opt_state, self.critic.params)
         info["critic_grad_norm"] = optax.global_norm(grads)
         
         # Add additional metrics

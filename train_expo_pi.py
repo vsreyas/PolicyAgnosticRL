@@ -489,7 +489,7 @@ def train_agent(_):
 
 
     # TODO: Remove hardcode and init with flags appropriately #
-    num_trajectories_to_collect = 10
+    num_trajectories_to_collect = 30
     online_env_steps = 0
     online_trajectories_added = 0
     online_env_steps_this_epoch = 0
