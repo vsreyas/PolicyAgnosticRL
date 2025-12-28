@@ -127,8 +127,8 @@ CUDA_VISIBLE_DEVICES=0,1 XLA_PYTHON_CLIENT_PREALLOCATE=false env -u PYOPENGL_PLA
 CUDA_VISIBLE_DEVICES=0,1 python -m pdb dump_vlm_actions.py \
     --config=configs/libero_config.py:expo \
     --task_name="put both moka pots on the stove" \
-    --output_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/outputs/vlm_actions_replay_ep10_3_v4.pkl" \
-    --replay_buffer_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/SET_1_libero_10_pi05_put_the_two_mocha_pots_on_the_stove/results_expo/seed_0/image_replay_buffer/episode_0.tfrecord" \
+    --output_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/outputs/vlm_actions_replay_ep10_1_v4.pkl" \
+    --replay_buffer_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/SET_1_libero_10_pi05_put_the_two_mocha_pots_on_the_stove/results_expo/seed_0/image_replay_buffer/*.tfrecord" \
     --num_actions_to_sample=4 \
     --num_edit_samples=4 \
     --seed=0 \
@@ -144,7 +144,7 @@ CUDA_VISIBLE_DEVICES=0,1 python -m pdb train_expo_pi_critic_ws.py \
     --vlm_cache_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/outputs/vlm_actions_replay_ep10_3_v4.pkl" \
     --num_train_steps=1000000 \
     --wandb_project_name="critic-warmstart" \
-    --wandb_experiment_name="critic_cache_ws_debug-v3" \
+    --wandb_experiment_name="critic_cache_ws_debug-td_only" \
     --seed=0 \
     --config.agent_kwargs.batch_size=256 \
     --config.batch_size=256 \
@@ -153,10 +153,10 @@ CUDA_VISIBLE_DEVICES=0,1 python -m pdb train_expo_pi_critic_ws.py \
     --config.num_episodes_per_video=1 \
     --reward_scale=1.0 \
     --reward_bias=-0.1 \
-    --num_actions_to_sample=8 \
-    --config.save_dir="./results_expo_debug-v3" \
-    --config.q_clip_low=-50.0 \
-    --config.q_clip_high=5.0
+    --num_actions_to_sample=4 \
+    --config.save_dir="./results_expo_debug-td_only" \
+    --config.q_clip_low=-10000.0 \
+    --config.q_clip_high=10000.0
 
 
 ```

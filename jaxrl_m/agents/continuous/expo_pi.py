@@ -140,6 +140,7 @@ def _critic_loss_and_grad(
     vlm_output,
     actions,
     target_q,
+    mc_target,
     key,
     critic_apply_fn,
     q_clip_low,
@@ -161,9 +162,17 @@ def _critic_loss_and_grad(
         clipped_qs = jnp.clip(qs, q_clip_low, q_clip_high)
         clipped_target_q = jnp.clip(target_q, q_clip_low, q_clip_high)
         
-        critic_loss = ((clipped_qs - clipped_target_q) ** 2).mean()
+        critic_loss_td = ((clipped_qs - clipped_target_q) ** 2).mean()
+        critic_loss_mc = ((clipped_qs - mc_target) ** 2).mean()
+
+        # critic_loss = 0.5 * (critic_loss_td + critic_loss_mc)
+        critic_loss = critic_loss_td
+
+
         metrics = {
             "critic_loss": critic_loss,
+            "critic_loss_td": critic_loss_td,
+            "critic_loss_mc": critic_loss_mc,
             "q_mean": clipped_qs.mean(),
             "q_std": clipped_qs.std(),
             "q_max": clipped_qs.max(),
@@ -244,16 +253,16 @@ class ExpoPiLearner(Agent):
         pi0_hidden_dims: int = 4096,
         rng : PRNGKey | None = None,
         actor_lr: float = 1e-3,
-        critic_lr: float = 1e-4,
+        critic_lr: float = 3e-4,
         temp_lr: float = 1e-3,
-        hidden_dims: Sequence[int] = (256, 256, 256, 256),
+        hidden_dims: Sequence[int] = (256, 256),
         discount: float = 0.99,
-        tau: float = 0.01,
-        num_qs: int = 2,
-        num_min_qs: Optional[int] = None,
+        tau: float = 0.005,
+        num_qs: int = 10,
+        num_min_qs: Optional[int] = 2,
         critic_dropout_rate: Optional[float] = None,
         critic_weight_decay: Optional[float] = None,
-        critic_layer_norm: bool = False,
+        critic_layer_norm: bool = True,
         target_entropy: Optional[float] = None,
         entropy_scale: float = 1.0, 
         init_temperature: float = 1.0,
@@ -331,11 +340,12 @@ class ExpoPiLearner(Agent):
         critic_base_cls = partial(
             MLP,
             hidden_dims=hidden_dims,
-            activate_final=False,
+            activate_final=True,
             dropout_rate=critic_dropout_rate,
             use_layer_norm=critic_layer_norm,
             use_pnorm=use_pnorm,
-            activations=nn.swish,
+            # activations=nn.swish,
+            activations=nn.relu,
         )
         critic_cls = partial(StateActionValue, base_cls=critic_base_cls)
         critic_def = Ensemble(critic_cls, num=num_qs)
@@ -892,10 +902,10 @@ class ExpoPiLearner(Agent):
         # Compute target Q values using next VLM outputs and next actions
         timer.tick("compute_target_q")
         key, rng = jax.random.split(rng)
-        # target_params = subsample_ensemble(
-        #     key, self.target_critic.params, self.num_min_qs, self.num_qs
-        # )
-        target_params = self.target_critic.params
+        target_params = subsample_ensemble(
+            key, self.target_critic.params, self.num_min_qs, self.num_qs
+        )
+        # target_params = self.target_critic.params
 
         next_qs_all = compute_q_all(self.target_critic.apply_fn, target_params, next_vlm_outputs_with_state, next_actions_flat)
         # breakpoint()
@@ -906,11 +916,13 @@ class ExpoPiLearner(Agent):
         # next_qs = next_qs_all[0]
         
         # target_q: (batch_size,)
-        # target_q = rewards + self.discount * masks * next_qs
+        target_q = rewards + self.discount * masks * next_qs
 
         # breakpoint()
-        target_q = batch['mc_returns']
+        mc_target = batch['mc_returns']
+
         target_q = target_q.reshape(1, -1)
+        mc_target = mc_target.reshape(1, -1)
         # target_q = batch["mc_returns"]
         timer.tock("compute_target_q")
         
@@ -922,6 +934,7 @@ class ExpoPiLearner(Agent):
             current_vlm_outputs_with_state,  # (batch_size, vlm_dim + 8)
             current_actions_flat,  # (batch_size, action_horizon * action_dim)
             target_q,  # (batch_size,)
+            mc_target,
             key,
             self.critic.apply_fn,
             self.q_clip_low,
