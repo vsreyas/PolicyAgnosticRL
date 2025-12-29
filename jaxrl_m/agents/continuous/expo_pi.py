@@ -165,8 +165,8 @@ def _critic_loss_and_grad(
         critic_loss_td = ((clipped_qs - clipped_target_q) ** 2).mean()
         critic_loss_mc = ((clipped_qs - mc_target) ** 2).mean()
 
-        # critic_loss = 0.5 * (critic_loss_td + critic_loss_mc)
-        critic_loss = critic_loss_td
+        critic_loss = (critic_loss_td + 0.2 * critic_loss_mc)
+        # critic_loss = critic_loss_td
 
 
         metrics = {
@@ -912,7 +912,8 @@ class ExpoPiLearner(Agent):
         
         # next_qs: (batch_size,)
         # next_qs = compute_q(self.target_critic.apply_fn, target_params, next_vlm_outputs_with_state, next_actions_flat)
-        next_qs = next_qs_all.min(axis=0)
+        # next_qs = next_qs_all.min(axis=0)
+        next_qs = next_qs_all.mean(axis=0)
         # next_qs = next_qs_all[0]
         
         # target_q: (batch_size,)

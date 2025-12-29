@@ -614,7 +614,7 @@ def train_agent(_):
                     batch_size=FLAGS.config.agent_kwargs.batch_size
                 )
             
-            breakpoint()
+            # breakpoint()
             
             # Sample a batch from online and do update #
             # RLPD style online + offline update #
@@ -627,7 +627,7 @@ def train_agent(_):
                 print("Critic warmup...Updating only critic")
                 # batch = offline_batch
                 batch = next(online_train_iterator)
-                breakpoint()
+                # breakpoint()
                 batch = set_batch_masks(
                     batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
                 )

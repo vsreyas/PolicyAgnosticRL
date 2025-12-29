@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import pickle
 
-data = pickle.load(open('outputs/vlm_actions_replay_ep10_1_v4.pkl', 'rb'))
+data = pickle.load(open('outputs/vlm_actions_replay_ep10_3_v4.pkl', 'rb'))
 df = pd.DataFrame(data['episode_ids'])
 df.columns = ['episode_id']
 df['episode_timesteps'] = data['episode_timesteps']

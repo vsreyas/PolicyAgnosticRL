@@ -144,7 +144,7 @@ CUDA_VISIBLE_DEVICES=0,1 python -m pdb train_expo_pi_critic_ws.py \
     --vlm_cache_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/outputs/vlm_actions_replay_ep10_3_v4.pkl" \
     --num_train_steps=1000000 \
     --wandb_project_name="critic-warmstart" \
-    --wandb_experiment_name="critic_cache_ws_debug-td_only" \
+    --wandb_experiment_name="critic_cache_ws_debug-td_mc_v3" \
     --seed=0 \
     --config.agent_kwargs.batch_size=256 \
     --config.batch_size=256 \
@@ -154,7 +154,7 @@ CUDA_VISIBLE_DEVICES=0,1 python -m pdb train_expo_pi_critic_ws.py \
     --reward_scale=1.0 \
     --reward_bias=-0.1 \
     --num_actions_to_sample=4 \
-    --config.save_dir="./results_expo_debug-td_only" \
+    --config.save_dir="./results_expo_debug-td_mc_v3" \
     --config.q_clip_low=-10000.0 \
     --config.q_clip_high=10000.0
 
