@@ -126,7 +126,7 @@ def convert_libero_episode_to_tfrecord(
     output_path: str,
     episode_id: str,
     num_steps: int,
-    image_size: int = 224,
+    image_size: int = 100,
     primary_mode: str = "image_primary",
     include_next_observations: bool = False,
     filetype: str = "h5",
@@ -222,7 +222,7 @@ def _convert_one(args): convert_libero_episode_to_tfrecord(*args)
 @click.option("--dataset_path", type=str, required=True, default="/data/hf_cache/datasets/LIBERO/libero_10_converted/")
 @click.option("--output_path", type=str, required=True, default="/data/hf_cache/datasets/LIBERO/libero_10_tf/")
 @click.option("--data_info_name", type=str, default="libero_10_converted")
-@click.option("--image_size", type=int, default=224)
+@click.option("--image_size", type=int, default=100)
 @click.option("--include_next_observations", is_flag=True, default=False)
 @click.option("--filetype", type=click.Choice(["h5", "npz"]), default="h5")
 @click.option("--gripper_width", is_flag=True, default=False)

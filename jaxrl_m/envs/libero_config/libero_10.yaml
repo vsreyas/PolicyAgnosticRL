@@ -14,7 +14,7 @@ action_repeat: 1               # number of simulator steps per action
 # -----------------------------
 pixel_ob: true                 # use RGB observations
 state_ob: true                 # include proprio state
-screen_size: [224, 224]        # height, width
+screen_size: [100, 100]        # height, width
 channels_first: false          # image format (HWC)
 camera_names: ["agentview", "robot0_eye_in_hand"]  # camera views to render
 
@@ -26,8 +26,8 @@ include_distractors_in_state_obs: false
 # Simulation Settings
 # -----------------------------
 offscreen_render: true
-camera_widths: 224
-camera_heights: 224
+camera_widths: 100
+camera_heights: 100
 
 # -----------------------------
 # Data / Paths

@@ -310,7 +310,7 @@ class LiberoEnvWrapper(gym.Wrapper):
     """
     """
 
-    def __init__(self, env: OffScreenRenderEnv, init_states_path: Optional[str] = None, gripper_width=False, camera_dims = (224,224), max_steps = 999, cfg=None, 
+    def __init__(self, env: OffScreenRenderEnv, init_states_path: Optional[str] = None, gripper_width=False, camera_dims = (100,100), max_steps = 999, cfg=None, 
                  task_id = None, suite=None, task_name=None, is_pi=False, fixed_task=False, use_8D=True):
         """
         Initialize the environment wrapper.

@@ -243,6 +243,20 @@ def get_policy_fn(
 
     return policy_fn
 
+def resize_batch_images_100x100(batch: Batch):
+    batch["observations"]["image"] = resize_images_to_100x100(
+        batch["observations"]["image"]
+    )
+    batch["next_observations"]["image"] = resize_images_to_100x100(
+        batch["next_observations"]["image"]
+    )
+    batch["observations"]["wrist_image"] = resize_images_to_100x100(
+        batch["observations"]["wrist_image"]
+    )
+    batch["next_observations"]["wrist_image"] = resize_images_to_100x100(
+        batch["next_observations"]["wrist_image"]
+    )
+    return batch
 
 def set_batch_masks(
     batch: Batch, environment_name: str, reward_bias: float, reward_scale: float
@@ -455,6 +469,7 @@ def train_agent(_):
 
     ### Sharding Data ###
     example_batch = next(offline_train_iterator)
+    example_batch = resize_batch_images_100x100(example_batch)
     # example_batch = shard_batch(example_batch, sharding) # DO NOT shard here, will be handled in the expo agent forward passes
     
     ### Create trajectory sampler ###
@@ -638,6 +653,7 @@ def train_agent(_):
                 print("Critic warmup...Updating only critic")
                 # batch = offline_batch
                 batch = next(online_train_iterator)
+                batch = resize_batch_images_100x100(batch)
                 # breakpoint()
                 # batch = set_batch_masks(
                 #     batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
@@ -646,6 +662,7 @@ def train_agent(_):
             else:
                 online_batch = next(online_train_iterator)
                 batch = concatenate_batches([offline_batch, online_batch])
+                batch = resize_batch_images_100x100(batch)
                 # Do this as it cleanly handles termination/truncation for bootstrapping during critic update #
                 # The function effectively sets mask as 0.0 only where reward == 1.0, so for unsuccessful trajectory, it will have 'dones' as 0.0 at end #
                 # batch = set_batch_masks(
