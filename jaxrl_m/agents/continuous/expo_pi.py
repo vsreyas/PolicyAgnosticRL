@@ -51,7 +51,8 @@ def decay_mask_fn(params):
 def compute_q(critic_fn, critic_params, observations, actions):
 
     q_values = critic_fn({'params': critic_params}, observations, actions, False)
-    q_values = q_values.min(axis=0)
+    # q_values = q_values.min(axis=0)
+    q_values = q_values.mean(axis=0)
     return q_values
 
 @partial(jax.jit, static_argnames=('critic_fn'))
@@ -113,7 +114,7 @@ def _edit_actor_loss_and_grad(
             {"params": critic_params},
             vlm_output,
             actions,
-            True,
+            False,
             rngs={"dropout": key2},
         )
         q = qs.mean(axis=0)
@@ -215,7 +216,6 @@ class ExpoPiLearner(Agent):
     critic: TrainState
     target_critic: TrainState
     target_actor: PiPolicy
-    # target_actor_params: at.Params = struct.field(pytree_node=False)
     edit_actor: TrainState
     temp: TrainState
     action_dim: int = struct.field(pytree_node=False)
@@ -240,6 +240,7 @@ class ExpoPiLearner(Agent):
     backup_entropy: bool = struct.field(pytree_node=False)
     q_clip_low: float
     q_clip_high: float
+    pi0_hidden_dims: int
 
     @classmethod
     def create(
@@ -252,7 +253,7 @@ class ExpoPiLearner(Agent):
         action_horizon: int = 10,
         pi0_hidden_dims: int = 4096,
         rng : PRNGKey | None = None,
-        actor_lr: float = 1e-3,
+        actor_lr: float = 3e-4,
         critic_lr: float = 3e-4,
         temp_lr: float = 1e-3,
         hidden_dims: Sequence[int] = (256, 256),
@@ -263,6 +264,7 @@ class ExpoPiLearner(Agent):
         critic_dropout_rate: Optional[float] = None,
         critic_weight_decay: Optional[float] = None,
         critic_layer_norm: bool = True,
+        critic_params: Optional[at.Params] = None,
         target_entropy: Optional[float] = None,
         entropy_scale: float = 1.0, 
         init_temperature: float = 1.0,
@@ -278,7 +280,7 @@ class ExpoPiLearner(Agent):
         batch_split: int = 1, 
         M: int = 0,
         n_edit_samples: int = 4, 
-        edit_action_scale: float = 1.0, 
+        edit_action_scale: float = 0.25, 
         actor_layer_norm: bool = True,
         clip_sampler: bool = True,
         decay_steps: Optional[int] = int(3e6),
@@ -349,7 +351,11 @@ class ExpoPiLearner(Agent):
         )
         critic_cls = partial(StateActionValue, base_cls=critic_base_cls)
         critic_def = Ensemble(critic_cls, num=num_qs)
-        critic_params = critic_def.init(critic_key, dummy_observations, dummy_actions)["params"]
+
+        if critic_params is None:
+            print("\n\n\nInitializing critic parameters loaded from checkpoint...\n\n\n")
+            critic_params = critic_def.init(critic_key, dummy_observations, dummy_actions)["params"]
+        
         if critic_weight_decay is not None:
             tx = optax.adamw(
                 learning_rate=critic_lr,
@@ -415,6 +421,7 @@ class ExpoPiLearner(Agent):
             backup_entropy=backup_entropy,
             q_clip_low=q_clip_low,
             q_clip_high=q_clip_high,
+            pi0_hidden_dims=pi0_hidden_dims,
         )
 
     def sample_batch_actions(self, obs, is_target=False, *args, **kwargs):
@@ -426,6 +433,7 @@ class ExpoPiLearner(Agent):
         return_first_action = kwargs.pop("return_first_action", False)
         output_only_base_actions = kwargs.pop("output_only_base_actions", False)
         output_all_sampled_actions = kwargs.pop("output_all_sampled_actions", False)
+        info_dict = {}
 
         batch_size = obs.state.shape[0]
 
@@ -457,6 +465,10 @@ class ExpoPiLearner(Agent):
                 return actions.reshape(batch_size, self.N, self.action_horizon, self.action_dim // self.action_horizon), vlm_output[:batch_size, :]
             else:
                 return actions[:batch_size, :, :], vlm_output[:batch_size, :]
+        
+        state = observations_repeated.state[:, :8]
+        vlm_output = jnp.concatenate([vlm_output, state], axis=1) # (batch_size * N, pi0_hidden_dims + state_dim)
+        
 
         if self.N > 1:
             key, rng = jax.random.split(rng)
@@ -490,12 +502,36 @@ class ExpoPiLearner(Agent):
                 observations_repeated = repeat_observations_batched(vlm_output_sliced, self.N, axis=0) # (batch_size * N, pi0_hidden_dims)
             timer.tock("sample_actions_with_vlm_output_time")
 
+            # Log action statistics #
+            actions_base = actions[:, :self.N, :, :]
+            actions_edit = actions[:, self.N:, :, :]
+            for __idx in range(self.action_dim // self.action_horizon):
+                info_dict[f"actions_base{__idx}/mean"] = actions_base[:, :, :, __idx].mean()
+                info_dict[f"actions_base{__idx}/min"] = actions_base[:, :, :, __idx].min()
+                info_dict[f"actions_base{__idx}/max"] = actions_base[:, :, :, __idx].max()
+                info_dict[f"actions_edit{__idx}/mean"] = actions_edit[:, :, :, __idx].mean()
+                info_dict[f"actions_edit{__idx}/min"] = actions_edit[:, :, :, __idx].min()
+                info_dict[f"actions_edit{__idx}/max"] = actions_edit[:, :, :, __idx].max()
+
             actions = actions.reshape(-1, self.action_dim) # (batch_size * (N + n_edit_samples), action_horizon * action_dim)
 
             timer.tick("compute_q_time")
             qs = compute_q(self.target_critic.apply_fn, target_params, observations_repeated, actions)
             timer.tock("compute_q_time")
             qs = qs.reshape(batch_size, self.N + self.n_edit_samples) # (batch_size, N + n_edit_samples)
+
+            # Get q values for logging #
+            qs_base = qs[:, :self.N]
+            qs_edit = qs[:, self.N:]
+            info_dict["qs_base/mean"] = qs_base.mean()
+            info_dict["qs_base/std"] = qs_base.std()
+            info_dict["qs_base/max"] = qs_base.max()
+            info_dict["qs_base/min"] = qs_base.min()
+            info_dict["qs_edit/mean"] = qs_edit.mean()
+            info_dict["qs_edit/std"] = qs_edit.std()
+            info_dict["qs_edit/max"] = qs_edit.max()
+            info_dict["qs_edit/min"] = qs_edit.min()
+
             idx = jnp.argmax(qs, axis=1) # (batch_size, )
             batch_idx = jnp.arange(batch_size)
             actions = actions.reshape(batch_size, self.N + self.n_edit_samples, self.action_horizon, self.action_dim // self.action_horizon)
@@ -509,7 +545,7 @@ class ExpoPiLearner(Agent):
 
         rng, _ = jax.random.split(rng, 2)
         # We *don’t* mutate self.rng here; caller controls RNG via `seed`
-        return action, vlm_output_sliced
+        return action, vlm_output_sliced[:, :self.pi0_hidden_dims], info_dict
     
     
 
@@ -666,15 +702,16 @@ class ExpoPiLearner(Agent):
         
         # Get vlm output for observations #
         seed, rng = jax.random.split(rng)
-        # vlm_output, _ = self.actor.get_vlm_output(rng, batch, obs_key=obs_key)
-        # vlm_output = jnp.mean(vlm_output[0], axis=1) # (batch_size, pi0_hidden_dims)
+        vlm_output = batch['current_vlm_output']
+        state = batch['state'][:, :8]
+        vlm_output = jnp.concatenate([vlm_output, state], axis=1) # (batch_size, pi0_hidden_dims + state_dim)
 
         # Use JITted version #
         grads, actor_info = _edit_actor_loss_and_grad(
             self.edit_actor.params,
             self.critic.params,
             self.temp.params,
-            batch['current_vlm_output'],
+            vlm_output,
             batch["actions"],
             dropout_key,
             key,
@@ -685,7 +722,10 @@ class ExpoPiLearner(Agent):
             self.critic.apply_fn,
             self.temp.apply_fn,
         )
+
+        actor_info["edit_actor_grad_norm"] = optax.global_norm(grads)
         edit_actor = self.edit_actor.apply_gradients(grads=grads)
+        actor_info["edit_actor_param_norm"] = optax.global_norm(edit_actor.params)
 
         return self.replace(edit_actor=edit_actor, rng=rng), actor_info
     
@@ -747,20 +787,14 @@ class ExpoPiLearner(Agent):
         timer.tick("sample_batch_actions_time")
         # next_actions, next_vlm_output = self.target_actor.sample_actions_with_vlm_output(rng, next_obs)
         # breakpoint()
-        next_actions, next_vlm_output = self.sample_batch_actions(next_obs, is_target=True, return_first_action=False, timer=timer, output_only_base_actions=output_only_base_actions, seed=rng) # (batch_size, action_horizon, action_dim)
+        next_actions, next_vlm_output, next_qs_info = self.sample_batch_actions(next_obs, is_target=True, return_first_action=False, timer=timer, output_only_base_actions=output_only_base_actions, seed=rng) # (batch_size, action_horizon, action_dim)
         next_actions = next_actions.reshape(-1, self.action_dim) # (batch_size, action_horizon * action_dim)
         timer.tock("sample_batch_actions_time")
 
         # Append state here #
         next_vlm_output = jnp.concatenate([next_vlm_output, next_state], axis=1) # (batch_size, pi0_hidden_dims + state_dim)
 
-        # breakpoint()
-        # return self, {}
         key, rng = jax.random.split(seed)
-        # next_vlm_output = jnp.mean(next_vlm_output[0], axis=1) # (batch_size, pi0_hidden_dims)
-
-        # current_vlm_output, _ = self.target_actor.get_vlm_output(rng, obs)
-        # current_vlm_output = jnp.mean(current_vlm_output[0], axis=1) # (batch_size, pi0_hidden_dims)
         current_vlm_output = batch['current_vlm_output']
         # Append state here #
         current_vlm_output = jnp.concatenate([current_vlm_output, current_state], axis=1) # (batch_size, pi0_hidden_dims + state_dim)
@@ -782,17 +816,15 @@ class ExpoPiLearner(Agent):
             current_vlm_output,
             actions,
             target_q,
+            batch["mc_returns"],
             key,
             self.critic.apply_fn,
             self.q_clip_low,
             self.q_clip_high,
         )
-        # info.update({"target_q": target_q.mean()})
-        # info.update({"next_qs": next_qs.mean()})
-        info.update({"next_qs_mean": next_qs.mean()})
-        info.update({"next_qs_std": next_qs.std()})
-        info.update({"next_qs_max": next_qs.max()})
-        info.update({"next_qs_min": next_qs.min()})
+        info.update(next_qs_info)
+
+        info["critic_grad_norm"] = optax.global_norm(grads)
         critic = self.critic.apply_gradients(grads=grads)
         timer.tock("critic_loss_and_grad_time")
 
@@ -800,6 +832,9 @@ class ExpoPiLearner(Agent):
             critic.params, self.target_critic.params, self.tau
         )
         target_critic = self.target_critic.replace(params=target_critic_params)
+
+        info["critic_param_norm"] = optax.global_norm(critic.params)
+        info["target_critic_param_norm"] = optax.global_norm(target_critic.params)
 
         return self.replace(critic=critic, target_critic=target_critic, rng=rng), info
 
@@ -1012,8 +1047,10 @@ class ExpoPiLearner(Agent):
         next_observations = self.actor.convert_to_openpi_format_infer(batch, obs_key="next_observations")
         next_obs = self.actor.input_data_transforms(next_observations)
         # Filter batch to only keep relevant information #
-        relevant_keys = ["actions", "rewards", "masks"]
+        relevant_keys = ["actions", "rewards", "masks", "mc_returns"]
         batch = {k: v for k, v in batch.items() if k in relevant_keys}
+        batch['state'] = obs['state'][:, :8].copy()
+        batch['next_state'] = next_obs['state'][:, :8].copy()
 
         # Define and compute some cache variables to save computation #
         _obs = _model.Observation.from_dict(obs)
@@ -1025,6 +1062,8 @@ class ExpoPiLearner(Agent):
         current_vlm_output = jnp.mean(current_vlm_output[0][:, :512, :], axis=1)
         batch['current_vlm_output'] = current_vlm_output
         ##########################################################################################
+
+        # breakpoint()
 
         for i in range(utd_ratio):
             # breakpoint()

@@ -14,6 +14,7 @@ import seaborn as sns
 import tensorflow as tf
 import io
 from PIL import Image
+import pickle
 
 import wandb
 from absl import app, flags, logging
@@ -178,6 +179,12 @@ flags.DEFINE_bool(
     True,
     "Use Wrist view camera."
 )
+flags.DEFINE_string(
+    "critic_params_path",
+    None,
+    "Path to the critic parameters to load.",
+)
+
 # 2: 07 2 13
 BASE_POLICY_TYPE_TO_CLASS = {
     BasePolicyTypes.OpenVLA: OpenVLAAgent,
@@ -423,10 +430,10 @@ def train_agent(_):
     # Create replay buffer
     # LOG: Libero comes under this for now #
     if FLAGS.config.image_observations:
-        tf.io.gfile.makedirs(tf.io.gfile.join(save_dir, "image_replay_buffer"))
-        assert not tf.io.gfile.exists(
-            tf.io.gfile.join(save_dir, "image_replay_buffer", "episode_0.tfrecord")
-        ), f"Image replay buffer already exists! ({tf.io.gfile.join(save_dir, 'image_replay_buffer', 'episode_0.tfrecord')})"
+        # tf.io.gfile.makedirs(tf.io.gfile.join(save_dir, "image_replay_buffer"))
+        # assert not tf.io.gfile.exists(
+        #     tf.io.gfile.join(save_dir, "image_replay_buffer", "episode_0.tfrecord")
+        # ), f"Image replay buffer already exists! ({tf.io.gfile.join(save_dir, 'image_replay_buffer', 'episode_0.tfrecord')})"
         image_replay_buffer = None  # Will be created when switching to online training.
         state_replay_buffer = None
 
@@ -463,6 +470,12 @@ def train_agent(_):
     ### Create EXPO agent #
     # LOG: sharded batch is used to calibrate batch size in `create` method of `ExpoPiLearner` class #
     rng, construct_rng = jax.random.split(rng)
+    
+    if FLAGS.critic_params_path is not None:
+        critic_params = pickle.load(open(FLAGS.critic_params_path, 'rb'))['critic_params']
+    else:
+        critic_params = None
+    
     agent = ExpoPiLearner.create(
         config=pi_config,
         seed=FLAGS.seed,
@@ -470,6 +483,7 @@ def train_agent(_):
         rng=construct_rng,
         N=FLAGS.num_actions_to_sample,
         n_edit_samples=FLAGS.num_edit_samples,
+        critic_params=critic_params,
     )
     # breakpoint()
 
@@ -489,7 +503,7 @@ def train_agent(_):
 
 
     # TODO: Remove hardcode and init with flags appropriately #
-    num_trajectories_to_collect = 30
+    num_trajectories_to_collect = 3
     online_env_steps = 0
     online_trajectories_added = 0
     online_env_steps_this_epoch = 0
@@ -555,7 +569,7 @@ def train_agent(_):
                             ),
                         )
                     online_trajectories_added += 1
-                    online_env_steps_this_epoch += len(traj["rewards"])\
+                    online_env_steps_this_epoch += len(traj["rewards"])
                     
                     # breakpoint()
                 
@@ -591,9 +605,6 @@ def train_agent(_):
                 data_paths = glob_to_path_list(
                     tf.io.gfile.join(save_dir, "image_replay_buffer", "*.tfrecord")
                 )
-                # For debuggin #
-                # data_paths = sorted(data_paths)
-                # data_paths = [data_paths[0]]
                 #########################
                 # breakpoint()
                 image_replay_buffer = ImageReplayBufferPi(
@@ -607,9 +618,9 @@ def train_agent(_):
                     **FLAGS.config.image_replay_buffer_kwargs,
                 )
                 timer.tock("recreate_image_replay_buffer_iterator")
-                #########################################################
+            #     #########################################################
 
-                # Update online iterator #
+            #     # Update online iterator #
                 online_train_iterator = image_replay_buffer.iterator(
                     batch_size=FLAGS.config.agent_kwargs.batch_size
                 )
@@ -628,18 +639,18 @@ def train_agent(_):
                 # batch = offline_batch
                 batch = next(online_train_iterator)
                 # breakpoint()
-                batch = set_batch_masks(
-                    batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
-                )
+                # batch = set_batch_masks(
+                #     batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
+                # )
                 agent, info = agent.update(batch, utd_ratio=FLAGS.config.utd_ratio, timer=timer, update_only_critic=True, output_only_base_actions=True, seed=rng_update)
             else:
                 online_batch = next(online_train_iterator)
                 batch = concatenate_batches([offline_batch, online_batch])
                 # Do this as it cleanly handles termination/truncation for bootstrapping during critic update #
                 # The function effectively sets mask as 0.0 only where reward == 1.0, so for unsuccessful trajectory, it will have 'dones' as 0.0 at end #
-                batch = set_batch_masks(
-                    batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
-                )
+                # batch = set_batch_masks(
+                #     batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
+                # )
                 agent, info = agent.update(batch, utd_ratio=FLAGS.config.utd_ratio, timer=timer, seed=rng_update)
             
             # Log batch statistics #
@@ -795,148 +806,148 @@ def train_agent(_):
                     if wandb_logger is not None:
                         wandb_logger.log(eval_metrics, step=i)
                     
-                    # Log Q vs MC Returns #
-                    if q_vs_mc_returns_vals is not None:
-                        qs_across_trajectories = []
-                        for q_vs_mc_return_val in q_vs_mc_returns_vals: # Per trajectory
-                            qs = []
-                            for idx in range(len(q_vs_mc_return_val)):
-                                vlm_output, action_sequence = q_vs_mc_return_val[idx]
-                                params = agent.critic.params
-                                # Prepare input for critic #
-                                vlm_output = vlm_output.reshape(1, -1)
-                                action_sequence = action_sequence.reshape(1, -1)
-                                q_vals = compute_q_all(agent.critic.apply_fn, params, vlm_output, action_sequence)
-                                # breakpoint()
-                                qs.append(q_vals[0]) # Look at q1 specifically #
-                            qs_across_trajectories.append(qs)
+                    # # Log Q vs MC Returns #
+                    # if q_vs_mc_returns_vals is not None:
+                    #     qs_across_trajectories = []
+                    #     for q_vs_mc_return_val in q_vs_mc_returns_vals: # Per trajectory
+                    #         qs = []
+                    #         for idx in range(len(q_vs_mc_return_val)):
+                    #             vlm_output, action_sequence = q_vs_mc_return_val[idx]
+                    #             params = agent.critic.params
+                    #             # Prepare input for critic #
+                    #             vlm_output = vlm_output.reshape(1, -1)
+                    #             action_sequence = action_sequence.reshape(1, -1)
+                    #             q_vals = compute_q_all(agent.critic.apply_fn, params, vlm_output, action_sequence)
+                    #             # breakpoint()
+                    #             qs.append(q_vals[0]) # Look at q1 specifically #
+                    #         qs_across_trajectories.append(qs)
                     
-                        # mc_returns = jax.tree_map(
-                        #     lambda t: calc_return_to_go(
-                        #         rewards=np.array(t["reward"]), # * FLAGS.reward_scale
-                        #         # + FLAGS.reward_bias,
-                        #         masks=1 - np.array(t["done"]),
-                        #         gamma=FLAGS.config.agent_kwargs.discount,
-                        #         push_failed_to_min="maze" in FLAGS.environment_name
-                        #         or FLAGS.environment_name == "real_robot",
-                        #         min_reward=FLAGS.reward_bias,
-                        #     ),
-                        #     trajectories,
-                        #     is_leaf=lambda x: isinstance(
-                        #         x, dict
-                        #     ),  # only map over traj in trajs
-                        # )
-                        # initial_mc_returns = jax.tree_map(lambda t: t[0], mc_returns)
+                    #     # mc_returns = jax.tree_map(
+                    #     #     lambda t: calc_return_to_go(
+                    #     #         rewards=np.array(t["reward"]), # * FLAGS.reward_scale
+                    #     #         # + FLAGS.reward_bias,
+                    #     #         masks=1 - np.array(t["done"]),
+                    #     #         gamma=FLAGS.config.agent_kwargs.discount,
+                    #     #         push_failed_to_min="maze" in FLAGS.environment_name
+                    #     #         or FLAGS.environment_name == "real_robot",
+                    #     #         min_reward=FLAGS.reward_bias,
+                    #     #     ),
+                    #     #     trajectories,
+                    #     #     is_leaf=lambda x: isinstance(
+                    #     #         x, dict
+                    #     #     ),  # only map over traj in trajs
+                    #     # )
+                    #     # initial_mc_returns = jax.tree_map(lambda t: t[0], mc_returns)
 
-                        H = pi_config.model.action_horizon  # chunk size
-                        gamma_step = FLAGS.config.agent_kwargs.discount
+                    #     H = pi_config.model.action_horizon  # chunk size
+                    #     gamma_step = FLAGS.config.agent_kwargs.discount
 
-                        gamma_chunk = gamma_step # ** H
+                    #     gamma_chunk = gamma_step # ** H
 
-                        mc_returns = []
-                        for traj_i, t in enumerate(trajectories):
-                            # per-step rewards (same scaling/biasing you already do)
-                            r = np.asarray(t["reward"], dtype=np.float32) * FLAGS.reward_scale + FLAGS.reward_bias
-                            d = np.asarray(t["done"], dtype=np.bool_)  # per-step done flags
+                    #     mc_returns = []
+                    #     for traj_i, t in enumerate(trajectories):
+                    #         # per-step rewards (same scaling/biasing you already do)
+                    #         r = np.asarray(t["reward"], dtype=np.float32) * FLAGS.reward_scale + FLAGS.reward_bias
+                    #         d = np.asarray(t["done"], dtype=np.bool_)  # per-step done flags
 
-                            # chunk starts: 0, H, 2H, ...
-                            starts = np.arange(0, len(r), H)
+                    #         # chunk starts: 0, H, 2H, ...
+                    #         starts = np.arange(0, len(r), H)
 
-                            # sum rewards inside each chunk; last chunk can be shorter automatically
-                            r_chunks = np.add.reduceat(r, starts)
+                    #         # sum rewards inside each chunk; last chunk can be shorter automatically
+                    #         r_chunks = np.add.reduceat(r, starts)
 
-                            # chunk done/mask: mark chunk terminal if ANY step inside the chunk is done
-                            done_chunks = np.array([d[s : min(s + H, len(d))].any() for s in starts], dtype=np.float32)
-                            masks_chunks = 1.0 - done_chunks
+                    #         # chunk done/mask: mark chunk terminal if ANY step inside the chunk is done
+                    #         done_chunks = np.array([d[s : min(s + H, len(d))].any() for s in starts], dtype=np.float32)
+                    #         masks_chunks = 1.0 - done_chunks
 
-                            # assert alignment with the Q-values you logged per chunk
-                            assert len(r_chunks) == len(q_vs_mc_returns_vals[traj_i]), (
-                                f"traj {traj_i}: #reward_chunks={len(r_chunks)} != "
-                                f"#q_vs_mc_points={len(q_vs_mc_returns_vals[traj_i])} (H={H}, T={len(r)})"
-                            )
+                    #         # assert alignment with the Q-values you logged per chunk
+                    #         assert len(r_chunks) == len(q_vs_mc_returns_vals[traj_i]), (
+                    #             f"traj {traj_i}: #reward_chunks={len(r_chunks)} != "
+                    #             f"#q_vs_mc_points={len(q_vs_mc_returns_vals[traj_i])} (H={H}, T={len(r)})"
+                    #         )
 
-                            mc = calc_return_to_go(
-                                rewards=r_chunks,
-                                masks=masks_chunks,
-                                gamma=gamma_chunk,
-                                push_failed_to_min=("maze" in FLAGS.environment_name) or (FLAGS.environment_name == "real_robot"),
-                                min_reward=FLAGS.reward_bias,
-                            )
-                            mc_returns.append(mc)
+                    #         mc = calc_return_to_go(
+                    #             rewards=r_chunks,
+                    #             masks=masks_chunks,
+                    #             gamma=gamma_chunk,
+                    #             push_failed_to_min=("maze" in FLAGS.environment_name) or (FLAGS.environment_name == "real_robot"),
+                    #             min_reward=FLAGS.reward_bias,
+                    #         )
+                    #         mc_returns.append(mc)
 
-                        initial_mc_returns = [mc[0] for mc in mc_returns]
-                        # breakpoint()
+                    #     initial_mc_returns = [mc[0] for mc in mc_returns]
+                    #     # breakpoint()
 
-                        # q_vs_mc_data_list = []
-                        # for idx in range(len(trajectories)):
-                        #     mc_return = mc_returns[idx]
-                        #     q_vals = qs_across_trajectories[idx]
-                        #     num_qs = len(q_vals)
-                        #     num_points = mc_return.shape[0] // num_qs
-                        #     mc_return_slice = mc_return[pi_config.model.action_horizon::pi_config.model.action_horizon]
-                        #     assert len(mc_return_slice) <= len(q_vals)
-                        #     q_vals = np.array(q_vals[:len(mc_return_slice)]).reshape(-1,)
-                        #     q_vs_mc_data_list.append([q_vals, mc_return_slice]) # Both are of shape (T,); T varies across trajectories
+                    #     # q_vs_mc_data_list = []
+                    #     # for idx in range(len(trajectories)):
+                    #     #     mc_return = mc_returns[idx]
+                    #     #     q_vals = qs_across_trajectories[idx]
+                    #     #     num_qs = len(q_vals)
+                    #     #     num_points = mc_return.shape[0] // num_qs
+                    #     #     mc_return_slice = mc_return[pi_config.model.action_horizon::pi_config.model.action_horizon]
+                    #     #     assert len(mc_return_slice) <= len(q_vals)
+                    #     #     q_vals = np.array(q_vals[:len(mc_return_slice)]).reshape(-1,)
+                    #     #     q_vs_mc_data_list.append([q_vals, mc_return_slice]) # Both are of shape (T,); T varies across trajectories
 
-                        # q_vs_mc_data_list = np.array(q_vs_mc_data_list)
+                    #     # q_vs_mc_data_list = np.array(q_vs_mc_data_list)
 
-                        # 1. Logic to create flattened arrays for plotting
-                        all_q_values = []
-                        all_mc_returns = []
+                    #     # 1. Logic to create flattened arrays for plotting
+                    #     all_q_values = []
+                    #     all_mc_returns = []
 
-                        for idx in range(len(trajectories)):
-                            mc_return = mc_returns[idx]
-                            q_vals = qs_across_trajectories[idx]
+                    #     for idx in range(len(trajectories)):
+                    #         mc_return = mc_returns[idx]
+                    #         q_vals = qs_across_trajectories[idx]
                             
-                            # ... [Your slicing logic] ...
-                            # Ensure this logic matches your specific horizon/stride needs
-                            # mc_return_slice = mc_return[pi_config.model.action_horizon::pi_config.model.action_horizon]
-                            mc_return_slice = mc_return
-                            assert len(mc_return_slice) == len(q_vals)
-                            # Safety clip to matching length
-                            min_len = min(len(mc_return_slice), len(q_vals))
+                    #         # ... [Your slicing logic] ...
+                    #         # Ensure this logic matches your specific horizon/stride needs
+                    #         # mc_return_slice = mc_return[pi_config.model.action_horizon::pi_config.model.action_horizon]
+                    #         mc_return_slice = mc_return
+                    #         assert len(mc_return_slice) == len(q_vals)
+                    #         # Safety clip to matching length
+                    #         min_len = min(len(mc_return_slice), len(q_vals))
                             
-                            # Flatten just in case, though they should already be 1D
-                            q_vals_segment = np.array(q_vals[:min_len]).reshape(-1)
-                            mc_return_segment = np.array(mc_return_slice[:min_len]).reshape(-1)
+                    #         # Flatten just in case, though they should already be 1D
+                    #         q_vals_segment = np.array(q_vals[:min_len]).reshape(-1)
+                    #         mc_return_segment = np.array(mc_return_slice[:min_len]).reshape(-1)
                             
-                            all_q_values.append(q_vals_segment)
-                            all_mc_returns.append(mc_return_segment)
+                    #         all_q_values.append(q_vals_segment)
+                    #         all_mc_returns.append(mc_return_segment)
 
-                        # Concatenate for plotting
-                        if len(all_q_values) > 0:
-                            flat_q_values = np.concatenate(all_q_values, axis=0)
-                            flat_mc_returns = np.concatenate(all_mc_returns, axis=0)
-                            np.save(f"flat_q_values_iter_{i}.npy", flat_q_values)
-                            np.save(f"flat_mc_returns_iter_{i}.npy", flat_mc_returns)
+                    #     # Concatenate for plotting
+                    #     if len(all_q_values) > 0:
+                    #         flat_q_values = np.concatenate(all_q_values, axis=0)
+                    #         flat_mc_returns = np.concatenate(all_mc_returns, axis=0)
+                    #         np.save(f"flat_q_values_iter_{i}.npy", flat_q_values)
+                    #         np.save(f"flat_mc_returns_iter_{i}.npy", flat_mc_returns)
 
-                            # Setup simple plot
-                            plt.figure(figsize=(8, 6))
+                    #         # Setup simple plot
+                    #         plt.figure(figsize=(8, 6))
                             
-                            # Basic scatter plot
-                            plt.scatter(flat_q_values, flat_mc_returns, alpha=0.6, s=20)
+                    #         # Basic scatter plot
+                    #         plt.scatter(flat_q_values, flat_mc_returns, alpha=0.6, s=20)
 
-                            # Simple labels and grid
-                            plt.xlabel("Q-Values (Predicted)")
-                            plt.ylabel("Monte Carlo Returns (Actual)")
-                            plt.title(f"Q-Values vs Returns (Step {i})")
-                            plt.grid(True, alpha=0.3)
+                    #         # Simple labels and grid
+                    #         plt.xlabel("Q-Values (Predicted)")
+                    #         plt.ylabel("Monte Carlo Returns (Actual)")
+                    #         plt.title(f"Q-Values vs Returns (Step {i})")
+                    #         plt.grid(True, alpha=0.3)
 
-                            # Save to WandB
-                            buf = io.BytesIO()
-                            plt.savefig(buf, format="png", bbox_inches='tight')
-                            buf.seek(0)
-                            image = Image.open(buf)
+                    #         # Save to WandB
+                    #         buf = io.BytesIO()
+                    #         plt.savefig(buf, format="png", bbox_inches='tight')
+                    #         buf.seek(0)
+                    #         image = Image.open(buf)
 
-                            if wandb_logger is not None:
-                                wandb_logger.log({
-                                    "eval/q_vs_mc_scatter": wandb.Image(image, caption="Q vs MC Scatter Plot")
-                                }, step=i)
+                    #         if wandb_logger is not None:
+                    #             wandb_logger.log({
+                    #                 "eval/q_vs_mc_scatter": wandb.Image(image, caption="Q vs MC Scatter Plot")
+                    #             }, step=i)
 
-                            plt.close()
-                            buf.close()
-                        else:
-                            print("Warning: No data available for Q vs MC plot.")
+                    #         plt.close()
+                    #         buf.close()
+                    #     else:
+                    #         print("Warning: No data available for Q vs MC plot.")
                     
 
                     # debug_metrics = agent.get_debug_metrics(batch=batch, seed=eval_policy_fn_key)
