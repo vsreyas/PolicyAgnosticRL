@@ -340,7 +340,7 @@ def train_agent(_):
     # Get PI config #
     pi_config = get_config("pi05_libero_custom_low_mem")
     # breakpoint()
-    pi_config.fsdp_devices = 2 # Try out with model parallel
+    pi_config.fsdp_devices = 1 # Try out with model parallel
     pi_config.exp_name = FLAGS.wandb_experiment_name
     pi_config.overwrite = True
 
@@ -402,6 +402,7 @@ def train_agent(_):
             use_language=FLAGS.use_lang, config=pi_config, is_pi=True, **FLAGS.config.dataset_kwargs,
             task_name=FLAGS.task_name, 
             final_step_sparse_reward=FLAGS.final_step_sparse_reward,
+            filter_successful_trajectories=True,
         )
         # breakpoint()
         libero_config = get_libero_config()
@@ -615,6 +616,7 @@ def train_agent(_):
                     use_wrist_view=FLAGS.use_wrist_view, 
                     use_language=FLAGS.use_lang, config=pi_config,
                     final_step_sparse_reward=False, # Use rewards from environment and DO NOT override with sparse 0/1 rewards at final step #
+                    filter_successful_trajectories=True,
                     **FLAGS.config.image_replay_buffer_kwargs,
                 )
                 timer.tock("recreate_image_replay_buffer_iterator")
@@ -644,7 +646,11 @@ def train_agent(_):
                 # )
                 agent, info = agent.update(batch, utd_ratio=FLAGS.config.utd_ratio, timer=timer, update_only_critic=True, output_only_base_actions=True, seed=rng_update)
             else:
-                online_batch = next(online_train_iterator)
+                try: # If no successful trajectories online, TODO: Remove this later on #
+                    online_batch = next(online_train_iterator)
+                except StopIteration:
+                    online_batch = next(offline_train_iterator)
+
                 batch = concatenate_batches([offline_batch, online_batch])
                 # Do this as it cleanly handles termination/truncation for bootstrapping during critic update #
                 # The function effectively sets mask as 0.0 only where reward == 1.0, so for unsuccessful trajectory, it will have 'dones' as 0.0 at end #

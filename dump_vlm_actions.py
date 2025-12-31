@@ -99,6 +99,7 @@ def main(_):
                 use_language=FLAGS.use_lang,
                 config=pi_config,
                 final_step_sparse_reward=False,
+                filter_successful_trajectories=True,
                 **FLAGS.config.image_replay_buffer_kwargs,
             )
             dataset_iterator = replay_buffer.iterator(
@@ -127,7 +128,7 @@ def main(_):
     logging.info("Getting example batch...")
     example_batch = next(dataset_iterator)
 
-    # breakpoint()
+    breakpoint()
     
     # Create EXPO agent
     logging.info("Creating EXPO agent...")

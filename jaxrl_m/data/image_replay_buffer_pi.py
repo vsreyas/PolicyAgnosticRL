@@ -198,6 +198,7 @@ class ImageReplayBufferPi:
         use_8D=True,
         final_step_sparse_reward: bool = True, # Keeps only the last step of the trajectory for reward computation
         discount: float = 0.99,
+        filter_successful_trajectories: bool = False,
     ):
         self.goal_relabeling_strategy = goal_relabeling_strategy
         self.goal_relabeling_kwargs = goal_relabeling_kwargs
@@ -231,6 +232,7 @@ class ImageReplayBufferPi:
         self.use_8D = use_8D
         self.final_step_sparse_reward = final_step_sparse_reward
         self.discount = discount
+        self.filter_successful_trajectories = filter_successful_trajectories
         
         dataset = self._construct_tf_dataset(data_paths, seed)
 
@@ -281,6 +283,10 @@ class ImageReplayBufferPi:
             ds = tf.data.TFRecordDataset(fn)
             if self.task_name is not None:
                 ds = ds.filter(self._proto_filter)
+            
+            if self.filter_successful_trajectories:
+                ds = ds.filter(self._success_filter)
+
             # Pass filename along with each example
             ds = ds.map(lambda x: (x, fn), num_parallel_calls=tf.data.AUTOTUNE)
             # breakpoint()
@@ -358,6 +364,27 @@ class ImageReplayBufferPi:
         # Case-insensitive substring match
         task = tf.strings.lower(self.task_name)
         return tf.strings.regex_full_match(tf.strings.lower(txt), ".*" + task + ".*")
+    
+    def _success_filter(self, example_proto: tf.Tensor) -> tf.Tensor:
+        """Keep only successful trajectories: last reward != second-last reward."""
+        features = {
+            # rewards stored via tf.io.serialize_tensor -> bytes (tf.string)
+            "rewards": tf.io.FixedLenFeature([], tf.string, default_value=b""),
+        }
+        parsed = tf.io.parse_single_example(example_proto, features)
+        raw = parsed["rewards"]
+
+        def _compute():
+            rewards = tf.io.parse_tensor(raw, out_type=tf.float32)  # [T]
+            n = tf.shape(rewards)[0]
+            def _ok():
+                r_last = tf.gather(rewards, n - 1)
+                r_prev = tf.gather(rewards, n - 2)
+                return tf.greater(tf.abs(r_last - r_prev), 1e-6)
+            return tf.cond(n >= 2, _ok, lambda: tf.constant(False))
+
+        # If rewards missing, don't filter it out.
+        return tf.cond(tf.greater(tf.strings.length(raw), 0), _compute, lambda: tf.constant(True))
 
 
     # the expected type spec for the serialized examples

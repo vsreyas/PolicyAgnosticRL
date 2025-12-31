@@ -120,7 +120,8 @@ def _edit_actor_loss_and_grad(
         q = qs.mean(axis=0)
 
         temperature = temp_apply_fn({"params": temp_params})
-        edit_actor_loss = (entropy_scale * log_probs * temperature - q).mean()
+        # edit_actor_loss = (entropy_scale * log_probs * temperature - q).mean()
+        edit_actor_loss = -q.mean()
 
         metrics = {
             "edit_q": q.mean(),
@@ -315,8 +316,9 @@ class ExpoPiLearner(Agent):
 
         # Init Pi0 model #
         # Initialize target_actor as a PiPolicy object with is_target=True; This ensures optimizer states are not created for target_actor #
-        target_actor = PiPolicy(rng=rng, config=config, is_target=True)
+        # target_actor = PiPolicy(rng=rng, config=config, is_target=True)
         actor = PiPolicy(rng=rng, config=config, is_target=False)
+        target_actor = actor
         
         if decay_steps is not None:
             actor_lr = optax.cosine_decay_schedule(actor_lr, decay_steps)
@@ -745,10 +747,10 @@ class ExpoPiLearner(Agent):
         # breakpoint()
 
         # Update target actor train_state with incremental parameter update #
-        target_score_params = optax.incremental_update(
-            self.actor.train_state.params, self.target_actor.train_state.params, self.actor_tau
-        )
-        self.target_actor.train_state = self.target_actor.train_state.replace(params=target_score_params)
+        # target_score_params = optax.incremental_update(
+        #     self.actor.train_state.params, self.target_actor.train_state.params, self.actor_tau
+        # )
+        # self.target_actor.train_state = self.target_actor.train_state.replace(params=target_score_params)
 
         new_agent = self.replace(actor=self.actor, target_actor=self.target_actor, rng=rng)
         # new_agent = self.replace(actor=self.actor, rng=rng)
@@ -1088,10 +1090,12 @@ class ExpoPiLearner(Agent):
         if update_only_critic:
             return new_agent, {**critic_info}
 
-        timer.tick("update_actor_time")
-        new_agent, actor_update_info = new_agent.update_actor(mini_batch_original_obs)
-        timer.tock("update_actor_time")
-        actor_update_info = append_substr_to_dict_keys(actor_update_info, "actor")
+        # timer.tick("update_actor_time")
+        # new_agent, actor_update_info = new_agent.update_actor(mini_batch_original_obs)
+        # timer.tock("update_actor_time")
+        # actor_update_info = append_substr_to_dict_keys(actor_update_info, "actor")
+        actor_update_info = {}
+        temp_info = {}
         # # breakpoint()
 
         timer.tick("update_edit_actor_time")
@@ -1100,10 +1104,10 @@ class ExpoPiLearner(Agent):
             entropy = actor_info["entropy"]
             actor_info = append_substr_to_dict_keys(actor_info, "edit_actor")
             # breakpoint()
-            new_agent, temp_info = new_agent.update_temperature(entropy)
-            temp_info = append_substr_to_dict_keys(temp_info, "temp")
+            # new_agent, temp_info = new_agent.update_temperature(entropy)
+            # temp_info = append_substr_to_dict_keys(temp_info, "temp")x
             # breakpoint()
-            actor_info.update(temp_info)
+            # actor_info.update(temp_info)
         timer.tock("update_edit_actor_time")
         timer.tock("total_update_time")
         print(timer.get_total_times(reset=False))

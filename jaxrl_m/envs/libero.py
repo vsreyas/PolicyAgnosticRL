@@ -241,6 +241,7 @@ def get_libero_tfrecord_dataset(tfrecord_regexp: str,
                                 seed: int = 0,
                                 is_pi: bool = False,
                                 task_name=None,
+                                filter_successful_trajectories: bool = False,
                                 **kwargs):
     """
     is_pi -- the flag which retrieves the dataset with how pi processes it
@@ -256,6 +257,7 @@ def get_libero_tfrecord_dataset(tfrecord_regexp: str,
         cache=cache,
         train=train,
         task_name=task_name,
+        filter_successful_trajectories=filter_successful_trajectories,
         **kwargs,
     )
     return ImageReplayBuffer(
