@@ -15,6 +15,7 @@ from typing import Dict
 
 import jax
 import jax.numpy as jnp
+import pandas as pd
 import numpy as np
 import tensorflow as tf
 import wandb
@@ -232,18 +233,58 @@ def get_policy_fn(
             obs_ndim = observations["proprio"].ndim
         
         # breakpoint()
-        actions, vlm_output = jax.device_get(
+        out_dict = jax.device_get(
             agent.sample_actions(
                 observations, *args, **kwargs, timer=timer, output_action_chunk=True, debug_mode=debug_mode
             )
         )
         # breakpoint()
 
-        return actions, vlm_output
+        return out_dict
 
     policy_fn = supply_rng(policy_fn, rng=rng)
 
     return policy_fn
+
+def filter_cache(cache: Dict) -> Dict:
+    """Filter the cache to only include entries where the current state is not None."""
+    # import pickle
+    # import pandas as pd
+    # import numpy as np
+    # file=open("outputs/vlm_actions_replay_ep30_v1_clean_v3.pkl","rb"); cache=pickle.load(file);
+
+    # Find keys
+    action_horizon = cache['current_actions'].shape[2]
+    episode_ids = cache['episode_ids']
+    episode_timesteps = cache['episode_timesteps']
+    terminals = cache['terminals']
+    df = pd.DataFrame({
+        'episode_id': episode_ids,
+        'episode_timestep': episode_timesteps,
+        'terminals': terminals,
+    })
+
+    pos = df.groupby("episode_id").cumcount()
+    ep_len = df.groupby("episode_id")["episode_timestep"].transform("size")
+    terminals = df["terminals"].astype(bool)
+    keep_in_sorted = terminals | (pos < (ep_len - action_horizon))
+    keep_idx = df.index[keep_in_sorted]
+    filtered_df = df.loc[df.index.isin(keep_idx)].copy()
+
+    filtered_index = np.array(filtered_df.index)
+
+    for key in cache.keys():
+        if key == "metadata":
+            continue
+        
+        if type(cache[key]) == dict:
+            for subkey in cache[key].keys():
+                cache[key][subkey] = cache[key][subkey][filtered_index]
+        else:
+            cache[key] = cache[key][filtered_index]
+    
+    return cache
+
 
 def load_vlm_cache(cache_path: str) -> Dict:
     """Load the VLM action cache from disk.
@@ -270,6 +311,9 @@ def load_vlm_cache(cache_path: str) -> Dict:
     with open(cache_path, 'rb') as f:
         cache = pickle.load(f)
     
+    cache = filter_cache(cache)
+    # breakpoint()
+    
     # Normalize inputs #
     # breakpoint()
     mean_vlm_outputs = np.mean(cache['current_vlm_outputs'], axis=0)
@@ -287,6 +331,8 @@ def load_vlm_cache(cache_path: str) -> Dict:
     logging.info(f"  Next actions shape: {cache['next_actions'].shape}")
     logging.info(f"  Rewards shape: {cache['rewards'].shape}")
     logging.info(f"  Metadata: {cache['metadata']}")
+
+    # breakpoint()
     
     return cache, mean_vlm_outputs, std_vlm_outputs
 
@@ -338,6 +384,7 @@ def sample_batch_from_cache(
         'terminals': cache['terminals'][indices_np],  # (batch_size,)
         'truncates': cache['truncates'][indices_np],  # (batch_size,)
         # 'metadata': cache['metadata'],  # Dictionary with cache metadata
+        "next_actions_sampled": cache['next_actions_sampled'][indices_np],  # (batch_size, N, action_horizon, action_dim)
     }
     
     # Convert to JAX arrays
@@ -371,7 +418,7 @@ def train_critic(_):
     
     # Get PI config
     pi_config = get_config("pi05_libero_custom_low_mem")
-    pi_config.fsdp_devices = 2
+    pi_config.fsdp_devices = 1
     pi_config.exp_name = FLAGS.wandb_experiment_name
     pi_config.overwrite = True
     
@@ -430,6 +477,7 @@ def train_critic(_):
         'mc_returns': jnp.zeros((FLAGS.config.agent_kwargs.batch_size,)),
         'terminals': jnp.zeros((FLAGS.config.agent_kwargs.batch_size,)),
         'truncates': jnp.zeros((FLAGS.config.agent_kwargs.batch_size,)),
+        'next_actions_sampled': jnp.zeros((FLAGS.config.agent_kwargs.batch_size, FLAGS.num_actions_to_sample, action_horizon, action_dim)),
         # 'metadata': {},
     }
     
@@ -551,7 +599,9 @@ def train_critic(_):
                 "batch_stats/batch_size": int(batch["rewards"].shape[0]),
                 "batch_stats/epoch": int(loader.epoch),
                 "batch_stats/masks_mean": np.mean(batch["masks"]),
-                # "batch_stats/mc_returns_mean": np.mean(batch["mc_returns"]),
+                "batch_stats/mc_returns_mean": np.mean(batch["mc_returns"]),
+                "batch_stats/mc_returns_min": np.min(batch["mc_returns"]),
+                "batch_stats/mc_returns_max": np.max(batch["mc_returns"]),
                 "batch_stats/rewards_mean": np.mean(batch["rewards"]),
                 "batch_stats/rewards_min": np.min(batch["rewards"]),
                 "batch_stats/rewards_max": np.max(batch["rewards"]),

@@ -75,7 +75,7 @@ def main(_):
 
     # Get PI config
     pi_config = get_config("pi05_libero_custom_low_mem")
-    pi_config.fsdp_devices = 2
+    pi_config.fsdp_devices = 1
     pi_config.exp_name = "dump_vlm_actions"
     pi_config.overwrite = True
 
@@ -99,7 +99,7 @@ def main(_):
                 use_language=FLAGS.use_lang,
                 config=pi_config,
                 final_step_sparse_reward=False,
-                filter_successful_trajectories=True,
+                filter_successful_trajectories=False,
                 **FLAGS.config.image_replay_buffer_kwargs,
             )
             dataset_iterator = replay_buffer.iterator(
@@ -128,7 +128,7 @@ def main(_):
     logging.info("Getting example batch...")
     example_batch = next(dataset_iterator)
 
-    breakpoint()
+    # breakpoint()
     
     # Create EXPO agent
     logging.info("Creating EXPO agent...")
@@ -208,6 +208,7 @@ def main(_):
                     batch_processed, obs_key="next_observations"
                 )
                 next_obs = agent.actor.input_data_transforms(next_observations_dict)
+                # breakpoint()
                 
                 # Extract states
                 current_state = obs['state'][:, :8]  # State dimension (8D)
@@ -248,6 +249,7 @@ def main(_):
                 
                 # Store all data needed for update_critic
                 for i in range(batch_size):
+                    # breakpoint()
                     # Try to get episode_id and timestep from batch
                     # If not available, use batch_count and index within batch
                     episode_id = batch.get('episode_id', np.array([batch_count] * batch_size))[i]
@@ -277,9 +279,10 @@ def main(_):
                         # Optional: terminals and truncates if available
                         'terminals': batch['terminals'][i],
                         'truncates': batch['truncates'][i],
-                        'next_actions': next_actions[i],
+                        'next_actions_sampled': next_actions[i],
                         'next_vlm_output': next_vlm_output[i],
                         'mc_returns': batch['mc_returns'][i],
+                        'next_actions': batch['next_actions'][i],
                     }
                 
                 batch_count += 1
@@ -325,6 +328,7 @@ def main(_):
     terminals = np.stack([critic_cache_data[k]['terminals'] for k in keys_list])
     truncates = np.stack([critic_cache_data[k]['truncates'] for k in keys_list])
     mc_returns = np.stack([critic_cache_data[k]['mc_returns'] for k in keys_list])
+    next_actions_sampled = np.stack([critic_cache_data[k]['next_actions_sampled'] for k in keys_list])
 
     # breakpoint()
     
@@ -346,6 +350,7 @@ def main(_):
         'terminals': terminals,
         'truncates': truncates,
         'mc_returns': mc_returns,
+        'next_actions_sampled': next_actions_sampled,
         'metadata': {
             'num_entries': len(keys_list),
             'num_batches_processed': batch_count,

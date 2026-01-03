@@ -99,7 +99,7 @@ def _edit_actor_loss_and_grad(
         dist = edit_actor_apply_fn(
             {"params": actor_params},
             edit_observations,
-            training=True,
+            training=False,
             rngs={"dropout": dropout_key},
         )
         actions = dist.sample(seed=key)
@@ -161,40 +161,37 @@ def _critic_loss_and_grad(
         # jax.debug.breakpoint()
         # jax.debug.print(f"qs: {qs.shape}")
         # jax.debug.print("target_q: {target_q.shape}")
-        # clipped_qs = jnp.clip(qs, q_clip_low, q_clip_high)
-        # clipped_target_q = jnp.clip(target_q, q_clip_low, q_clip_high)
+        clipped_qs = jnp.clip(qs, q_clip_low, q_clip_high)
+        clipped_target_q = jnp.clip(target_q, q_clip_low, q_clip_high)
         
-        # critic_loss_td = ((clipped_qs - clipped_target_q) ** 2).mean()
-        # critic_loss_mc = ((clipped_qs - mc_target) ** 2).mean()
+        critic_loss_td = ((clipped_qs - clipped_target_q) ** 2).mean()
+        critic_loss_mc = ((clipped_qs - mc_target) ** 2).mean()
 
-        # critic_loss = (critic_loss_td + 0.2 * critic_loss_mc)
+        critic_loss = (critic_loss_td + 0.2 * critic_loss_mc)
         # critic_loss = critic_loss_td
-        critic_loss_td = ((qs - target_q) ** 2).mean()
-        critic_loss_mc = ((qs - mc_target) ** 2).mean()
-        critic_loss = critic_loss_td # + 0.2 * critic_loss_mc
 
 
         metrics = {
             "critic_loss": critic_loss,
             "critic_loss_td": critic_loss_td,
             "critic_loss_mc": critic_loss_mc,
-            "q_mean": qs.mean(),
-            "q_std": qs.std(),
-            "q_max": qs.max(),
-            "q_min": qs.min(),
-            "target_q_mean": target_q.mean(),
-            "target_q_std": target_q.std(),
-            "target_q_max": target_q.max(),
-            "target_q_min": target_q.min(),
-            "q_diff": (qs - target_q).mean(),
-            "q_diff_std": (qs - target_q).std(),
-            "q_diff_max": (qs - target_q).max(),
-            "q_diff_min": (qs - target_q).min(),
+            "q_mean": clipped_qs.mean(),
+            "q_std": clipped_qs.std(),
+            "q_max": clipped_qs.max(),
+            "q_min": clipped_qs.min(),
+            "target_q_mean": clipped_target_q.mean(),
+            "target_q_std": clipped_target_q.std(),
+            "target_q_max": clipped_target_q.max(),
+            "target_q_min": clipped_target_q.min(),
+            "q_diff": (clipped_qs - clipped_target_q).mean(),
+            "q_diff_std": (clipped_qs - clipped_target_q).std(),
+            "q_diff_max": (clipped_qs - clipped_target_q).max(),
+            "q_diff_min": (clipped_qs - clipped_target_q).min(),
         }
 
         num_heads = qs.shape[0]  # static at compile time
         for i in range(num_heads):
-            qi = qs[i]
+            qi = clipped_qs[i]
             metrics[f"q{i+1}_mean"] = qi.mean()
             metrics[f"q{i+1}_std"]  = qi.std()
             metrics[f"q{i+1}_max"]  = qi.max()
@@ -215,7 +212,7 @@ def _sample_actions(rng, apply_fn, params, observations: np.ndarray) -> np.ndarr
     return dist.sample(seed=key), rng
 
 
-class ExpoPiLearner(Agent):
+class ExpoPiLearnerCache(Agent):
     actor: PiPolicy
     critic: TrainState
     target_critic: TrainState
@@ -358,10 +355,8 @@ class ExpoPiLearner(Agent):
         critic_def = Ensemble(critic_cls, num=num_qs)
 
         if critic_params is None:
-            print("\n\n\nInitializing critic parameters from scratch...\n\n\n")
-            critic_params = critic_def.init(critic_key, dummy_observations, dummy_actions)["params"]
-        else:
             print("\n\n\nInitializing critic parameters loaded from checkpoint...\n\n\n")
+            critic_params = critic_def.init(critic_key, dummy_observations, dummy_actions)["params"]
         
         if critic_weight_decay is not None:
             tx = optax.adamw(
@@ -435,8 +430,6 @@ class ExpoPiLearner(Agent):
         # Optional RNG + timer from kwargs (similar to sample_actions)
         seed = kwargs.pop("seed", None)
         timer = kwargs.pop("timer", None)
-        infer = kwargs.pop("infer", False)
-        obs_key = kwargs.pop("obs_key", "observations")
         return_first_action = kwargs.pop("return_first_action", False)
         output_only_base_actions = kwargs.pop("output_only_base_actions", False)
         output_all_sampled_actions = kwargs.pop("output_all_sampled_actions", False)
@@ -449,33 +442,28 @@ class ExpoPiLearner(Agent):
         else:
             seed, rng = jax.random.split(seed)
         
-        # Sample `N` actions from base policy #
-        # Repeat observations to sample `N` actions
-        timer.tick("repeat_observations_openpi_time")
-        observations_repeated = repeat_observations_openpi(obs, self.N, axis=0) # (batch_size * N, ...)
-        timer.tock("repeat_observations_openpi_time")
+        # # Sample `N` actions from base policy #
+        # # Repeat observations to sample `N` actions
+        # timer.tick("repeat_observations_openpi_time")
+        # observations_repeated = repeat_observations_openpi(obs, self.N, axis=0) # (batch_size * N, ...)
+        # timer.tock("repeat_observations_openpi_time")
 
-        # Get actions and vlm output for all observations above # (batch_size * N,)
-        actor_to_sample = self.actor
-        if is_target:
-            actor_to_sample = self.target_actor
-        # breakpoint()
-        timer.tick("sample_actions_with_vlm_output_time")
-        pi0_actions, vlm_output = actor_to_sample.sample_actions_with_vlm_output(rng, observations_repeated, timer=timer) # (batch_size * N, action_horizon, action_dim)
-        timer.tock("sample_actions_with_vlm_output_time")
-        # breakpoint()
-        vlm_output = jnp.mean(vlm_output[0][:, :512, :], axis=1) # Take mean representation across tokens, (batch_size * N, pi0_hidden_dims) #
-        actions = pi0_actions
+        # # Get actions and vlm output for all observations above # (batch_size * N,)
+        # actor_to_sample = self.actor
+        # if is_target:
+        #     actor_to_sample = self.target_actor
+        # # breakpoint()
+        # timer.tick("sample_actions_with_vlm_output_time")
+        # pi0_actions, vlm_output = actor_to_sample.sample_actions_with_vlm_output(rng, observations_repeated, timer=timer) # (batch_size * N, action_horizon, action_dim)
+        # timer.tock("sample_actions_with_vlm_output_time")
+        # # breakpoint()
+        # vlm_output = jnp.mean(vlm_output[0][:, :512, :], axis=1) # Take mean representation across tokens, (batch_size * N, pi0_hidden_dims) #
+        # actions = pi0_actions
+        
+        # state = observations_repeated.state[:, :8]
+        # vlm_output = jnp.concatenate([vlm_output, state], axis=1) # (batch_size * N, pi0_hidden_dims + state_dim)
+        
 
-        if output_only_base_actions:
-            if output_all_sampled_actions:
-                return actions.reshape(batch_size, self.N, self.action_horizon, self.action_dim // self.action_horizon), vlm_output[:batch_size, :]
-            else:
-                return actions[:batch_size, :, :], vlm_output[:batch_size, :]
-        
-        state = observations_repeated.state[:, :8]
-        vlm_output = jnp.concatenate([vlm_output, state], axis=1) # (batch_size * N, pi0_hidden_dims + state_dim)
-        
 
         if self.N > 1:
             key, rng = jax.random.split(rng)
@@ -561,25 +549,11 @@ class ExpoPiLearner(Agent):
         For given state/observation, samles self.N actions from base policy; For first self.n_edit_samples actions, samples from edit_actor;
         Combine all (N + n_edit_samples) actions and compute Q-values; Return the action with the highest Q-value;
         '''
-        # Extract rng from kwargs
-        # seed = kwargs.pop("seed")
-        # # Split seed #
-        # seed, rng = jax.random.split(seed)
-        # Process some data #
-        # observations = self.actor.convert_to_openpi_format_infer(_observations)
-        # observations = self.actor.input_data_transforms(observations)
-        # observations = _model.Observation.from_dict(observations)
+        out_dict = {}
 
-        # breakpoint()
-
-
-        debug_mode = kwargs.pop("debug_mode", False)
         seed = kwargs.pop("seed", None)
         seed, rng = jax.random.split(seed)
-        timer = kwargs.pop("timer", None)
         output_action_chunk = kwargs.pop("output_action_chunk", True)
-        # timer.tick("total_sample_actions_time")
-        # timer.tick("sample_actions_time")
         # Repeat observations to sample `N` actions#
         observations = repeat_observations(_observations, self.N, axis=0)
 
@@ -589,45 +563,20 @@ class ExpoPiLearner(Agent):
         else:
             # actions = self.actor.sample_actions(observations, seed=rng, params=self.target_actor.train_state.params) # (N, action_horizon, action_dim)
             actions = self.target_actor.sample_actions(observations, seed=rng) # (N, action_horizon, action_dim)
-        
-        # actions = self.target_actor.sample_actions(observations, seed=rng) # (N, action_horizon, action_dim)
-        # timer.tock("sample_actions_time")
-        # breakpoint()
-        diffusion_actions = actions
-        
-        # # DEBUG #
-        # action = actions[0, 0, :]
-        # #########
+
+        diffusion_actions = actions.copy() # (N, action_horizon, action_dim)
 
         # Do a forward pass to get VLM output #
         seed, rng = jax.random.split(rng)
         if not is_target:
             vlm_output, _, processed_obs = self.actor.get_vlm_output(rng, _observations, processed_obs=False, infer=True, return_processed_obs=True)
         else:
-            # vlm_output, _ = self.actor.get_vlm_output(rng, observations, params=self.target_actor.train_state.params)
             vlm_output, _, processed_obs = self.target_actor.get_vlm_output(rng, _observations, processed_obs=False, infer=True, return_processed_obs=True)
-        # vlm_output: (N, 256 * num_images + 200 (tokens), pi0_hidden_dims)
-        # breakpoint()
+
         # Take mean across tokens as representation from VLM #
         vlm_output = jnp.mean(vlm_output[0][:, :512, :], axis=1) # (N, pi0_hidden_dims)
-        # Append state here #
-        # state = _observations['proprio'][None, :8] # State dimension
-        # breakpoint()
         state = processed_obs['state'][0, :8][None, :8] # State dimension
         vlm_output = jnp.concatenate([vlm_output, state], axis=1) # (N, pi0_hidden_dims + state_dim)
-        # breakpoint()
-
-        if debug_mode:
-            actions = actions[0, :, :]
-            if not output_action_chunk:
-                actions = actions[0, :]
-            out_dict = {}
-            out_dict = {
-                "actions": actions,
-                "diffusion_actions": diffusion_actions,
-                "vlm_output": vlm_output[0]
-            }
-            return out_dict
 
         # NOTE: In all the computation in this class, self.action_dim = action_horizon * action_dim, so keep that semantic in mind #
         # This is done so that without any code modification, edit_actor outputs an action chunk #
@@ -671,82 +620,37 @@ class ExpoPiLearner(Agent):
             idx = jnp.argmax(qs)
             action = actions[idx]
 
-            # breakpoint()
-
         else:
             raise ValueError(f"N must be greater than 1, got {self.N}")
-        
-        # timer.tock("total_sample_actions_time")
-        # print(timer.get_total_times(reset=False))
-
-        # breakpoint()
 
         rng, _ = jax.random.split(rng, 2)
         out_dict = {
-            "actions": action.squeeze(),
-            "diffusion_actions": diffusion_actions,
-            "vlm_output": vlm_output[0]
+            "actions": action.squeeze(), # (action_horizon, action_dim)
+            "vlm_output": vlm_output[0], # (pi0_hidden_dims,)
+            "diffusion_actions": diffusion_actions # (N, action_horizon, action_dim)
         }
+        
         return out_dict
     
-
-    def update_edit_actor(self, batch: Batch, *args, **kwargs) -> Tuple[Agent, Dict[str, float]]:
+    def get_vlm_output(self, _observations: Data, is_target=False,*args, **kwargs):
+        '''
+        For given state/observation, samles self.N actions from base policy; For first self.n_edit_samples actions, samples from edit_actor;
+        Combine all (N + n_edit_samples) actions and compute Q-values; Return the action with the highest Q-value;
+        '''
         seed = kwargs.pop("seed", None)
-        timer = kwargs.pop("timer", None)
-        infer = kwargs.pop("infer", False)
-        obs_key = kwargs.pop("obs_key", "observations")
-
-        if seed is None:
-            rng = self.rng
-        else:
-            seed, rng = jax.random.split(seed)
-
-        key, rng = jax.random.split(rng)
-        key2, rng = jax.random.split(rng)
-        dropout_key, rng = jax.random.split(rng)
-
-        # Get base action dim out from given actions #
-        base_action_dim = self.action_dim // self.action_horizon
-        if batch['actions'].shape[-1] > base_action_dim:
-            if batch['actions'].ndim == 3:
-                batch['actions'] = batch['actions'][:, :, :base_action_dim]
-            elif batch['actions'].ndim == 2:
-                batch['actions'] = batch['actions'][:, :base_action_dim]
-            else:
-                raise ValueError(f"Actions must be 3 or 2 dimensional, got {batch['actions'].shape}")
-            
-
-        batch['actions'] = batch['actions'].reshape(-1, self.action_dim)
-        
-        # Get vlm output for observations #
+        seed, rng = jax.random.split(seed)
+        # Do a forward pass to get VLM output #
         seed, rng = jax.random.split(rng)
-        vlm_output = batch['current_vlm_output']
-        state = batch['state'][:, :8]
-        vlm_output = jnp.concatenate([vlm_output, state], axis=1) # (batch_size, pi0_hidden_dims + state_dim)
+        if not is_target:
+            vlm_output, _, processed_obs = self.actor.get_vlm_output(rng, _observations, processed_obs=False, infer=True, return_processed_obs=True)
+        else:
+            vlm_output, _, processed_obs = self.target_actor.get_vlm_output(rng, _observations, processed_obs=False, infer=True, return_processed_obs=True)
 
-        # Use JITted version #
-        grads, actor_info = _edit_actor_loss_and_grad(
-            self.edit_actor.params,
-            self.critic.params,
-            self.temp.params,
-            vlm_output,
-            batch["actions"],
-            dropout_key,
-            key,
-            key2,
-            self.entropy_scale,
-            self.edit_action_scale,
-            self.edit_actor.apply_fn,
-            self.critic.apply_fn,
-            self.temp.apply_fn,
-        )
+        # Take mean across tokens as representation from VLM #
+        vlm_output = jnp.mean(vlm_output[0][:, :512, :], axis=1) # (N, pi0_hidden_dims)
+        
+        return vlm_output
 
-        actor_info["edit_actor_grad_norm"] = optax.global_norm(grads)
-        edit_actor = self.edit_actor.apply_gradients(grads=grads)
-        actor_info["edit_actor_param_norm"] = optax.global_norm(edit_actor.params)
-
-        return self.replace(edit_actor=edit_actor, rng=rng), actor_info
-    
 
     def update_actor(self, batch: Batch, *args, **kwargs) -> Tuple[Agent, Dict[str, float]]:
         seed = kwargs.pop("seed", None)
@@ -771,6 +675,52 @@ class ExpoPiLearner(Agent):
         new_agent = self.replace(actor=self.actor, target_actor=self.target_actor, rng=rng)
         # new_agent = self.replace(actor=self.actor, rng=rng)
         return new_agent, actor_update_info
+    
+    def update_edit_actor(self, batch: Batch, *args, **kwargs) -> Tuple[Agent, Dict[str, float]]:
+        seed = kwargs.pop("seed", None)
+
+        if seed is None:
+            rng = self.rng
+        else:
+            seed, rng = jax.random.split(seed)
+
+        key, rng = jax.random.split(rng)
+        key2, rng = jax.random.split(rng)
+        dropout_key, rng = jax.random.split(rng)
+
+        # batch['actions'] = batch['actions'].reshape(-1, self.action_dim)
+        base_actions = batch['diffusion_actions']
+        batch_size = base_actions.shape[0]
+        key, rng = jax.random.split(key)
+        action_indices = jax.random.randint(rng, shape=(batch_size,), minval=0, maxval=self.N)
+        base_actions = base_actions[jnp.arange(batch_size), action_indices, :, :]
+        base_actions = base_actions.reshape(-1, self.action_dim)
+        
+        # Get vlm output for observations #
+        seed, rng = jax.random.split(rng)
+        vlm_output = batch['vlm_output']
+        # Use JITted version #
+        grads, actor_info = _edit_actor_loss_and_grad(
+            self.edit_actor.params,
+            self.critic.params,
+            self.temp.params,
+            vlm_output,
+            base_actions,
+            dropout_key,
+            key,
+            key2,
+            self.entropy_scale,
+            self.edit_action_scale,
+            self.edit_actor.apply_fn,
+            self.critic.apply_fn,
+            self.temp.apply_fn,
+        )
+
+        actor_info["edit_actor_grad_norm"] = optax.global_norm(grads)
+        edit_actor = self.edit_actor.apply_gradients(grads=grads)
+        actor_info["edit_actor_param_norm"] = optax.global_norm(edit_actor.params)
+
+        return self.replace(edit_actor=edit_actor, rng=rng), actor_info
         
     def update_temperature(self, entropy: float) -> Tuple[Agent, Dict[str, float]]:
         def temperature_loss_fn(temp_params):
@@ -783,48 +733,41 @@ class ExpoPiLearner(Agent):
 
         return self.replace(temp=temp), temp_info
 
-    def update_critic(self, obs, next_obs, batch, *args, **kwargs) -> Tuple[TrainState, Dict[str, float]]:
+    def update_critic(self, batch, *args, **kwargs) -> Tuple[TrainState, Dict[str, float]]:
         seed = kwargs.pop("seed", None)
         timer = kwargs.pop("timer", None)
-        output_only_base_actions = kwargs.pop("output_only_base_actions", False)
-        # infer = kwargs.pop("infer", False)
-        # obs_key = kwargs.pop("obs_key", "observations")
-        # breakpoint()
-        current_state = obs['state'][:, :8] # State dimension
-        next_state = next_obs['state'][:, :8] # State dimension
-
-        obs = _model.Observation.from_dict(obs)
-        next_obs = _model.Observation.from_dict(next_obs)
+        current_state = batch['state']
+        next_state = batch['next_state']
 
         if seed is None:
             rng = self.rng
         else:
-            seed, rng = jax.random.split(seed)
-
-        # Minimal debugging timing setup #
-        timer.tick("sample_batch_actions_time")
-        # next_actions, next_vlm_output = self.target_actor.sample_actions_with_vlm_output(rng, next_obs)
-        # breakpoint()
-        next_actions, next_vlm_output, next_qs_info = self.sample_batch_actions(next_obs, is_target=True, return_first_action=False, timer=timer, output_only_base_actions=output_only_base_actions, seed=rng) # (batch_size, action_horizon, action_dim)
+            key, rng = jax.random.split(seed)
+        
+        batch_size = batch['actions'].shape[0]
+        next_actions = batch['next_diffusion_actions'] # (batch_size, N, action_horizon, action_dim)
+        # Subsample from `N` actions on next state
+        key, rng = jax.random.split(key)
+        action_indices = jax.random.randint(rng, shape=(batch_size,), minval=0, maxval=self.N)
+        next_actions = next_actions[jnp.arange(batch_size), action_indices, :, :]
         next_actions = next_actions.reshape(-1, self.action_dim) # (batch_size, action_horizon * action_dim)
-        timer.tock("sample_batch_actions_time")
+        next_vlm_output = batch['next_vlm_output'] # (batch_size, pi0_hidden_dims)
 
-        # Append state here #
-        next_vlm_output = jnp.concatenate([next_vlm_output, next_state], axis=1) # (batch_size, pi0_hidden_dims + state_dim)
+        # No need to append state here as it is already appended in the batch #
 
-        key, rng = jax.random.split(seed)
-        current_vlm_output = batch['current_vlm_output']
-        # Append state here #
-        current_vlm_output = jnp.concatenate([current_vlm_output, current_state], axis=1) # (batch_size, pi0_hidden_dims + state_dim)
+        key, rng = jax.random.split(key)
+        current_vlm_output = batch['vlm_output']
+        # No need to append state here as it is already appended in the batch #
         actions = batch["actions"].reshape(-1, self.action_dim) # (batch_size, action_horizon * action_dim)
 
         # seed, rng = jax.random.split(rng)
         target_params = subsample_ensemble(
-            key, self.target_critic.params, self.num_min_qs, self.num_qs
+            rng, self.target_critic.params, self.num_min_qs, self.num_qs
         )
         
         next_qs = compute_q(self.target_critic.apply_fn, target_params, next_vlm_output, next_actions) # (batch_size, )
-        target_q = batch["rewards"] + self.discount * batch["masks"] * next_qs # (batch_size, )
+        masks = 1.0 - batch['terminals']
+        target_q = batch["rewards"] + self.discount * masks * next_qs # (batch_size, )
 
         # Use JITted version #
         timer.tick("critic_loss_and_grad_time")
@@ -840,7 +783,6 @@ class ExpoPiLearner(Agent):
             self.q_clip_low,
             self.q_clip_high,
         )
-        info.update(next_qs_info)
 
         info["critic_grad_norm"] = optax.global_norm(grads)
         critic = self.critic.apply_gradients(grads=grads)
@@ -854,196 +796,7 @@ class ExpoPiLearner(Agent):
         info["critic_param_norm"] = optax.global_norm(critic.params)
         info["target_critic_param_norm"] = optax.global_norm(target_critic.params)
 
-        return self.replace(critic=critic, target_critic=target_critic, rng=rng), info
-
-    def update_critic_ws(self, batch, *args, **kwargs) -> Tuple[TrainState, Dict[str, float]]:
-        """
-        Update critic using pre-computed VLM actions from warm-start cache.
-        
-        This function skips the expensive VLM forward pass by using pre-computed
-        actions and VLM outputs from a cached .pkl file. For each state, we have
-        N sampled actions and we randomly sample one to create diversity.
-        
-        Args:
-            batch: Dictionary containing:
-                - current_vlm_outputs: (batch_size, N, vlm_dim) - N VLM outputs for current state
-                - next_vlm_outputs: (batch_size, N, vlm_dim) - N VLM outputs for next state
-                - current_actions: (batch_size, N, action_horizon, action_dim) - N actions for current state
-                - next_actions: (batch_size, N, action_horizon, action_dim) - N actions for next state
-                - current_states: (batch_size, 8) - Current state (8D)
-                - next_states: (batch_size, 8) - Next state (8D)
-                - rewards: (batch_size,) - Rewards
-                - masks: (batch_size,) - Masks for bootstrapping (1 - done)
-                - actions: (batch_size, action_horizon, action_dim) - Ground truth actions (not used)
-        
-        Returns:
-            Updated agent and info dict with training metrics
-        """
-        seed = kwargs.pop("seed", None)
-        timer = kwargs.pop("timer", None)
-        
-        if seed is None:
-            rng = self.rng
-        else:
-            seed, rng = jax.random.split(seed)
-        
-        # Extract batch data
-        # current_vlm_outputs: (batch_size, N, vlm_dim)
-        # next_vlm_outputs: (batch_size, N, vlm_dim)
-        # current_actions: (batch_size, N, action_horizon, action_dim)
-        # next_actions: (batch_size, N, action_horizon, action_dim)
-        current_vlm_outputs_all = batch['current_vlm_outputs']  # (batch_size, N, vlm_dim)
-        next_vlm_outputs_all = batch['next_vlm_outputs']  # (batch_size, N, vlm_dim)
-        current_actions_all = batch['current_actions']  # (batch_size, N, action_horizon, action_dim)
-        next_actions_all = batch['next_actions_sampled']  # (batch_size, N, action_horizon, action_dim)
-        current_states = batch['current_states']  # (batch_size, 8)
-        next_states = batch['next_states']  # (batch_size, 8)
-        rewards = batch['rewards']  # (batch_size,)
-        # masks = batch['masks']  # (batch_size,)
-        # masks = 1.0 - jnp.logical_or(batch['terminals'], batch['truncates']).astype(jnp.float32)
-        masks = 1.0 - batch['terminals']
-
-        # if bool(masks.sum() != len(masks)):
-        #     breakpoint()
-        
-        batch_size = current_actions_all.shape[0]
-        N = next_actions_all.shape[1]  # Number of sampled actions
-        
-        # Randomly sample one action from N sampled actions for each batch element
-        # This creates diversity while using pre-computed VLM outputs
-        timer.tick("sample_action_indices")
-        key, rng = jax.random.split(rng)
-        # Sample indices: (batch_size,) with values in [0, N)
-        action_indices = jax.random.randint(key, shape=(batch_size,), minval=0, maxval=N)
-        # breakpoint()
-        timer.tock("sample_action_indices")
-        
-        # Gather the selected actions and VLM outputs
-        # Use jnp.take_along_axis or advanced indexing
-        timer.tick("gather_selected_actions")
-        # Create batch indices: [0, 1, 2, ..., batch_size-1]
-        batch_indices = jnp.arange(batch_size)
-        
-        # Select current VLM outputs: (batch_size, vlm_dim)
-        current_vlm_outputs = current_vlm_outputs_all[batch_indices, :]
-        
-        # Select next VLM outputs: (batch_size, vlm_dim)
-        next_vlm_outputs = next_vlm_outputs_all[batch_indices, :]
-        
-        # Select next actions: (batch_size, action_horizon, action_dim)
-        next_actions_sampled = next_actions_all[batch_indices, action_indices, :, :].reshape(batch_size, self.action_dim)
-        batch_ns = batch['next_actions'].reshape(batch_size, self.action_dim)
-        mask = jnp.all(jnp.isclose(batch_ns, 0.0), axis=1)
-
-        # breakpoint()
-
-        # next_actions = jnp.where(mask[:, None], next_actions_sampled, batch_ns)  # (N, action_dim)
-        next_actions = batch_ns
-        next_actions = next_actions.reshape(batch_size, self.action_horizon, self.action_dim // self.action_horizon)
-        
-        # TODO: Remove after debugging #
-        # masks = masks * (1.0 - mask)
-
-
-        # Select current actions: (batch_size, action_horizon, action_dim)
-        # current_actions = current_actions_all[batch_indices, 0, :, :]
-        current_actions = batch['actions'][batch_indices, :, :]
-        timer.tock("gather_selected_actions")
-        
-        # Append states to VLM outputs (similar to update_critic)
-        timer.tick("concatenate_states")
-        # current_vlm_outputs: (batch_size, vlm_dim + 8)
-        current_vlm_outputs_with_state = jnp.concatenate([current_vlm_outputs, current_states], axis=1)
-        # next_vlm_outputs: (batch_size, vlm_dim + 8)
-        next_vlm_outputs_with_state = jnp.concatenate([next_vlm_outputs, next_states], axis=1)
-        timer.tock("concatenate_states")
-        
-        # Reshape actions to match critic input format
-        # From (batch_size, action_horizon, action_dim) to (batch_size, action_horizon * action_dim)
-        timer.tick("reshape_actions")
-        current_actions_flat = current_actions.reshape(batch_size, -1)  # (batch_size, action_horizon * action_dim)
-        next_actions_flat = next_actions.reshape(batch_size, -1)  # (batch_size, action_horizon * action_dim)
-        timer.tock("reshape_actions")
-        
-        # Compute target Q values using next VLM outputs and next actions
-        timer.tick("compute_target_q")
-        key, rng = jax.random.split(rng)
-        target_params = subsample_ensemble(
-            key, self.target_critic.params, self.num_min_qs, self.num_qs
-        )
-        # target_params = self.target_critic.params
-
-        next_qs_all = compute_q_all(self.target_critic.apply_fn, target_params, next_vlm_outputs_with_state, next_actions_flat)
-        # breakpoint()
-        
-        # next_qs: (batch_size,)
-        # next_qs = compute_q(self.target_critic.apply_fn, target_params, next_vlm_outputs_with_state, next_actions_flat)
-        # next_qs = next_qs_all.min(axis=0)
-        next_qs = next_qs_all.mean(axis=0)
-        # next_qs = next_qs_all[0]
-        
-        # target_q: (batch_size,)
-        target_q = rewards + self.discount * masks * next_qs
-
-        # breakpoint()
-        mc_target = batch['mc_returns']
-
-        target_q = target_q.reshape(1, -1)
-        mc_target = mc_target.reshape(1, -1)
-        # target_q = batch["mc_returns"]
-        timer.tock("compute_target_q")
-        
-        # Update critic using current VLM outputs and current actions
-        timer.tick("critic_loss_and_grad_time")
-        key, rng = jax.random.split(rng)
-        grads, info = _critic_loss_and_grad(
-            self.critic.params,
-            current_vlm_outputs_with_state,  # (batch_size, vlm_dim + 8)
-            current_actions_flat,  # (batch_size, action_horizon * action_dim)
-            target_q,  # (batch_size,)
-            mc_target,
-            key,
-            self.critic.apply_fn,
-            self.q_clip_low,
-            self.q_clip_high,
-        )
-
-        # ---- norms ----
-        # grads_clipped, _ = self.critic.tx.update(grads, self.critic.opt_state, self.critic.params)
-        info["critic_grad_norm"] = optax.global_norm(grads)
-        
-        # Add additional metrics
-        info.update({"next_qs_mean": next_qs.mean()})
-        info.update({"next_qs_std": next_qs.std()})
-        info.update({"next_qs_max": next_qs.max()})
-        info.update({"next_qs_min": next_qs.min()})
-        
-        # Apply gradients
-        critic = self.critic.apply_gradients(grads=grads)
-        timer.tock("critic_loss_and_grad_time")
-        
-        # Update target critic with exponential moving average
-        timer.tick("update_target_critic")
-        target_critic_params = optax.incremental_update(
-            critic.params, self.target_critic.params, self.tau
-        )
-        target_critic = self.target_critic.replace(params=target_critic_params)
-        timer.tock("update_target_critic")
-
-        # log param norms AFTER update (common choice)
-        info["critic_param_norm"]        = optax.global_norm(critic.params)
-        info["target_critic_param_norm"] = optax.global_norm(target_critic.params)
-        info["next_actions_mask_mean"] = mask.mean()
-        info["next_actions_mask_max"] = mask.max()
-        info["next_actions_mask_min"] = mask.min()
-
-        # ---- per-head next-Q logging ----
-        # (works even if num_min_qs != 2)
-        for i in range(next_qs_all.shape[0]):
-            info[f"next_q{i+1}_mean"] = next_qs_all[i].mean()
-            info[f"next_q{i+1}_std"]  = next_qs_all[i].std()
-        
-        return self.replace(critic=critic, target_critic=target_critic, rng=rng), info
+        return self.replace(critic=critic, target_critic=target_critic, rng=key), info
 
     def preproess_batch(self, batch: Batch, *args, **kwargs) -> Batch:
         action_dim = self.action_dim // self.action_horizon
@@ -1061,61 +814,43 @@ class ExpoPiLearner(Agent):
     def update(self, _observations: Data, utd_ratio: int, *args, **kwargs):
         timer = kwargs.pop("timer", None)
         update_only_critic = kwargs.pop("update_only_critic", False) # For warmstarting critic before starting online training #
-        output_only_base_actions = kwargs.pop("output_only_base_actions", False)
 
         new_agent = self
         # breakpoint()
         timer.tick("total_update_time")
         timer.tick("update_critic_time")
 
-        
-        # We preprocess an entire batch to improve update inference latency #
-        # Make a copy of the original observations #
-        original_observations = copy.deepcopy(_observations)
-
         # Preprocess batch at once to save computation #
         batch = self.preproess_batch(_observations.copy())
+        # Normalize state and actions #
         # Observations #
         observations = self.actor.convert_to_openpi_format_infer(batch, obs_key="observations")
         obs = self.actor.input_data_transforms(observations)
         next_observations = self.actor.convert_to_openpi_format_infer(batch, obs_key="next_observations")
         next_obs = self.actor.input_data_transforms(next_observations)
-        # breakpoint()
         # Filter batch to only keep relevant information #
-        relevant_keys = ["actions", "rewards", "masks", "mc_returns"]
+        relevant_keys = [
+            "actions", "rewards", "masks", "mc_returns", 
+            "terminals", "truncates", "vlm_output", "next_vlm_output", "diffusion_actions", "next_diffusion_actions",
+        ]
         batch = {k: v for k, v in batch.items() if k in relevant_keys}
         batch['state'] = obs['state'][:, :8].copy()
         batch['next_state'] = next_obs['state'][:, :8].copy()
 
-        # Define and compute some cache variables to save computation #
-        _obs = _model.Observation.from_dict(obs)
         seed = kwargs.pop("seed", None)
         if seed is None:
             seed = self.rng
         seed, rng = jax.random.split(seed)
-        current_vlm_output, _ = self.actor.get_vlm_output(rng, _obs)
-        current_vlm_output = jnp.mean(current_vlm_output[0][:, :512, :], axis=1)
-        batch['current_vlm_output'] = current_vlm_output
-        ##########################################################################################
-
-        # breakpoint()
 
         for i in range(utd_ratio):
-            # breakpoint()
-
             def slice(x):
                 assert x.shape[0] % utd_ratio == 0
                 batch_size = x.shape[0] // utd_ratio
                 return x[batch_size * i : batch_size * (i + 1)]
 
-            # mini_batch = jax.tree_util.tree_map(slice, _observations)
-            mini_batch_obs = jax.tree_util.tree_map(slice, obs)
-            mini_batch_next_obs = jax.tree_util.tree_map(slice, next_obs)
             mini_batch = jax.tree_util.tree_map(slice, batch)
-            mini_batch_original_obs = jax.tree_util.tree_map(slice, original_observations)
-            # breakpoint()
             seed, rng = jax.random.split(seed)
-            new_agent, critic_info = new_agent.update_critic(mini_batch_obs, mini_batch_next_obs, mini_batch, infer=True, obs_key="next_observations", timer=timer, seed=seed, output_only_base_actions=output_only_base_actions)
+            new_agent, critic_info = new_agent.update_critic(mini_batch, timer=timer, seed=rng)
             critic_info = append_substr_to_dict_keys(critic_info, "critic")
         timer.tock("update_critic_time")
         # breakpoint()
@@ -1133,7 +868,8 @@ class ExpoPiLearner(Agent):
 
         timer.tick("update_edit_actor_time")
         if self.n_edit_samples > 0:
-            new_agent, actor_info = new_agent.update_edit_actor(mini_batch)
+            seed, rng = jax.random.split(seed)
+            new_agent, actor_info = new_agent.update_edit_actor(mini_batch, seed=rng)
             entropy = actor_info["entropy"]
             actor_info = append_substr_to_dict_keys(actor_info, "edit_actor")
             # breakpoint()

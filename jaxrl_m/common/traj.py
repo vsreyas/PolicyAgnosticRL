@@ -26,6 +26,7 @@ class TrajSampler(object):
     def sample(
         self,
         policy_fn,
+        vlm_output_fn,
         num_episodes,
         replay_buffer=None,
         goal_relabel_fn: Optional[callable] = None,
@@ -70,19 +71,20 @@ class TrajSampler(object):
             curr_episode_q_vs_mc_returns_vals = []
             while not done and step < self.max_traj_length:
                 observation_storing = copy.deepcopy(observation)
-                # if goal_relabel_fn is not None:
-                #     action = policy_fn(observation, info["goal"])
-                # else:
-                #     action = policy_fn(observation)
+
+                # current_vlm_output = vlm_output_fn(observation)
+                # out_dict = {
+                #     "vlm_output": current_vlm_output,
+                # }
+                
                 if current_action_sequence is None or current_action_index >= half_H:
                     if goal_relabel_fn is not None:
                         current_action_sequence = policy_fn(observation, info.get("goal"))
                     else:
-                        try:
-                            current_action_sequence, current_vlm_output = policy_fn(observation)
-                        except Exception as e:
-                            print(f"Error in policy_fn: {e}")
-                            current_action_sequence = policy_fn(observation)
+                        # try:
+                        out_dict = policy_fn(observation)
+                        current_action_sequence = out_dict["actions"]
+                        current_vlm_output = out_dict["vlm_output"]
 
                     # Normalize shapes:
                     if isinstance(current_action_sequence, np.ndarray):
@@ -126,15 +128,33 @@ class TrajSampler(object):
                 else:
                     assert len(step_variables) == 4
                     next_observation, r, done, info = step_variables
+                
+                if done:
+                    terminals = len(trajectory['rewards']) < self._env.max_steps
+                    truncates = not terminals
+
+                    out_dict_final_observation = policy_fn(next_observation)
+                else:
+                    terminals = False
+                    truncates = False
+                
                 transition = dict(
                     observations=observation_storing,
                     next_observations=next_observation,
                     actions=np.clip(action, -self.clip_action, self.clip_action),
                     rewards=r * self.reward_scale + self.reward_bias,
-                    terminals=done,
-                    truncates=done,
-                    masks=1.0 - done,
+                    terminals=terminals,
+                    truncates=truncates,
+                    masks=1.0 - terminals, # Bootstrap to next state in truncates case
                 )
+
+                if 'actions' in out_dict:
+                    out_dict.pop('actions')
+                
+                # Add out_dict keys to transition #
+                for key in out_dict.keys():
+                    transition[key] = out_dict[key]
+
                 add_to(trajectory, transition)
 
                 # terminate on success
@@ -181,7 +201,12 @@ class TrajSampler(object):
 
                     replay_buffer.insert(transition)
 
+            if 'vlm_output' in out_dict_final_observation:
+                trajectory['vlm_output'].append(out_dict_final_observation['vlm_output'])
+                trajectory['diffusion_actions'].append(out_dict_final_observation['diffusion_actions'])
+
             trajectories.append(trajectory)
+            # breakpoint()
             
             if len(curr_episode_q_vs_mc_returns_vals) > 0:
                 q_vs_mc_returns_vals.append(curr_episode_q_vs_mc_returns_vals)

@@ -516,7 +516,10 @@ def evaluate_with_trajectories_libero(
             # breakpoint()
             # try:
             # breakpoint()
-            current_action_sequence, current_vlm_output = policy_fn(observations)
+            out_dict = policy_fn(observations)
+            current_action_sequence = out_dict['actions']
+            current_vlm_output = out_dict['vlm_output']
+            
             # state = observations['proprio'][:, :8] # State dimension
             # breakpoint()
             curr_episode_q_vs_mc_returns_vals.append((current_vlm_output, current_action_sequence))
