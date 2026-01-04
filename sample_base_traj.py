@@ -58,7 +58,7 @@ from jaxrl_m.utils.timer_utils import Timer
 from jaxrl_m.utils.train_utils import concatenate_batches, load_recorded_video
 from jaxrl_m.vision import encoders
 from jaxrl_m.utils.train_utils import preprocess_action, repack_action
-from jaxrl_m.agents.continuous.expo_pi import ExpoPiLearner, compute_q, compute_q_all
+from jaxrl_m.agents.continuous.expo_pi import ExpoPiLearner, ExpoPiLearnerCache, compute_q, compute_q_all
 from jaxrl_m.utils.expo_utils import calc_mc_return_fn
 
 try:
@@ -498,7 +498,8 @@ def train_agent(_):
         reward_scale=FLAGS.reward_scale,
         reward_bias=FLAGS.reward_bias,
         max_traj_length=FLAGS.config.get("max_episode_steps", 1000),
-        action_horizon=pi_config.model.action_horizon,
+        # action_horizon=pi_config.model.action_horizon,
+        action_horizon=1,
     )
 
     ### Create EXPO agent #
@@ -510,7 +511,7 @@ def train_agent(_):
     else:
         critic_params = None
     
-    agent = ExpoPiLearner.create(
+    agent = ExpoPiLearnerCache.create(
         config=pi_config,
         seed=FLAGS.seed,
         observations=example_batch,
@@ -531,7 +532,7 @@ def train_agent(_):
 
 
     # TODO: Remove hardcode and init with flags appropriately #
-    num_trajectories_to_collect = 75
+    num_trajectories_to_collect = 30
     online_env_steps = 0
     online_trajectories_added = 0
     online_env_steps_this_epoch = 0

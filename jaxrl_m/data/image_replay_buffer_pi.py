@@ -203,6 +203,8 @@ class ImageReplayBufferPi:
         final_step_sparse_reward: bool = True, # Keeps only the last step of the trajectory for reward computation
         discount: float = 0.99,
         filter_successful_trajectories: bool = False,
+        filter_last_ah_timesteps: bool = True,
+        use_reverse_data_paths:bool = False,
     ):
         self.goal_relabeling_strategy = goal_relabeling_strategy
         self.goal_relabeling_kwargs = goal_relabeling_kwargs
@@ -237,7 +239,8 @@ class ImageReplayBufferPi:
         self.final_step_sparse_reward = final_step_sparse_reward
         self.discount = discount
         self.filter_successful_trajectories = filter_successful_trajectories
-        
+        self.filter_last_ah_timesteps = filter_last_ah_timesteps
+        self.use_reverse_data_paths = use_reverse_data_paths
         dataset = self._construct_tf_dataset(data_paths, seed)
 
         self.train = train
@@ -275,9 +278,12 @@ class ImageReplayBufferPi:
         # )
 
         data_paths = sorted(data_paths)
+        if self.use_reverse_data_paths:
+            data_paths = data_paths[::-1]
+        
         files = tf.data.Dataset.from_tensor_slices(data_paths)
         
-        if self.is_train:
+        if self.is_train and not self.use_reverse_data_paths:
             files = files.shuffle(
                 len(data_paths), seed=seed, reshuffle_each_iteration=True
             )
@@ -969,25 +975,36 @@ class ImageReplayBufferPi:
         # breakpoint()
         out.pop("prompt")
 
-        # breakpoint()
-        # print_tensor_tree("OUT", out)
+        # Filter out last `ah` timesteps in all data and keep only `terminal` timestep if it is present #
+        if self.filter_last_ah_timesteps:
+            out = self._filter_last_ah_timesteps(out)
+        
         return out
-    # {
-    #     'image': obs_images,
-    #     'next_image': next_images,
-    #     'state': obs_state,
-    #     'next_state': next_state,
-    #     'image_mask': obs_images_mask,
-    #     'next_image_mask': obs_next_images_mask,
-    #     'actions': actions_window,
-    #     'tokenized_prompt': tf.gather(out["tokenized_prompt"], start_idx),
-    #     'tokenized_prompt_mask': tf.gather(out["tokenized_prompt_mask"], start_idx),
-    #     'token_ar_mask': tf.gather(out['token_ar_mask'], start_idx),
-    #     'token_loss_mask': tf.gather(out['token_loss_mask'], start_idx),
-    #     'prompt': tf.gather(out['prompt'], start_idx),
-    #     "terminals": terminals,
-    #     "truncates": truncates,
-    #      }
+    
+    def _filter_last_ah_timesteps(self, out):
+        # dynamic sizes (works in tf.data graph)
+        W  = tf.shape(out["actions"])[0]        # num windows
+        ah = tf.shape(out["actions"])[1]        # action horizon
+
+        # keep indices: [0, 1, ..., W-ah-1]
+        n_base = tf.maximum(W - ah, 0)
+        idx = tf.range(W)
+
+        # terminal at the *last* window?
+        is_terminal_last = tf.greater(out["terminals"][-1], 0.5)  # scalar bool
+
+        keep_base = idx < n_base
+        keep_last = tf.logical_and(is_terminal_last, idx == (W - 1))
+        keep = tf.logical_or(keep_base, keep_last)
+
+        keep_idx = tf.where(keep)[:, 0]  # shape [K]
+
+        # gather every leaf along axis=0 using the same indices
+        def gather0(x):
+            return tf.gather(x, keep_idx)  # indices can be int32; tf.gather supports this :contentReference[oaicite:2]{index=2}
+
+        # out is a nested dict; tf.nest can traverse it
+        return tf.nest.map_structure(gather0, out)
  
     def iterator(self, batch_size, training=True):
 

@@ -311,7 +311,7 @@ def load_vlm_cache(cache_path: str) -> Dict:
     with open(cache_path, 'rb') as f:
         cache = pickle.load(f)
     
-    cache = filter_cache(cache)
+    # cache = filter_cache(cache)
     # breakpoint()
     
     # Normalize inputs #
