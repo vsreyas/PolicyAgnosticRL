@@ -503,7 +503,109 @@ class PiPolicy(BasePolicy):
         )
         return compiled
     
-    def sample_actions_with_vlm_output(self, rng: PRNGKey, observation: _model.Observation,
+    def sample_actions_with_vlm_output(self, rng: PRNGKey, _observations,
+        repeat=1, cache_dir=None, timer=None, argmax=False, 
+        processed_obs=False, normalized=False, return_obs= False, obs_key: str | None = None, infer=True,
+        params: Optional[at.Params] = None,
+    ):
+        # batch_size = observation.state.shape[0]
+        with sharding.set_mesh(self.mesh):
+            # batch_size = 1
+
+            # if timer is not None:
+            #     timer.tick("processing_time")
+
+            if not processed_obs:
+                # breakpoint()
+                # if infer:
+                #     observations = self.convert_to_openpi_format_infer(_observations)
+                # else:
+                #     observations = self.convert_to_openpi_format(_observations, obs_key=obs_key)
+                # # breakpoint()
+                # obs = self.input_data_transforms(observations)
+                if infer:
+                    observations = self.convert_to_openpi_format_infer(_observations, obs_key=obs_key)
+
+                    # 2) Apply the same input transforms as sample_actions
+                    obs = self.input_data_transforms(observations)
+
+                    # 3) Wrap into OpenPI Observation (still NumPy here is fine;
+                    #    preprocess_observation inside the JIT will turn them into jax.Arrays)
+                    # obs_ = _model.Observation.from_dict(obs)
+
+                    # 4) Key JIT cache by batch size (same pattern as _infer_cache)
+                    #    choose any reliable field to read batch size from:
+                    # batch_size = obs_.tokenized_prompt.shape[0]
+                    batch_size = obs['state'].shape[0]
+                else:
+                    observations = self.convert_to_openpi_format(_observations, obs_key=obs_key)
+
+                    obs = (_model.Observation.from_dict(observations), observations["actions"])
+
+                    batch_size = observations['actions'].shape[0]
+
+
+            else:
+                obs = _observations
+            
+            # if timer is not None:
+            #     timer.tock("processing_time")
+
+            # if timer is not None:
+            #     timer.tick("repeat_tree_time")
+
+            if repeat > 1:
+                obs = repeat_tree(obs, repeat)
+                obs = flatten_repeat(obs)  
+            outputs = {
+                "state": obs["state"],
+                }
+            
+            # if timer is not None:
+            #     timer.tock("repeat_tree_time")
+            
+            obs_ = _model.Observation.from_dict(obs)
+        
+            if batch_size not in self.sample_actions_with_vlm_output_cache:
+                self.sample_actions_with_vlm_output_cache[batch_size] = self._build_sample_actions_with_vlm_output_jit()
+            
+            forward_fn = self.sample_actions_with_vlm_output_cache[batch_size]
+
+            # if repeat > 1:
+            #     obs = repeat_tree(obs, repeat)
+            #     obs = flatten_repeat(obs)  
+            # outputs = {
+            #     "state": observation.state,
+            # }
+
+            # timer.tick("forward_fn_time")
+            params = self.train_state.params
+            actions, vlm_output = forward_fn(params, rng, obs_)
+            # timer.tock("forward_fn_time")
+
+            outputs["actions"] = actions # (batch_size, action_horizon, 32)
+            # breakpoint()
+            # outputs = jax.tree.map(lambda x: np.asarray(x), outputs)
+
+            # NOTE: The output_data_transforms handles the 32 -> 7 conversion of actions #
+            # timer.tick("output_data_transforms_time")
+            if normalized:
+                outputs = self.output_data_transforms_without_unnorm(outputs)
+            else:
+                outputs = self.output_data_transforms(outputs)
+            # timer.tock("output_data_transforms_time")
+
+            if repeat > 1:
+                outputs = unflatten_repeat(outputs,repeat)
+
+            if outputs['actions'].shape[0] == 1 and repeat==1:
+                outputs['actions'] = outputs['actions'][0]
+            
+            # breakpoint()
+            
+            return outputs['actions'], vlm_output, obs
+    
+    def sample_actions_with_vlm_output_for_critic_ws(self, rng: PRNGKey, observation: _model.Observation,
         repeat=1, cache_dir=None, timer=None, argmax=False, 
         processed_obs=False, normalized=False, return_obs= False, obs_key: str | None = None, infer=True,
         params: Optional[at.Params] = None,

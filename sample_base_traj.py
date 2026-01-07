@@ -58,7 +58,8 @@ from jaxrl_m.utils.timer_utils import Timer
 from jaxrl_m.utils.train_utils import concatenate_batches, load_recorded_video
 from jaxrl_m.vision import encoders
 from jaxrl_m.utils.train_utils import preprocess_action, repack_action
-from jaxrl_m.agents.continuous.expo_pi import ExpoPiLearner, ExpoPiLearnerCache, compute_q, compute_q_all
+from jaxrl_m.agents.continuous.expo_pi import ExpoPiLearner, compute_q, compute_q_all
+from jaxrl_m.agents.continuous.expo_pi_cache import ExpoPiLearnerCache
 from jaxrl_m.utils.expo_utils import calc_mc_return_fn
 
 try:
