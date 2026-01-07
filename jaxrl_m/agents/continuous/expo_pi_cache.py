@@ -303,7 +303,7 @@ class ExpoPiLearnerCache(Agent):
         batch_split: int = 1, 
         M: int = 0,
         n_edit_samples: int = 4, 
-        edit_action_scale: float = 0.2, 
+        edit_action_scale: float = 1.0,
         actor_layer_norm: bool = True,
         clip_sampler: bool = True,
         decay_steps: Optional[int] = int(3e6),
@@ -592,12 +592,17 @@ class ExpoPiLearnerCache(Agent):
         diffusion_actions = actions.copy() # (1, action_horizon, action_dim)
 
         # Do a forward pass to get VLM output #
-        seed, rng = jax.random.split(rng)
+        seed, rng = jax.random.split(seed)
         if not is_target:
             vlm_output, _, processed_obs = self.actor.get_vlm_output(rng, _observations, processed_obs=False, infer=True, return_processed_obs=True)
         else:
             vlm_output, _, processed_obs = self.target_actor.get_vlm_output(rng, _observations, processed_obs=False, infer=True, return_processed_obs=True)
 
+        # _model.Observation.from_dict(observations)
+        # actions, vlm_output, processed_obs = self.actor.sample_actions_with_vlm_output(seed, observations)
+        # diffusion_actions = actions.copy() # (1, action_horizon, action_dim)
+        
+        
         # Take mean across tokens as representation from VLM #
         vlm_output = jnp.mean(vlm_output[0][:, :512, :], axis=1) # (1, pi0_hidden_dims)
         state = processed_obs['state'][0, :8][None, :8] # State dimension
@@ -607,13 +612,13 @@ class ExpoPiLearnerCache(Agent):
         # This is done so that without any code modification, edit_actor outputs an action chunk #
         # TODO: Think of a better design #
         # if self.N > 1:
-        key, rng = jax.random.split(rng)
+        seed, rng = jax.random.split(seed)
         # target_params = subsample_ensemble(
         #     key, self.target_critic.params, self.num_min_qs, self.num_qs
         # )
         actions = actions.reshape(1, self.action_dim)
         r_observations = jnp.concatenate([vlm_output, actions], axis=1) # (1, pi0_hidden_dims + action_horizon * action_dim)
-        r_samples, rng =  _sample_actions(key, self.edit_actor.apply_fn, self.edit_actor.params, r_observations) # (n_edit_samples, action_horizon * action_dim)
+        r_samples, rng =  _sample_actions(seed, self.edit_actor.apply_fn, self.edit_actor.params, r_observations) # (n_edit_samples, action_horizon * action_dim)
         r_samples = r_samples * self.edit_action_scale + actions
         actions = r_samples
         action = actions.reshape(1, self.action_horizon, self.action_dim // self.action_horizon)
@@ -743,20 +748,27 @@ class ExpoPiLearnerCache(Agent):
         key, rng = jax.random.split(seed)
         
         batch_size = batch['actions'].shape[0]
-        # next_actions = batch['next_diffusion_actions'] # (batch_size, N, action_horizon, action_dim)
-        next_actions = batch['next_actions'] # (batch_size, action_horizon, action_dim)
-        next_actions = next_actions.reshape(-1, self.action_dim) # (batch_size, action_horizon * action_dim)
+        # next_actions = batch['next_actions'] # (batch_size, action_horizon, action_dim)
+
+        # Sample next_actions by sampling from current edit policy #
+        next_base_actions = batch['next_diffusion_actions']
+        next_vlm_output = batch['next_vlm_output'] # (batch_size, pi0_hidden_dims)
+        next_base_actions = next_base_actions.reshape(-1, self.action_dim)
+        r_observations = jnp.concatenate([next_vlm_output, next_base_actions], axis=1) # (1, pi0_hidden_dims + action_horizon * action_dim)
+        r_samples, _ =  _sample_actions(rng, self.edit_actor.apply_fn, self.edit_actor.params, r_observations) # (n_edit_samples, action_horizon * action_dim)
+        next_actions = r_samples * self.edit_action_scale + next_base_actions
+        # next_actions = next_actions.reshape(1, self.action_horizon, self.action_dim // self.action_horizon)
+        # next_actions = next_actions.reshape(-1, self.action_dim) # (batch_size, action_horizon * action_dim)
 
         # Subsample from `N` actions on next state
-        key, rng = jax.random.split(key)
+        # key, rng = jax.random.split(key)
         # action_indices = jax.random.randint(rng, shape=(batch_size,), minval=0, maxval=self.N)
         # next_actions = next_actions[jnp.arange(batch_size), action_indices, :, :]
         # next_actions = next_actions.reshape(-1, self.action_dim) # (batch_size, action_horizon * action_dim)
-        next_vlm_output = batch['next_vlm_output'] # (batch_size, pi0_hidden_dims)
 
         # No need to append state here as it is already appended in the batch #
 
-        key, rng = jax.random.split(key)
+        # key, rng = jax.random.split(key)
         current_vlm_output = batch['vlm_output']
         # No need to append state here as it is already appended in the batch #
         actions = batch["actions"].reshape(-1, self.action_dim) # (batch_size, action_horizon * action_dim)
@@ -779,7 +791,7 @@ class ExpoPiLearnerCache(Agent):
             actions,
             target_q,
             batch["mc_returns"],
-            key,
+            rng,
             self.critic.apply_fn,
             self.q_clip_low,
             self.q_clip_high,

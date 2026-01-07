@@ -461,7 +461,7 @@ class ExpoPiLearner(Agent):
             actor_to_sample = self.target_actor
         # breakpoint()
         timer.tick("sample_actions_with_vlm_output_time")
-        pi0_actions, vlm_output = actor_to_sample.sample_actions_with_vlm_output(rng, observations_repeated, timer=timer) # (batch_size * N, action_horizon, action_dim)
+        pi0_actions, vlm_output = actor_to_sample.sample_actions_with_vlm_output_for_critic_ws(rng, observations_repeated, timer=timer) # (batch_size * N, action_horizon, action_dim)
         timer.tock("sample_actions_with_vlm_output_time")
         # breakpoint()
         vlm_output = jnp.mean(vlm_output[0][:, :512, :], axis=1) # Take mean representation across tokens, (batch_size * N, pi0_hidden_dims) #

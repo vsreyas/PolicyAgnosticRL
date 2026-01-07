@@ -15,6 +15,7 @@ import tensorflow as tf
 import io
 from PIL import Image
 import pickle
+import gc
 
 import wandb
 from absl import app, flags, logging
@@ -502,7 +503,7 @@ def train_agent(_):
         clip_action=FLAGS.clip_action,
         reward_scale=FLAGS.reward_scale,
         reward_bias=FLAGS.reward_bias,
-        max_traj_length=FLAGS.config.get("max_episode_steps", 1000),
+        max_traj_length=FLAGS.config.get("max_episode_steps", 502),
         # action_horizon=pi_config.model.action_horizon,
         action_horizon=1,
     )
@@ -543,7 +544,7 @@ def train_agent(_):
 
 
     # TODO: Remove hardcode and init with flags appropriately #
-    num_trajectories_to_collect = 5
+    num_trajectories_to_collect = 3
     online_env_steps = 0
     online_trajectories_added = 0
     online_env_steps_this_epoch = 0
@@ -584,9 +585,7 @@ def train_agent(_):
                         replay_buffer=state_replay_buffer,
                         calc_mc_return_fn=functools.partial(calc_mc_return_fn, discount=FLAGS.config.agent_kwargs.discount, reward_bias=FLAGS.reward_bias),
                         store_max_trajectory_reward=True,
-                        terminate_on_success=FLAGS.config.get(
-                            "early_terminate_on_success", False
-                        ),
+                        terminate_on_success=False,
                     )
                     traj = trajs[0]
                     # breakpoint()
@@ -647,6 +646,13 @@ def train_agent(_):
                     tf.io.gfile.join(save_dir, "image_replay_buffer", "*.tfrecord")
                 )
                 #########################
+                
+                # Do some cleanups to avoid hangs #
+                online_train_iterator = None
+                image_replay_buffer = None
+                import gc; gc.collect()
+
+                #########################################################
                 # breakpoint()
                 image_replay_buffer = ImageReplayBufferPi(
                     data_paths=data_paths,

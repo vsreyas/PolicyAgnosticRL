@@ -53,6 +53,7 @@ class TrajSampler(object):
 
         for _ in range(num_episodes):
             trajectory = defaultdict(list)
+            print("Starting new trajectory")
             reset_variables = self._env.reset()
             if isinstance(reset_variables, np.ndarray) or isinstance(
                 reset_variables, dict
@@ -70,6 +71,10 @@ class TrajSampler(object):
             current_vlm_output = None
             curr_episode_q_vs_mc_returns_vals = []
             while not done and step < self.max_traj_length:
+                print(f"Step {step}")
+                print(f"Done: {done}")
+                print(f"Max traj length: {self.max_traj_length}")
+                
                 observation_storing = copy.deepcopy(observation)
 
                 # current_vlm_output = vlm_output_fn(observation)
