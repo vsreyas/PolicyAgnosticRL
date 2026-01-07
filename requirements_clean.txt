@@ -1,0 +1,94 @@
+# Clean requirements file with verified working versions
+# Generated from successful installation on 2026-01-07
+# Python 3.11.14
+
+# Core JAX/ML stack - IMPORTANT: These specific versions are compatible
+jax==0.4.20
+jaxlib==0.4.20
+flax==0.8.0
+numpy==1.26.4
+scipy==1.12.0
+
+# JAX ecosystem
+distrax==0.1.5
+chex==0.1.86
+optax==0.2.2
+orbax-checkpoint==0.5.16
+ml_collections==1.1.0
+ml_dtypes==0.5.4
+
+# TensorFlow stack
+tensorflow==2.18.1
+tensorflow-probability==0.25.0
+tf_keras==2.18.0
+keras==3.13.0
+
+# PyTorch (installed as dependency)
+torch==2.9.1
+torchvision==0.24.1
+triton==3.5.1
+
+# RL environments
+gym==0.23.1
+dm_control==1.0.20
+mujoco==3.1.6
+robosuite==1.4.1
+bddl==3.6.0
+
+# Robotics (Note: egl-probe requires manual patching - see installation notes)
+robomimic==0.2.0
+psutil==7.2.1
+tensorboardX==2.6.4
+
+# D4RL (Note: requires MuJoCo 210 binary installed separately)
+git+https://github.com/maxsobolmark/D4RL@9ed99e908619faae153c679739e4ace8f0dcf4dd
+
+# Deep learning utilities
+einops==0.8.1
+transformers==4.57.3
+tokenizers==0.22.2
+safetensors==0.7.0
+huggingface-hub==0.36.0
+
+# Vision models
+git+https://github.com/openai/CLIP.git@dcba3cb2e2827b402d2701e7e1c7d9fed8a20ef1
+
+# Visualization and logging
+wandb==0.21.4
+plotly==6.5.0
+matplotlib==3.10.8
+seaborn==0.13.2
+tensorboard==2.18.0
+
+# Image/Video processing
+ImageIO==2.37.2
+imageio-ffmpeg==0.6.0
+moviepy==2.2.1
+opencv-python==4.12.0.88
+pillow==11.3.0
+
+# Configuration and utilities
+omegaconf==2.3.0
+hydra-core==1.3.2
+easydict==1.13
+overrides==7.7.0
+tqdm==4.67.1
+cloudpickle==3.1.2
+pyyaml==6.0.3
+
+# Development tools
+pre-commit==3.3.3
+cython==0.29.37
+patchelf==0.17.2.4
+
+# System utilities
+absl-py==2.3.1
+packaging==25.0
+requests==2.32.5
+click==8.3.1
+python-dotenv==1.2.1
+
+# Additional dependencies
+thop==0.1.1.post2209072238
+pandas==2.3.3
+pybullet==3.2.7

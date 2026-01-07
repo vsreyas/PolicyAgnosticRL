@@ -37,7 +37,20 @@ conda create -n parl python=3.11
 conda activate parl
 pip install uv
 uv pip install -e .
+# Keep only part above `#install libero and calvin`
+uv pip install -r requirements_clean.txt
+
+git clone https://github.com/vsreyas/LIBERO.git
+git checkout parl
 uv pip install -r requirements.txt
+uv pip install -e .
+
+git clone https://github.com/vsreyas/openpi.git
+git checkout parl
+GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
+uv pip install "augmax>=0.3.4"
+
+
 ```
 
 If you run into GL/glew.h: No such file or directory, run this:
@@ -46,6 +59,33 @@ conda install -c conda-forge glew
 conda install -c conda-forge mesalib
 conda install -c menpo glfw3
 ```
+
+### Clean setup on Maxlab PC
+```
+conda create -n parl python=3.11
+conda activate parl
+pip install uv
+uv pip install -e .
+
+# Keep only part above `#install libero and calvin`
+uv pip install -r requirements_clean.txt
+
+git clone https://github.com/vsreyas/LIBERO.git
+git checkout parl
+uv pip install -r requirements.txt
+uv pip install -e .
+
+git clone https://github.com/vsreyas/openpi.git
+git checkout parl
+GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
+uv pip install "augmax>=0.3.4"
+
+# Comment part above `#install libero and calvin` and uncomment below
+uv pip install -r requirements.txt
+
+
+```
+
 
 For TPU
 ```
@@ -126,7 +166,7 @@ CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false env -u PYOPENGL_PLATF
 
 # Sample base trajectories
 ```
-CUDA_VISIBLE_DEVICES=1 XLA_PYTHON_CLIENT_PREALLOCATE=false env -u PYOPENGL_PLATFORM python -m pdb ./sample_base_traj.py --config=configs/libero_config.py:expo --task_name="put both moka pots on the stove" --num_online_epochs=10000 --seed=0 --task_name="put both moka pots on the stove" --config.eval_interval=1 --config.batch_size=32 --config.agent_kwargs.batch_size=32 --environment_name=libero --wandb_experiment_name=expo_trial --num_edit_samples=4 --num_actions_to_sample=4 --num_offline_epochs=0 --final_step_sparse_reward=False --critic_warmup_steps 50 --online_trajectory_collection_frequency 50 --config.utd_ratio=2 --config.num_eval_episodes=10 --config.num_episodes_per_video=2 --config.eval_interval=50 --reward_scale=1.0 --reward_bias=-0.1 --config.libero_tfrecord_regexp="/home/skowshik/vla/codebase/PolicyAgnosticRL/BACKUP_libero_10_pi05_put_the_two_mocha_pots_on_the_stove/results_expo/seed_0/image_replay_buffer/*.tfrecord" --reward_scale=1.0 --reward_bias=-0.1 --filter_successful_trajectories=False | tee logs/debug.log
+CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false env -u PYOPENGL_PLATFORM python -m pdb ./sample_base_traj.py --config=configs/libero_config.py:expo --task_name="put both moka pots on the stove" --num_online_epochs=10000 --seed=0 --task_name="put both moka pots on the stove" --config.eval_interval=1 --config.batch_size=32 --config.agent_kwargs.batch_size=32 --environment_name=libero --wandb_experiment_name=expo_trial --num_edit_samples=4 --num_actions_to_sample=4 --num_offline_epochs=0 --final_step_sparse_reward=False --critic_warmup_steps 50 --online_trajectory_collection_frequency 50 --config.utd_ratio=2 --config.num_eval_episodes=10 --config.num_episodes_per_video=2 --config.eval_interval=50 --reward_scale=1.0 --reward_bias=-0.1 --config.libero_tfrecord_regexp="/home/skowshik/vla/codebase/PolicyAgnosticRL/BACKUP_libero_10_pi05_put_the_two_mocha_pots_on_the_stove/results_expo/seed_0/image_replay_buffer/*.tfrecord" --reward_scale=1.0 --reward_bias=-0.1 --filter_successful_trajectories=False | tee logs/debug.log
 
 ```
 
