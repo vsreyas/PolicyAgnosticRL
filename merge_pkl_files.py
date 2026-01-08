@@ -4,9 +4,8 @@ import pickle
 from typing import List
 
 data_files = [
-    'outputs/vlm_actions_replay_ep10_1_v2.pkl',
-    'outputs/vlm_actions_replay_ep10_2_v2.pkl',
-    'outputs/vlm_actions_replay_ep10_3_v2.pkl',
+    'pkl_files/CLEAN_traj30_v1_filtered.pkl',
+    'pkl_files/CLEAN_traj30_v2.pkl',
 ]
 _data = []
 episodes_so_far = 0
@@ -46,8 +45,8 @@ df['truncates'] = data['truncates']
 df['rewards'] = data['rewards']
 df['masks'] = data['masks']
 df['mc_returns'] = data['mc_returns']
-df['dones'] = df['terminals'] | df['truncates']
-out = df[df['dones'] == True]
-breakpoint()
+# df['dones'] = df['terminals'] | df['truncates']
+# out = df[df['dones'] == True]
+# breakpoint()
 
-pickle.dump(data, open('outputs/vlm_actions_replay_ep10_merged_50.pkl', 'wb'))
+pickle.dump(data, open('pkl_files/CLEAN_traj30_v1_v2_merged.pkl', 'wb'))

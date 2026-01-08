@@ -18,10 +18,10 @@ from jaxrl_m.utils.expo_utils import (
 )
 from jaxrl_m.agents.continuous.expo_pi import compute_q_all
 
-chkpt = pickle.load(open('results_expo_debug-td-clean_v3/seed_0/checkpoint_70000.pkl', 'rb'))
+chkpt = pickle.load(open('results_expo_debug-td-clean_v4/seed_0/checkpoint_16000.pkl', 'rb'))
 critic_params = chkpt['critic_params']
 # breakpoint()
-vlm_cache = pickle.load(open('/home/skowshik/vla/codebase/PolicyAgnosticRL/outputs/vlm_actions_replay_ep30_v1_clean_v3.pkl', 'rb'))
+vlm_cache = pickle.load(open('pkl_files/CLEAN_traj30_v2.pkl', 'rb'))
 # vlm_actions_replay_ep10_1_ep0, vlm_actions_replay_ep10_3_v4
 # breakpoint()
 
@@ -112,81 +112,61 @@ def get_q_next(vlm_cache_idx):
 def get_ep_rows(episode_id):
     return df[df['episode_id']==episode_id].index.to_list()
 
+# breakpoint()
+
 # q_vals = compute_q_all(critic_def.apply_fn, critic_params, vlm_cache['current_vlm_outputs'], vlm_cache['actions'])
 # breakpoint()
-ep0 = get_ep_rows(0)
-# ep1 = get_ep_rows(1)
-# ep2 = get_ep_rows(2)
-# ep3 = get_ep_rows(3)
-# ep4 = get_ep_rows(4)
-# ep5 = get_ep_rows(5)
-# ep6 = get_ep_rows(6)
-# ep7 = get_ep_rows(7)
-# ep8 = get_ep_rows(8)
-# ep9 = get_ep_rows(9)
-q_vals0 = get_q(ep0)
-# q_vals1 = get_q(ep1)
-# q_vals2 = get_q(ep2)
-# q_vals3 = get_q(ep3)
-# q_vals4 = get_q(ep4)
-# q_vals5 = get_q(ep5)
-# q_vals6 = get_q(ep6)
-# q_vals7 = get_q(ep7)
-# q_vals8 = get_q(ep8)
+# Pick one successful and one failed trajectory from data
+successful_traj_idx = df[df['terminals'] == True].index.to_list()
+failed_traj_idx = df[df['terminals'] == False].index.to_list()
+successful_episode_ids = df.iloc[successful_traj_idx]['episode_id'].unique()
+all_episode_ids = df['episode_id'].unique()
+failed_episode_ids = list(set(all_episode_ids) - set(successful_episode_ids))
+
+ep_success_id = get_ep_rows(successful_episode_ids[0])
+ep_failed_id = get_ep_rows(failed_episode_ids[0])
+
+
+q_vals_success = get_q(ep_success_id)
+q_vals_failed = get_q(ep_failed_id)
 
 # breakpoint()
-mc_returns0 = vlm_cache['mc_returns'][ep0]
+
+mc_returns_success = vlm_cache['mc_returns'][ep_success_id]
+mc_returns_failed = vlm_cache['mc_returns'][ep_failed_id]
 
 # Get q_next_vals
-q_next_vals0 = get_q_next(ep0)
-# q_next_vals1 = get_q_next(ep1)
-# q_next_vals2 = get_q_next(ep2)
-# q_next_vals3 = get_q_next(ep3)
-# q_next_vals4 = get_q_next(ep4)
-# q_next_vals5 = get_q_next(ep5)
-# q_next_vals6 = get_q_next(ep6)
-# q_next_vals7 = get_q_next(ep7)
-# q_next_vals8 = get_q_next(ep8)
+q_next_vals_success = get_q_next(ep_success_id)
+q_next_vals_failed = get_q_next(ep_failed_id)
 
 # q_vals0[0, :]
 # breakpoint()
 
 # Plot all these to different plots in a folder
 os.makedirs('plots', exist_ok=True)
-for i in range(len(q_vals0)):
+for i in range(len(q_vals_success)):
     plt.figure(figsize=(10, 6))
-    plt.plot(q_vals0[i, :], label='ep0')
-    # plt.plot(q_vals1[i, :], label='ep1')
-    # plt.plot(q_vals2[i, :], label='ep2')
-    # plt.plot(q_vals3[i, :], label='ep3')
-    # plt.plot(q_vals4[i, :], label='ep4')
-    # plt.plot(q_vals5[i, :], label='ep5')
-    # plt.plot(q_vals6[i, :], label='ep6')
-    # plt.plot(q_vals7[i, :], label='ep7')
-    # plt.plot(q_vals8[i, :], label='ep8')
+    plt.plot(q_vals_success[i, :], label='ep_success_id_terminals_{}'.format(df.iloc[ep_success_id]['terminals'].sum()))
+    plt.plot(q_vals_failed[i, :], label='ep_failed_id_terminals_{}'.format(df.iloc[ep_failed_id]['terminals'].sum()))
     plt.legend()
     plt.tight_layout()
     plt.savefig(f'plots/q_vals_{i}.png')
 
-for i in range(len(q_vals0)):
+for i in range(len(q_vals_success)):
     plt.figure(figsize=(10, 6))
-    plt.scatter(q_vals0[i, :], mc_returns0)
+    plt.scatter(q_vals_success[i, :], mc_returns_success)
+    plt.scatter(q_vals_failed[i, :], mc_returns_failed)
     plt.xlabel('Q-Values')
     plt.ylabel('MC Returns')
     plt.title('Q-Values vs MC Returns')
     plt.savefig(f'plots/q_vals_vs_mc_returns_{i}.png')
 
-for i in range(len(q_next_vals0)):
+for i in range(len(q_next_vals_success)):
     plt.figure(figsize=(10, 6))
-    plt.plot(q_next_vals0[i, :], label='ep0')
+    plt.plot(q_next_vals_success[i, :], label='ep_success_id')
+    plt.plot(q_next_vals_failed[i, :], label='ep_failed_id')
     # plt.plot(q_next_vals1[i, :], label='ep1')
-    # plt.plot(q_next_vals2[i, :], label='ep2')
-    # plt.plot(q_next_vals3[i, :], label='ep3')
-    # plt.plot(q_next_vals4[i, :], label='ep4')
-    # plt.plot(q_next_vals5[i, :], label='ep5')
-    # plt.plot(q_next_vals6[i, :], label='ep6')
-    # plt.plot(q_next_vals7[i, :], label='ep7')
-    # plt.plot(q_next_vals8[i, :], label='ep8')
     plt.legend()
     plt.tight_layout()
-    plt.savefig(f'plots/q_next_vals_{i}.png')
+    plt.savefig(f'plots/q_next_vals_success_{i}.png')
+    plt.savefig(f'plots/q_next_vals_failed_{i}.png')
