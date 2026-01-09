@@ -665,8 +665,8 @@ def train_agent(_):
                     use_wrist_view=FLAGS.use_wrist_view, 
                     use_language=FLAGS.use_lang, config=pi_config,
                     final_step_sparse_reward=False, # Use rewards from environment and DO NOT override with sparse 0/1 rewards at final step #
-                    filter_successful_trajectories=True, # Use success buffer #
-                    use_reverse_data_paths=True,
+                    filter_successful_trajectories=False, # Use success buffer #
+                    use_reverse_data_paths=False,
                     **FLAGS.config.image_replay_buffer_kwargs,
                 )
                 timer.tock("recreate_image_replay_buffer_iterator")
@@ -698,26 +698,26 @@ def train_agent(_):
                 # )
                 agent, info = agent.update(batch, utd_ratio=FLAGS.config.utd_ratio, timer=timer, update_only_critic=True, output_only_base_actions=True, seed=rng_update)
             else:
-                try:
-                    online_batch = next(online_train_iterator)
-                except StopIteration:
-                    # No successful trajectories in online buffer, construct full buffer #
-                    image_replay_buffer = ImageReplayBufferPi(
-                        data_paths=data_paths,
-                        seed=FLAGS.seed,
-                        train=True,
-                        task_name=FLAGS.task_name,
-                        use_wrist_view=FLAGS.use_wrist_view, 
-                        use_language=FLAGS.use_lang, config=pi_config,
-                        final_step_sparse_reward=False, # Use rewards from environment and DO NOT override with sparse 0/1 rewards at final step #
-                        filter_successful_trajectories=False, # Use success buffer #
-                        use_reverse_data_paths=True,
-                        **FLAGS.config.image_replay_buffer_kwargs,
-                    )
-                    online_train_iterator = image_replay_buffer.iterator(
-                        batch_size=FLAGS.config.agent_kwargs.batch_size
-                    )
-                    online_batch = next(online_train_iterator)
+                # try:
+                online_batch = next(online_train_iterator)
+                # except StopIteration:
+                #     # No successful trajectories in online buffer, construct full buffer #
+                #     image_replay_buffer = ImageReplayBufferPi(
+                #         data_paths=data_paths,
+                #         seed=FLAGS.seed,
+                #         train=True,
+                #         task_name=FLAGS.task_name,
+                #         use_wrist_view=FLAGS.use_wrist_view, 
+                #         use_language=FLAGS.use_lang, config=pi_config,
+                #         final_step_sparse_reward=False, # Use rewards from environment and DO NOT override with sparse 0/1 rewards at final step #
+                #         filter_successful_trajectories=False, # Use success buffer #
+                #         use_reverse_data_paths=True,
+                #         **FLAGS.config.image_replay_buffer_kwargs,
+                #     )
+                #     online_train_iterator = image_replay_buffer.iterator(
+                #         batch_size=FLAGS.config.agent_kwargs.batch_size
+                #     )
+                #     online_batch = next(online_train_iterator)
                 
                 # batch = concatenate_batches([offline_batch, online_batch])
                 batch = online_batch
