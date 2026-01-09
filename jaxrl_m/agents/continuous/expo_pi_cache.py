@@ -276,7 +276,7 @@ class ExpoPiLearnerCache(Agent):
         rng : PRNGKey | None = None,
         actor_lr: float = 3e-4,
         critic_lr: float = 3e-4,
-        temp_lr: float = 1e-3,
+        temp_lr: float = 3e-4,
         hidden_dims: Sequence[int] = (256, 256),
         discount: float = 0.99,
         tau: float = 0.005,
