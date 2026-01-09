@@ -229,12 +229,15 @@ def main(_):
                 #     timer=timer,
                 # )
                 # timer.tock("sample_current_vlm_output_time")
-                next_actions, next_vlm_output = agent.sample_batch_actions(_next_obs, is_target=True, return_first_action=False, timer=timer, output_only_base_actions=True, output_all_sampled_actions=True, seed=sample_rng)
+                # next_actions, next_vlm_output = agent.sample_batch_actions(_next_obs, is_target=True, return_first_action=False, timer=timer, output_only_base_actions=True, output_all_sampled_actions=True, seed=sample_rng)
 
-                rng, sample_rng = jax.random.split(rng)
-                _, current_vlm_output = agent.sample_batch_actions(_obs, is_target=True, return_first_action=False, timer=timer, output_only_base_actions=True, output_all_sampled_actions=True, seed=sample_rng)
+                # rng, sample_rng = jax.random.split(rng)
+                # _, current_vlm_output = agent.sample_batch_actions(_obs, is_target=True, return_first_action=False, timer=timer, output_only_base_actions=True, output_all_sampled_actions=True, seed=sample_rng)
                 
-                current_actions = batch['actions'][:, :, :7].reshape(batch_size, 1, pi_config.model.action_horizon, 7)
+                next_vlm_output = batch['next_vlm_output']
+                current_vlm_output = batch['vlm_output']
+
+                # current_actions = batch['actions'][:, :, :7].reshape(batch_size, 1, pi_config.model.action_horizon, 7)
                 # breakpoint()
 
                 # Extract VLM output (mean across tokens)
@@ -270,7 +273,7 @@ def main(_):
                         'current_state': current_state[i],
                         'next_state': next_state[i],
                         # VLM output from base policy
-                        'current_actions': current_actions[i],
+                        # 'current_actions': current_actions[i],
                         'current_vlm_output': current_vlm_output[i],
                         # Batch data needed for critic update
                         'actions': batch['actions'][i],
@@ -279,7 +282,7 @@ def main(_):
                         # Optional: terminals and truncates if available
                         'terminals': batch['terminals'][i],
                         'truncates': batch['truncates'][i],
-                        'next_actions_sampled': next_actions[i],
+                        # 'next_actions_sampled': next_actions[i],
                         'next_vlm_output': next_vlm_output[i],
                         'mc_returns': batch['mc_returns'][i],
                         'next_actions': batch['next_actions'][i],
@@ -318,7 +321,7 @@ def main(_):
     
     current_states = np.stack([critic_cache_data[k]['current_state'] for k in keys_list])
     next_states = np.stack([critic_cache_data[k]['next_state'] for k in keys_list])
-    current_actions = np.stack([critic_cache_data[k]['current_actions'] for k in keys_list])
+    # current_actions = np.stack([critic_cache_data[k]['current_actions'] for k in keys_list])
     current_vlm_outputs = np.stack([critic_cache_data[k]['current_vlm_output'] for k in keys_list])
     next_actions = np.stack([critic_cache_data[k]['next_actions'] for k in keys_list])
     next_vlm_outputs = np.stack([critic_cache_data[k]['next_vlm_output'] for k in keys_list])
@@ -328,7 +331,7 @@ def main(_):
     terminals = np.stack([critic_cache_data[k]['terminals'] for k in keys_list])
     truncates = np.stack([critic_cache_data[k]['truncates'] for k in keys_list])
     mc_returns = np.stack([critic_cache_data[k]['mc_returns'] for k in keys_list])
-    next_actions_sampled = np.stack([critic_cache_data[k]['next_actions_sampled'] for k in keys_list])
+    # next_actions_sampled = np.stack([critic_cache_data[k]['next_actions_sampled'] for k in keys_list])
 
     # breakpoint()
     
@@ -339,7 +342,7 @@ def main(_):
         'obs': obs_dict,
         'next_obs': next_obs_dict,
         'current_states': current_states,
-        'current_actions': current_actions,
+        # 'current_actions': current_actions,
         'next_states': next_states,
         'current_vlm_outputs': current_vlm_outputs,
         'next_actions': next_actions,
@@ -350,7 +353,7 @@ def main(_):
         'terminals': terminals,
         'truncates': truncates,
         'mc_returns': mc_returns,
-        'next_actions_sampled': next_actions_sampled,
+        # 'next_actions_sampled': next_actions_sampled,
         'metadata': {
             'num_entries': len(keys_list),
             'num_batches_processed': batch_count,

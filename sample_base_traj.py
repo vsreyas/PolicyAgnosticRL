@@ -237,7 +237,7 @@ def get_policy_fn(
         
         # breakpoint()
         out_dict = jax.device_get(
-            agent.sample_actions(
+            agent.sample_base_actions(
                 observations, *args, **kwargs, timer=timer, output_action_chunk=True, debug_mode=debug_mode
             )
         )
@@ -379,40 +379,11 @@ def train_agent(_):
     pi_config.exp_name = FLAGS.wandb_experiment_name
     pi_config.overwrite = True
 
-    # LOG: WANDB setup #
-    if FLAGS.wandb_project_name is not None:
-        wandb_config = WandBLogger.get_default_config()
-        wandb_config.update(
-            {
-                "project": FLAGS.wandb_project_name,
-                "exp_descriptor": FLAGS.wandb_experiment_name,
-                "tag": None,
-                "group": FLAGS.wandb_group,
-            }
-        )
-        wandb_logger = WandBLogger(
-            wandb_config=wandb_config,
-            variant=FLAGS.config.to_dict(),
-            debug=FLAGS.debug,
-        )
-        save_dir = tf.io.gfile.join(
-            (
-                os.path.abspath(FLAGS.config.save_dir)
-                if "gs://" not in FLAGS.config.save_dir
-                else FLAGS.config.save_dir
-            ),
-            # wandb_logger.config.project,
-            # wandb_logger.config.exp_descriptor,
-            f"seed_{FLAGS.seed}",
-        )
-    else:
-        wandb_logger = None
-        save_dir = tf.io.gfile.join(
-            os.path.abspath(FLAGS.config.save_dir),
-        )
-        FLAGS.config.wandb_enabled = False
-
-    # breakpoint()
+    wandb_logger = None
+    save_dir = tf.io.gfile.join(
+        os.path.abspath(FLAGS.config.save_dir),
+    )
+    FLAGS.config.wandb_enabled = False
 
     # Create environment and dataset
     action_space = None
@@ -499,8 +470,8 @@ def train_agent(_):
         reward_scale=FLAGS.reward_scale,
         reward_bias=FLAGS.reward_bias,
         max_traj_length=FLAGS.config.get("max_episode_steps", 1000),
-        # action_horizon=pi_config.model.action_horizon,
-        action_horizon=1,
+        action_horizon=pi_config.model.action_horizon,
+        # action_horizon=1,
     )
 
     ### Create EXPO agent #
@@ -533,7 +504,7 @@ def train_agent(_):
 
 
     # TODO: Remove hardcode and init with flags appropriately #
-    num_trajectories_to_collect = 30
+    num_trajectories_to_collect = 15
     online_env_steps = 0
     online_trajectories_added = 0
     online_env_steps_this_epoch = 0

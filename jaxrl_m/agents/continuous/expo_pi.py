@@ -894,8 +894,8 @@ class ExpoPiLearner(Agent):
         # next_actions: (batch_size, N, action_horizon, action_dim)
         current_vlm_outputs_all = batch['current_vlm_outputs']  # (batch_size, N, vlm_dim)
         next_vlm_outputs_all = batch['next_vlm_outputs']  # (batch_size, N, vlm_dim)
-        current_actions_all = batch['current_actions']  # (batch_size, N, action_horizon, action_dim)
-        next_actions_all = batch['next_actions_sampled']  # (batch_size, N, action_horizon, action_dim)
+        # current_actions_all = batch['current_actions']  # (batch_size, N, action_horizon, action_dim)
+        # next_actions_all = batch['next_actions_sampled']  # (batch_size, N, action_horizon, action_dim)
         current_states = batch['current_states']  # (batch_size, 8)
         next_states = batch['next_states']  # (batch_size, 8)
         rewards = batch['rewards']  # (batch_size,)
@@ -906,15 +906,15 @@ class ExpoPiLearner(Agent):
         # if bool(masks.sum() != len(masks)):
         #     breakpoint()
         
-        batch_size = current_actions_all.shape[0]
-        N = next_actions_all.shape[1]  # Number of sampled actions
+        batch_size = current_states.shape[0]
+        # N = next_actions_all.shape[1]  # Number of sampled actions
         
         # Randomly sample one action from N sampled actions for each batch element
         # This creates diversity while using pre-computed VLM outputs
         timer.tick("sample_action_indices")
         key, rng = jax.random.split(rng)
         # Sample indices: (batch_size,) with values in [0, N)
-        action_indices = jax.random.randint(key, shape=(batch_size,), minval=0, maxval=N)
+        # action_indices = jax.random.randint(key, shape=(batch_size,), minval=0, maxval=N)
         # breakpoint()
         timer.tock("sample_action_indices")
         
@@ -931,7 +931,7 @@ class ExpoPiLearner(Agent):
         next_vlm_outputs = next_vlm_outputs_all[batch_indices, :]
         
         # Select next actions: (batch_size, action_horizon, action_dim)
-        next_actions_sampled = next_actions_all[batch_indices, action_indices, :, :].reshape(batch_size, self.action_dim)
+        # next_actions_sampled = next_actions_all[batch_indices, action_indices, :, :].reshape(batch_size, self.action_dim)
         batch_ns = batch['next_actions'].reshape(batch_size, self.action_dim)
         mask = jnp.all(jnp.isclose(batch_ns, 0.0), axis=1)
 
@@ -953,9 +953,11 @@ class ExpoPiLearner(Agent):
         # Append states to VLM outputs (similar to update_critic)
         timer.tick("concatenate_states")
         # current_vlm_outputs: (batch_size, vlm_dim + 8)
-        current_vlm_outputs_with_state = jnp.concatenate([current_vlm_outputs, current_states], axis=1)
+        # current_vlm_outputs_with_state = jnp.concatenate([current_vlm_outputs, current_states], axis=1)
+        current_vlm_outputs_with_state = current_vlm_outputs
         # next_vlm_outputs: (batch_size, vlm_dim + 8)
-        next_vlm_outputs_with_state = jnp.concatenate([next_vlm_outputs, next_states], axis=1)
+        # next_vlm_outputs_with_state = jnp.concatenate([next_vlm_outputs, next_states], axis=1)
+        next_vlm_outputs_with_state = next_vlm_outputs
         timer.tock("concatenate_states")
         
         # Reshape actions to match critic input format

@@ -53,7 +53,7 @@ class TrajSampler(object):
 
         for _ in range(num_episodes):
             trajectory = defaultdict(list)
-            print("Starting new trajectory")
+            # print("Starting new trajectory")
             reset_variables = self._env.reset()
             if isinstance(reset_variables, np.ndarray) or isinstance(
                 reset_variables, dict
@@ -71,9 +71,11 @@ class TrajSampler(object):
             current_vlm_output = None
             curr_episode_q_vs_mc_returns_vals = []
             while not done and step < self.max_traj_length:
-                print(f"Step {step}")
-                print(f"Done: {done}")
-                print(f"Max traj length: {self.max_traj_length}")
+                # breakpoint()
+                # from PIL import Image; Image.fromarray(observation['image'].astype('uint8')).save('image.png')
+                # print(f"Step {step}")
+                # print(f"Done: {done}")
+                # print(f"Max traj length: {self.max_traj_length}")
                 
                 observation_storing = copy.deepcopy(observation)
 
@@ -81,6 +83,8 @@ class TrajSampler(object):
                 # out_dict = {
                 #     "vlm_output": current_vlm_output,
                 # }
+                out_dict = policy_fn(observation)
+                current_vlm_output = out_dict["vlm_output"]
                 
                 if current_action_sequence is None or current_action_index >= half_H:
                     if goal_relabel_fn is not None:

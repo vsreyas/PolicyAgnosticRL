@@ -389,7 +389,7 @@ BASE_EXPO_CONFIG = dict(
     utd_ratio=4,
     q_clip_low=-50.0,
     q_clip_high=5.0,
-    max_episode_steps=502,
+    max_episode_steps=1000,
     save_dir=os.path.join(SAVE_DIR_PREFIX, "results_expo"),
     # PaliGemma config name from openpi
     paligemma_config_name="pi05_libero_custom_low_mem",

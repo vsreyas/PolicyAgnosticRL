@@ -102,17 +102,15 @@ def _edit_actor_loss_and_grad(
             training=False,
             rngs={"dropout": dropout_key},
         )
-        actions = dist.sample(seed=key)
-
-        log_probs_orig = dist.log_prob(actions)
-        actions = actions * edit_action_scale
-        
-        edit_actions = actions.copy()
+        actions_sampled = dist.sample(seed=key)
+        log_probs_orig = dist.log_prob(actions_sampled)
+        edited_actions = actions_sampled * edit_action_scale
+        edit_actions = edited_actions.copy()
 
 
-        log_probs = log_probs_orig - actions.shape[-1] * jnp.log(edit_action_scale)
+        log_probs = log_probs_orig - actions_sampled.shape[-1] * jnp.log(edit_action_scale)
 
-        actions = actions + batch_actions
+        actions = edited_actions + batch_actions
 
         qs = critic_apply_fn(
             {"params": critic_params},
@@ -303,7 +301,7 @@ class ExpoPiLearnerCache(Agent):
         batch_split: int = 1, 
         M: int = 0,
         n_edit_samples: int = 4, 
-        edit_action_scale: float = 1.0,
+        edit_action_scale: float = 0.25,
         actor_layer_norm: bool = True,
         clip_sampler: bool = True,
         decay_steps: Optional[int] = int(3e6),
@@ -318,17 +316,17 @@ class ExpoPiLearnerCache(Agent):
     ):
         # Assertions
         assert N >= n_edit_samples, f"N must be greater than or equal to n_edit_samples, got N={N} and n_edit_samples={n_edit_samples}"
+        
+        paligemma_config = _gemma.get_config(config.model.paligemma_variant)
+        pi0_hidden_dims = paligemma_config.width
+        action_horizon = config.model.action_horizon
+        action_dim = action_dim * action_horizon
 
         if target_entropy is None:
             target_entropy = -action_dim / 2
             
             if adjust_target_entropy:
                 target_entropy = -action_dim / 2 + action_dim * jnp.log(edit_action_scale)
-        
-        paligemma_config = _gemma.get_config(config.model.paligemma_variant)
-        pi0_hidden_dims = paligemma_config.width
-        action_horizon = config.model.action_horizon
-        action_dim = action_dim * action_horizon
 
         batch_size = observations[batch_size_dict_key].shape[0]
 
@@ -359,7 +357,11 @@ class ExpoPiLearnerCache(Agent):
         edit_actor = TrainState.create(
             apply_fn=edit_actor_def.apply, 
             params=edit_actor_params, 
-            tx=optax.adam(learning_rate=actor_lr),
+            # tx=optax.adam(learning_rate=actor_lr),
+            tx = optax.chain(
+                optax.clip_by_global_norm(1.0),
+                optax.adam(learning_rate=actor_lr),
+            )
         )
 
         # Init critic #
@@ -588,19 +590,19 @@ class ExpoPiLearnerCache(Agent):
         #     # actions = self.actor.sample_actions(observations, seed=rng, params=self.target_actor.train_state.params) # (N, action_horizon, action_dim)
         #     actions = self.target_actor.sample_actions(observations, seed=rng) # (N, action_horizon, action_dim)
 
-        actions = self.actor.sample_actions(observations, seed=rng)
-        diffusion_actions = actions.copy() # (1, action_horizon, action_dim)
+        # actions = self.actor.sample_actions(observations, seed=rng)
+        # diffusion_actions = actions.copy() # (1, action_horizon, action_dim)
 
         # Do a forward pass to get VLM output #
         seed, rng = jax.random.split(seed)
-        if not is_target:
-            vlm_output, _, processed_obs = self.actor.get_vlm_output(rng, _observations, processed_obs=False, infer=True, return_processed_obs=True)
-        else:
-            vlm_output, _, processed_obs = self.target_actor.get_vlm_output(rng, _observations, processed_obs=False, infer=True, return_processed_obs=True)
+        # if not is_target:
+        #     vlm_output, _, processed_obs = self.actor.get_vlm_output(rng, _observations, processed_obs=False, infer=True, return_processed_obs=True)
+        # else:
+        #     vlm_output, _, processed_obs = self.target_actor.get_vlm_output(rng, _observations, processed_obs=False, infer=True, return_processed_obs=True)
 
         # _model.Observation.from_dict(observations)
-        # actions, vlm_output, processed_obs = self.actor.sample_actions_with_vlm_output(seed, observations)
-        # diffusion_actions = actions.copy() # (1, action_horizon, action_dim)
+        actions, vlm_output, processed_obs = self.actor.sample_actions_with_vlm_output(rng, observations)
+        diffusion_actions = actions.copy() # (1, action_horizon, action_dim)
         
         
         # Take mean across tokens as representation from VLM #
@@ -632,6 +634,41 @@ class ExpoPiLearnerCache(Agent):
         
         return out_dict
     
+    def sample_base_actions(self, _observations: Data, is_target=False,*args, **kwargs):
+        '''
+        For given state/observation, samles self.N actions from base policy; For first self.n_edit_samples actions, samples from edit_actor;
+        Combine all (N + n_edit_samples) actions and compute Q-values; Return the action with the highest Q-value;
+        '''
+        out_dict = {}
+
+        seed = kwargs.pop("seed", None)
+        seed, rng = jax.random.split(seed)
+        output_action_chunk = kwargs.pop("output_action_chunk", True)
+        # Repeat observations to sample `N` actions#
+        # observations = repeat_observations(_observations, self.N, axis=0)
+        observations = _observations
+
+        seed, rng = jax.random.split(seed)
+        actions, vlm_output, processed_obs = self.actor.sample_actions_with_vlm_output(rng, observations)
+        diffusion_actions = actions.copy() # (1, action_horizon, action_dim)
+        
+        
+        # Take mean across tokens as representation from VLM #
+        vlm_output = jnp.mean(vlm_output[0][:, :512, :], axis=1) # (1, pi0_hidden_dims)
+        state = processed_obs['state'][0, :8][None, :8] # State dimension
+        vlm_output = jnp.concatenate([vlm_output, state], axis=1) # (1, pi0_hidden_dims + state_dim)
+
+        action = diffusion_actions
+
+        rng, _ = jax.random.split(rng, 2)
+        out_dict = {
+            "actions": action.squeeze(), # (action_horizon, action_dim)
+            "vlm_output": vlm_output[0], # (pi0_hidden_dims,)
+            "diffusion_actions": diffusion_actions # (N, action_horizon, action_dim)
+        }
+        
+        return out_dict
+    
     def get_vlm_output(self, _observations: Data, is_target=False,*args, **kwargs):
         '''
         For given state/observation, samles self.N actions from base policy; For first self.n_edit_samples actions, samples from edit_actor;
@@ -648,8 +685,10 @@ class ExpoPiLearnerCache(Agent):
 
         # Take mean across tokens as representation from VLM #
         vlm_output = jnp.mean(vlm_output[0][:, :512, :], axis=1) # (N, pi0_hidden_dims)
+        state = processed_obs['state'][0, :8][None, :8] # State dimension
+        vlm_output = jnp.concatenate([vlm_output, state], axis=1) # (1, pi0_hidden_dims + state_dim)
         
-        return vlm_output
+        return vlm_output[0]
 
 
     def update_actor(self, batch: Batch, *args, **kwargs) -> Tuple[Agent, Dict[str, float]]:
@@ -728,7 +767,7 @@ class ExpoPiLearnerCache(Agent):
         def temperature_loss_fn(temp_params):
             temperature = self.temp.apply_fn({"params": temp_params})
             temp_loss = temperature * (entropy - self.target_entropy).mean()
-            return temp_loss, {}
+            return temp_loss, {"temp_loss": temp_loss} # , "entropy": entropy, "target_entropy": self.target_entropy.mean(), "temperature": temperature.mean()}
 
         grads, temp_info = jax.grad(temperature_loss_fn, has_aux=True)(self.temp.params)
         temp = self.temp.apply_gradients(grads=grads)

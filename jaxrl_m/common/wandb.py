@@ -89,7 +89,22 @@ class WandBLogger(object):
         for k in flag_dict:
             if isinstance(flag_dict[k], ml_collections.ConfigDict):
                 flag_dict[k] = flag_dict[k].to_dict()
-        wandb.config.update(flag_dict)
+
+        # Filter out non-serializable values for WandB
+        def is_serializable(v):
+            """Check if a value is serializable by WandB"""
+            if v is None:
+                return True
+            if isinstance(v, (bool, int, float, str)):
+                return True
+            if isinstance(v, (list, tuple)):
+                return all(is_serializable(item) for item in v)
+            if isinstance(v, dict):
+                return all(is_serializable(val) for val in v.values())
+            return False
+
+        sanitized_flag_dict = {k: v for k, v in flag_dict.items() if is_serializable(v)}
+        wandb.config.update(sanitized_flag_dict) # , allow_val_change=allow_val_change)
 
     def log(self, data: dict, step: int = None):
         step = max(step, 0) if step is not None else None

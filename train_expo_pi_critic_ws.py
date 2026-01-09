@@ -327,12 +327,10 @@ def load_vlm_cache(cache_path: str) -> Dict:
     logging.info(f"  Total entries: {num_entries}")
     logging.info(f"  Current VLM outputs shape: {cache['current_vlm_outputs'].shape}")
     logging.info(f"  Next VLM outputs shape: {cache['next_vlm_outputs'].shape}")
-    logging.info(f"  Current actions shape: {cache['current_actions'].shape}")
+    # logging.info(f"  Current actions shape: {cache['current_actions'].shape}")
     logging.info(f"  Next actions shape: {cache['next_actions'].shape}")
     logging.info(f"  Rewards shape: {cache['rewards'].shape}")
     logging.info(f"  Metadata: {cache['metadata']}")
-
-    # breakpoint()
     
     return cache, mean_vlm_outputs, std_vlm_outputs
 
@@ -373,7 +371,7 @@ def sample_batch_from_cache(
     batch = {
         'current_vlm_outputs': cache['current_vlm_outputs'][indices_np],  # (batch_size, N, vlm_dim)
         'next_vlm_outputs': cache['next_vlm_outputs'][indices_np],  # (batch_size, N, vlm_dim)
-        'current_actions': cache['current_actions'][indices_np],  # (batch_size, N, action_horizon, action_dim)
+        # 'current_actions': cache['current_actions'][indices_np],  # (batch_size, N, action_horizon, action_dim)
         'next_actions': cache['next_actions'][indices_np],  # (batch_size, N, action_horizon, action_dim)
         'current_states': cache['current_states'][indices_np],  # (batch_size, 8)
         'next_states': cache['next_states'][indices_np],  # (batch_size, 8)
@@ -384,7 +382,7 @@ def sample_batch_from_cache(
         'terminals': cache['terminals'][indices_np],  # (batch_size,)
         'truncates': cache['truncates'][indices_np],  # (batch_size,)
         # 'metadata': cache['metadata'],  # Dictionary with cache metadata
-        "next_actions_sampled": cache['next_actions_sampled'][indices_np],  # (batch_size, N, action_horizon, action_dim)
+        # "next_actions_sampled": cache['next_actions_sampled'][indices_np],  # (batch_size, N, action_horizon, action_dim)
     }
     
     # Convert to JAX arrays
@@ -459,8 +457,8 @@ def train_critic(_):
     # Create a dummy batch for agent initialization
     # Get shapes from cache
     vlm_dim = cache['current_vlm_outputs'].shape[1]  # N, vlm_dim -> vlm_dim
-    action_horizon = cache['current_actions'].shape[2]  # N, action_horizon, action_dim -> action_horizon
-    action_dim = cache['current_actions'].shape[3]  # N, action_horizon, action_dim -> action_dim
+    action_horizon = cache['actions'].shape[1]  # N, action_horizon, action_dim -> action_horizon
+    action_dim = cache['actions'].shape[2]  # N, action_horizon, action_dim -> action_dim
     
     logging.info(f"Inferred shapes: vlm_dim={vlm_dim}, action_horizon={action_horizon}, action_dim={action_dim}")
     
@@ -468,8 +466,9 @@ def train_critic(_):
     dummy_batch = {
         'current_vlm_outputs': jnp.zeros((FLAGS.config.agent_kwargs.batch_size, vlm_dim)),
         'next_vlm_outputs': jnp.zeros((FLAGS.config.agent_kwargs.batch_size, vlm_dim)),
-        'current_actions': jnp.zeros((FLAGS.config.agent_kwargs.batch_size, 1, action_horizon, action_dim)),
-        'next_actions': jnp.zeros((FLAGS.config.agent_kwargs.batch_size, FLAGS.num_actions_to_sample, action_horizon, action_dim)),
+        # 'current_actions': jnp.zeros((FLAGS.config.agent_kwargs.batch_size, 1, action_horizon, action_dim)),
+        'actions': jnp.zeros((FLAGS.config.agent_kwargs.batch_size, action_horizon, action_dim)),
+        'next_actions': jnp.zeros((FLAGS.config.agent_kwargs.batch_size, action_horizon, action_dim)),
         'current_states': jnp.zeros((FLAGS.config.agent_kwargs.batch_size, 8)),
         'next_states': jnp.zeros((FLAGS.config.agent_kwargs.batch_size, 8)),
         'rewards': jnp.zeros((FLAGS.config.agent_kwargs.batch_size,)),
@@ -477,7 +476,7 @@ def train_critic(_):
         'mc_returns': jnp.zeros((FLAGS.config.agent_kwargs.batch_size,)),
         'terminals': jnp.zeros((FLAGS.config.agent_kwargs.batch_size,)),
         'truncates': jnp.zeros((FLAGS.config.agent_kwargs.batch_size,)),
-        'next_actions_sampled': jnp.zeros((FLAGS.config.agent_kwargs.batch_size, FLAGS.num_actions_to_sample, action_horizon, action_dim)),
+        # 'next_actions_sampled': jnp.zeros((FLAGS.config.agent_kwargs.batch_size, FLAGS.num_actions_to_sample, action_horizon, action_dim)),
         # 'metadata': {},
     }
     
@@ -492,7 +491,7 @@ def train_critic(_):
         rng=construct_rng,
         N=FLAGS.num_actions_to_sample,
         n_edit_samples=FLAGS.num_edit_samples,
-        batch_size_dict_key='current_actions',
+        batch_size_dict_key='actions',
         q_clip_low=FLAGS.config.q_clip_low,
         q_clip_high=FLAGS.config.q_clip_high,
     )
@@ -523,7 +522,7 @@ def train_critic(_):
     )
 
     log_interval = 1
-    save_interval = 10000
+    save_interval = 500
 
     for step in tqdm(range(FLAGS.num_train_steps), desc="Training critic"):
         timer.tick("total_step_time")
@@ -544,7 +543,6 @@ def train_critic(_):
         #     breakpoint()
         
         timer.tock("update_critic_time")
-
         timer.tock("total_step_time")
     
     # # TODO: Later move these to flags #
@@ -684,6 +682,7 @@ def train_critic(_):
                     ind_traj = []
                     for j, traj in enumerate(trajectories_to_save):
                         trajectory_return = 0
+                        traj_step = 0
                         for transition, reward in zip(
                             traj["observation"], traj["reward"]
                         ):
@@ -697,13 +696,14 @@ def train_critic(_):
                             image = np.ascontiguousarray(image) 
                             frame = cv2.putText(
                                 image,
-                                f"reward: {reward}. return: {trajectory_return}",
+                                f"reward: {reward}. return: {trajectory_return}, step: {traj_step}",
                                 (10, 10),
                                 cv2.FONT_HERSHEY_SIMPLEX,
                                 0.3,
                                 (0, 0, 0),
                                 1,
                             )
+                            traj_step += 1
                             ind_traj.append(frame)
                             frame = frame.transpose(2, 0, 1)
                             frames.append(frame)

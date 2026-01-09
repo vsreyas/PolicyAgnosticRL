@@ -18,10 +18,10 @@ from jaxrl_m.utils.expo_utils import (
 )
 from jaxrl_m.agents.continuous.expo_pi import compute_q_all
 
-chkpt = pickle.load(open('results_expo_debug-td-clean_v4/seed_0/checkpoint_16000.pkl', 'rb'))
+chkpt = pickle.load(open('results_expo_debug-td-clean_v6/seed_0/checkpoint_4500.pkl', 'rb'))
 critic_params = chkpt['critic_params']
 # breakpoint()
-vlm_cache = pickle.load(open('pkl_files/CLEAN_traj30_v2.pkl', 'rb'))
+vlm_cache = pickle.load(open('/home/sreyas/vla/PolicyAgnosticRL/pkl_files/CLEAN_traj15_V3_eval_imgfix.pkl', 'rb'))
 # vlm_actions_replay_ep10_1_ep0, vlm_actions_replay_ep10_3_v4
 # breakpoint()
 
@@ -77,11 +77,13 @@ df['rewards'] = data['rewards']
 df['masks'] = data['masks']
 df['mc_returns'] = data['mc_returns']
 # df['dones'] = df['terminals'] | df['truncates']
+# breakpoint()
 
 def get_q(vlm_cache_idx):
-    vlm_output = vlm_cache['current_vlm_outputs'][vlm_cache_idx].reshape(-1, 2048)
-    current_state = vlm_cache['current_states'][vlm_cache_idx].reshape(-1, 8)
-    vlm_output_with_state = jnp.concatenate([vlm_output, current_state], axis=1)
+    vlm_output = vlm_cache['current_vlm_outputs'][vlm_cache_idx].reshape(-1, 2056)
+    # current_state = vlm_cache['current_states'][vlm_cache_idx].reshape(-1, 8)
+    # vlm_output_with_state = jnp.concatenate([vlm_output, current_state], axis=1)
+    vlm_output_with_state = vlm_output
     action_sequence = vlm_cache['actions'][vlm_cache_idx]
     if action_sequence.ndim == 2:
         action_sequence = action_sequence.reshape(-1, 70)
@@ -94,9 +96,10 @@ def get_q(vlm_cache_idx):
     return q_vals
 
 def get_q_next(vlm_cache_idx):
-    vlm_output = vlm_cache['next_vlm_outputs'][vlm_cache_idx].reshape(-1, 2048)
-    next_state = vlm_cache['next_states'][vlm_cache_idx].reshape(-1, 8)
-    vlm_output_with_state = jnp.concatenate([vlm_output, next_state], axis=1)
+    vlm_output = vlm_cache['next_vlm_outputs'][vlm_cache_idx].reshape(-1, 2056)
+    # next_state = vlm_cache['next_states'][vlm_cache_idx].reshape(-1, 8)
+    # vlm_output_with_state = jnp.concatenate([vlm_output, next_state], axis=1)
+    vlm_output_with_state = vlm_output
     action_idx = 0
     action_sequence = vlm_cache['next_actions'][vlm_cache_idx]
     if action_sequence.ndim == 2:
@@ -123,8 +126,13 @@ successful_episode_ids = df.iloc[successful_traj_idx]['episode_id'].unique()
 all_episode_ids = df['episode_id'].unique()
 failed_episode_ids = list(set(all_episode_ids) - set(successful_episode_ids))
 
-ep_success_id = get_ep_rows(successful_episode_ids[0])
-ep_failed_id = get_ep_rows(failed_episode_ids[0])
+ep_success_id = get_ep_rows(successful_episode_ids[-1])
+ep_failed_id = get_ep_rows(failed_episode_ids[-1])
+
+print("\n\n\n\n\n")
+print("Successful episode ID: ", successful_episode_ids[0])
+print("Failed episode ID: ", failed_episode_ids[0])
+print("\n\n\n\n\n")
 
 
 q_vals_success = get_q(ep_success_id)

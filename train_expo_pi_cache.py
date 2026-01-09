@@ -503,9 +503,9 @@ def train_agent(_):
         clip_action=FLAGS.clip_action,
         reward_scale=FLAGS.reward_scale,
         reward_bias=FLAGS.reward_bias,
-        max_traj_length=FLAGS.config.get("max_episode_steps", 502),
-        # action_horizon=pi_config.model.action_horizon,
-        action_horizon=1,
+        max_traj_length=FLAGS.config.get("max_episode_steps", 1000),
+        action_horizon=pi_config.model.action_horizon,
+        # action_horizon=1,
     )
 
     ### Create EXPO agent #
@@ -544,7 +544,7 @@ def train_agent(_):
 
 
     # TODO: Remove hardcode and init with flags appropriately #
-    num_trajectories_to_collect = 3
+    num_trajectories_to_collect = 10
     online_env_steps = 0
     online_trajectories_added = 0
     online_env_steps_this_epoch = 0
@@ -634,6 +634,9 @@ def train_agent(_):
                         step=i,
                     )
                 
+                del trajectories, q_vs_mc_returns_vals
+                import gc; gc.collect()
+                
                 # breakpoint()
 
                 # Finished collecting trajectories
@@ -662,14 +665,14 @@ def train_agent(_):
                     use_wrist_view=FLAGS.use_wrist_view, 
                     use_language=FLAGS.use_lang, config=pi_config,
                     final_step_sparse_reward=False, # Use rewards from environment and DO NOT override with sparse 0/1 rewards at final step #
-                    filter_successful_trajectories=FLAGS.filter_successful_trajectories,
+                    filter_successful_trajectories=True, # Use success buffer #
                     use_reverse_data_paths=True,
                     **FLAGS.config.image_replay_buffer_kwargs,
                 )
                 timer.tock("recreate_image_replay_buffer_iterator")
-            #     #########################################################
+                #########################################################
 
-            #     # Update online iterator #
+                # Update online iterator #
                 online_train_iterator = image_replay_buffer.iterator(
                     batch_size=FLAGS.config.agent_kwargs.batch_size
                 )
@@ -678,9 +681,9 @@ def train_agent(_):
             
             # Sample a batch from online and do update #
             # RLPD style online + offline update #
-            offline_batch = next(offline_train_iterator)
-            offline_batch['diffusion_actions'] = offline_batch['actions']
-            offline_batch['next_diffusion_actions'] = offline_batch['next_actions']
+            # offline_batch = next(offline_train_iterator)
+            # offline_batch['diffusion_actions'] = offline_batch['actions']
+            # offline_batch['next_diffusion_actions'] = offline_batch['next_actions']
 
             rng, rng_update = jax.random.split(rng)
 
@@ -695,11 +698,29 @@ def train_agent(_):
                 # )
                 agent, info = agent.update(batch, utd_ratio=FLAGS.config.utd_ratio, timer=timer, update_only_critic=True, output_only_base_actions=True, seed=rng_update)
             else:
-                online_batch = next(online_train_iterator)
-
-                batch = concatenate_batches([offline_batch, online_batch])
-                # batch = online_batch
-                # batch = online_batch
+                try:
+                    online_batch = next(online_train_iterator)
+                except StopIteration:
+                    # No successful trajectories in online buffer, construct full buffer #
+                    image_replay_buffer = ImageReplayBufferPi(
+                        data_paths=data_paths,
+                        seed=FLAGS.seed,
+                        train=True,
+                        task_name=FLAGS.task_name,
+                        use_wrist_view=FLAGS.use_wrist_view, 
+                        use_language=FLAGS.use_lang, config=pi_config,
+                        final_step_sparse_reward=False, # Use rewards from environment and DO NOT override with sparse 0/1 rewards at final step #
+                        filter_successful_trajectories=False, # Use success buffer #
+                        use_reverse_data_paths=True,
+                        **FLAGS.config.image_replay_buffer_kwargs,
+                    )
+                    online_train_iterator = image_replay_buffer.iterator(
+                        batch_size=FLAGS.config.agent_kwargs.batch_size
+                    )
+                    online_batch = next(online_train_iterator)
+                
+                # batch = concatenate_batches([offline_batch, online_batch])
+                batch = online_batch
                 # Do this as it cleanly handles termination/truncation for bootstrapping during critic update #
                 # The function effectively sets mask as 0.0 only where reward == 1.0, so for unsuccessful trajectory, it will have 'dones' as 0.0 at end #
                 # batch = set_batch_masks(
@@ -777,6 +798,7 @@ def train_agent(_):
                             eval_env,
                             FLAGS.config.num_eval_episodes,
                             action_horizon=pi_config.model.action_horizon,
+                            # action_horizon=1,
                             use_full_horizon_for_refill=True, # For proper Q vs MC Returns calculation #
                         )
                     

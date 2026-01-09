@@ -22,7 +22,7 @@ print("Imports 2")
 ### Debugging setup ###
 def inspect_tfrecords():
     # TFRECORD_PATTERN = "/data/hf_cache/datasets/LIBERO/libero_10_tf/*.tfrecord"
-    TFRECORD_PATTERN = "/home/skowshik/vla/codebase/PolicyAgnosticRL/CLEAN_traj30_v1/episode_0.tfrecord"
+    TFRECORD_PATTERN = "/home/sreyas/vla/PolicyAgnosticRL/results_expo_debug-expo_clean_v4/seed_0/image_replay_buffer/episode_0.tfrecord"
 
     PROTO_TYPE_SPEC = {
         "observations/images0": tf.uint8,
@@ -430,7 +430,7 @@ class ImageReplayBufferPi:
                 [
                     "TFRecord filename must match 'episode_<id>.tfrecord' where <id> is digits. Got:",
                     basename,
-                ],
+                ], 
             )  # :contentReference[oaicite:1]{index=1}
 
             # Ensure the assert runs in the tf.data graph before we proceed
@@ -750,16 +750,17 @@ class ImageReplayBufferPi:
             if hasattr(next_actions, "numpy"):
                 next_actions = next_actions.numpy()
             
-            if img0.ndim == 4:   # [T,H,W,C]
-                img0 = img0[:, ::-1, ::-1, :]
-                img1 = img1[:, ::-1, ::-1, :]
-                image0_ns = image0_ns[:, ::-1, ::-1, :]
-                image1_ns = image1_ns[:, ::-1, ::-1, :]
-            else:                # [H,W,C]
-                img0 = img0[::-1, ::-1, :]
-                img1 = img1[::-1, ::-1, :]
-                image0_ns = image0_ns[::-1, ::-1, :]
-                image1_ns = image1_ns[::-1, ::-1, :]
+            # This is inverting the image, DO NOT do this!: BUG FIX #
+            # if img0.ndim == 4:   # [T,H,W,C]
+            #     img0 = img0[:, ::-1, ::-1, :]
+            #     img1 = img1[:, ::-1, ::-1, :]
+            #     image0_ns = image0_ns[:, ::-1, ::-1, :]
+            #     image1_ns = image1_ns[:, ::-1, ::-1, :]
+            # else:                # [H,W,C]
+            #     img0 = img0[::-1, ::-1, :]
+            #     img1 = img1[::-1, ::-1, :]
+            #     image0_ns = image0_ns[::-1, ::-1, :]
+            #     image1_ns = image1_ns[::-1, ::-1, :]
 
             if self.use_8D and state.shape[-1] != 8:
                 state = convert_state_15_to_8(state)
