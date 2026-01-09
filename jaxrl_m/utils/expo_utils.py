@@ -2,6 +2,8 @@
 
 import functools
 from typing import Optional, Type
+from typing import Any, Dict, Optional
+from dataclasses import field
 
 import tensorflow_probability.substrates.jax as tfp
 tfd = tfp.distributions
@@ -15,6 +17,7 @@ import jax
 import jax.numpy as jnp
 from flax import struct
 from flax.training.train_state import TrainState
+from jaxrl_m.common.initialization import init_fns
 
 from functools import partial
 
@@ -120,6 +123,44 @@ class MLP(nn.Module):
         if self.use_pnorm:
             x /= jnp.linalg.norm(x, axis=-1, keepdims=True).clip(1e-10)
         return x
+
+class MLPResnetEncoding(nn.Module):
+    encoder: nn.Module
+    network: nn.Module
+
+    @nn.compact
+    def __call__(
+        self,
+        observations: jnp.ndarray,
+        actions: jnp.ndarray,
+        train: bool = False,
+    ) -> jnp.ndarray:
+        obs_enc = self.encoder(observations, train=train)
+        # jax.debug.breakpoint()
+        mlp_input = jnp.concatenate([obs_enc, actions], -1)
+        outputs = self.network()(mlp_input, training=train)
+        return outputs
+
+        # if self.encoder is None:
+        #     obs_enc = observations
+        # else:
+        #     obs_enc = self.encoder(observations, train=train)
+
+        # if self.network_separate_action_input:
+        #     outputs = self.network(obs_enc, actions, train)
+        # else:
+        #     inputs = jnp.concatenate([obs_enc, actions], -1)
+        #     outputs = self.network(inputs, train)
+        # if self.init_final is not None:
+        #     value = nn.Dense(
+        #         1,
+        #         kernel_init=nn.initializers.uniform(-self.init_final, self.init_final),
+        #     )(outputs)
+        # else:
+        #     value = nn.Dense(1, kernel_init=self.init_fn(**self.kernel_init_params))(
+        #         outputs
+        #     )
+        # return jnp.squeeze(value, -1)
 
 
 class StateValue(nn.Module):

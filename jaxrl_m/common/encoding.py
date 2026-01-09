@@ -92,10 +92,10 @@ class DualEncodingWrapper(nn.Module):
             img2 = observations["wrist_image"]
             if self.enable_stacking:
                 # Combine stacking and channels into a single dimension
-                if len(obs.shape) == 4:
+                if len(img1.shape) == 4:
                     img1 = rearrange(img1, "T H W C -> H W (T C)")
                     img2 = rearrange(img2, "T H W C -> H W (T C)")
-                if len(obs.shape) == 5:
+                elif len(img1.shape) == 5:
                     img1 = rearrange(img1, "B T H W C -> B H W (T C)")
                     img2 = rearrange(img2, "B T H W C -> B H W (T C)")
 

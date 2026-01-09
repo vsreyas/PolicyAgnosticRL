@@ -83,8 +83,8 @@ class TrajSampler(object):
                 # out_dict = {
                 #     "vlm_output": current_vlm_output,
                 # }
-                out_dict = policy_fn(observation)
-                current_vlm_output = out_dict["vlm_output"]
+                # out_dict = policy_fn(observation)
+                # current_vlm_output = out_dict["vlm_output"]
                 
                 if current_action_sequence is None or current_action_index >= half_H:
                     if goal_relabel_fn is not None:

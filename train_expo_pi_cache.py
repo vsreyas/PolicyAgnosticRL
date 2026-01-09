@@ -383,37 +383,37 @@ def train_agent(_):
     pi_config.overwrite = True
 
     # LOG: WANDB setup #
-    if FLAGS.wandb_project_name is not None:
-        wandb_config = WandBLogger.get_default_config()
-        wandb_config.update(
-            {
-                "project": FLAGS.wandb_project_name,
-                "exp_descriptor": FLAGS.wandb_experiment_name,
-                "tag": None,
-                "group": FLAGS.wandb_group,
-            }
-        )
-        wandb_logger = WandBLogger(
-            wandb_config=wandb_config,
-            variant=FLAGS.config.to_dict(),
-            debug=FLAGS.debug,
-        )
-        save_dir = tf.io.gfile.join(
-            (
-                os.path.abspath(FLAGS.config.save_dir)
-                if "gs://" not in FLAGS.config.save_dir
-                else FLAGS.config.save_dir
-            ),
-            # wandb_logger.config.project,
-            # wandb_logger.config.exp_descriptor,
-            f"seed_{FLAGS.seed}",
-        )
-    else:
-        wandb_logger = None
-        save_dir = tf.io.gfile.join(
-            os.path.abspath(FLAGS.config.save_dir),
-        )
-        FLAGS.config.wandb_enabled = False
+    # if FLAGS.wandb_project_name is not None:
+    #     wandb_config = WandBLogger.get_default_config()
+    #     wandb_config.update(
+    #         {
+    #             "project": FLAGS.wandb_project_name,
+    #             "exp_descriptor": FLAGS.wandb_experiment_name,
+    #             "tag": None,
+    #             "group": FLAGS.wandb_group,
+    #         }
+    #     )
+    #     wandb_logger = WandBLogger(
+    #         wandb_config=wandb_config,
+    #         variant=FLAGS.config.to_dict(),
+    #         debug=FLAGS.debug,
+    #     )
+    #     save_dir = tf.io.gfile.join(
+    #         (
+    #             os.path.abspath(FLAGS.config.save_dir)
+    #             if "gs://" not in FLAGS.config.save_dir
+    #             else FLAGS.config.save_dir
+    #         ),
+    #         # wandb_logger.config.project,
+    #         # wandb_logger.config.exp_descriptor,
+    #         f"seed_{FLAGS.seed}",
+    #     )
+    # else:
+    wandb_logger = None
+    save_dir = tf.io.gfile.join(
+        os.path.abspath(FLAGS.config.save_dir),
+    )
+    FLAGS.config.wandb_enabled = False
 
     # breakpoint()
 
@@ -495,6 +495,7 @@ def train_agent(_):
 
     ### Sharding Data ###
     example_batch = next(offline_train_iterator)
+    # breakpoint()
     # example_batch = shard_batch(example_batch, sharding) # DO NOT shard here, will be handled in the expo agent forward passes
     
     ### Create trajectory sampler ###
@@ -544,14 +545,15 @@ def train_agent(_):
 
 
     # TODO: Remove hardcode and init with flags appropriately #
-    num_trajectories_to_collect = 10
+    num_trajectories_to_collect = 3
     online_env_steps = 0
     online_trajectories_added = 0
-    online_env_steps_this_epoch = 0
 
     ### EXPO agent training ###
     ### Online training ###
     for i in range(FLAGS.num_offline_epochs + FLAGS.num_online_epochs + 1):
+        online_env_steps_this_epoch = 0
+
         if i >= FLAGS.num_offline_epochs and FLAGS.num_online_epochs > 0:
             timer.tick("online_iter_total")
             # logging.info("Switching to online training...")
@@ -677,7 +679,8 @@ def train_agent(_):
                     batch_size=FLAGS.config.agent_kwargs.batch_size
                 )
             
-            # breakpoint()
+            print(timer.get_total_times(reset=False))
+            breakpoint()
             
             # Sample a batch from online and do update #
             # RLPD style online + offline update #

@@ -27,13 +27,19 @@ from jaxrl_m.utils.expo_utils import (
     subsample_ensemble,
     Agent,
     Temperature,
-    MLP,
+    # MLP,
     repeat_observations,
     repeat_observations_batched,
     repeat_observations_openpi,
     append_substr_to_dict_keys,
+    MLPResnetEncoding,
 )
+from jaxrl_m.utils.expo_utils import MLP as MLPEXPO 
+from jaxrl_m.networks.mlp import MLP
+from jaxrl_m.vision import encoders
+from jaxrl_m.common.encoding import EncodingWrapper, GCEncodingWrapper, MultiViewLCEncodingWrapper, MultiViewSingleLCEncodingWrapper, LCEncodingWrapperM, DualEncodingWrapper
 from jaxrl_m.common.typing import Batch, Data, PRNGKey
+from jaxrl_m.networks.actor_critic_nets import Critic, ensemblize
 
 
 from jaxrl_m.agents.continuous.pi_0 import PiPolicy
@@ -282,6 +288,8 @@ class ExpoPiLearnerCache(Agent):
         tau: float = 0.005,
         num_qs: int = 10,
         num_min_qs: Optional[int] = 2,
+        encoder_name: str = "resnetv1-18-bridge",
+        shared_actor_critic_encoder: bool = True,
         critic_dropout_rate: Optional[float] = None,
         critic_weight_decay: Optional[float] = None,
         critic_layer_norm: bool = True,
@@ -311,6 +319,7 @@ class ExpoPiLearnerCache(Agent):
         ddpm_temperature: float = 1.0,
         beta_schedule: str = 'vp',
         batch_size_dict_key: str = 'actions',
+        img_width: int = 224,
         q_clip_low: Optional[float] = -10000.0,
         q_clip_high: Optional[float] = 10000.0,
     ):
@@ -333,12 +342,6 @@ class ExpoPiLearnerCache(Agent):
 
         rng = jax.random.PRNGKey(seed)
         rng, actor_key, critic_key, temp_key = jax.random.split(rng, 4)
-
-        # Init Pi0 model #
-        # Initialize target_actor as a PiPolicy object with is_target=True; This ensures optimizer states are not created for target_actor #
-        # target_actor = PiPolicy(rng=rng, config=config, is_target=True)
-        actor = PiPolicy(rng=rng, config=config, is_target=False)
-        target_actor = actor
         
         if decay_steps is not None:
             actor_lr = optax.cosine_decay_schedule(actor_lr, decay_steps)
@@ -346,14 +349,36 @@ class ExpoPiLearnerCache(Agent):
         # Init edit actor #
         # Edit actor for now will take in pi0 VLM output hidden states, predicted base actions, concatenate them and compute residual action
         # dummy_observations = jnp.ones((batch_size, pi0_hidden_dims)) # For initializing the edit actor
-        dummy_observations = jnp.ones((batch_size, pi0_hidden_dims + state_dim)) # Inlcude state concatenation as well
+        # dummy_observations = jnp.ones((batch_size, pi0_hidden_dims + state_dim)) # Inlcude state concatenation as well
+        dummy_observations = {}
+        dummy_observations["observations"] = {}
+        dummy_observations["observations"]["image"] = jnp.ones((batch_size, 1, img_width, img_width, 3))
+        dummy_observations["observations"]["wrist_image"] = jnp.ones((batch_size, 1, img_width, img_width, 3))
+        dummy_observations["observations"]["proprio"] = jnp.ones((batch_size, state_dim))
         dummy_actions = jnp.ones((batch_size, action_dim)) # For initializing the critic
+        
+        # edit_actor_base_cls = partial(
+        #     MLP, hidden_dims=hidden_dims, dropout_rate=actor_drop, activate_final=True, use_pnorm=use_pnorm
+        # )
+        encoder_def_vision = encoders[encoder_name]()
+        encoder_def = DualEncodingWrapper(
+            encoder_def_vision,
+            use_proprio=True,
+            proprioceptive_dims=8,
+            stop_gradient=False,
+            enable_stacking=True,
+        )
+        edit_actor_base_mlp = partial(
+            MLPEXPO, hidden_dims=hidden_dims, dropout_rate=actor_drop, activate_final=True, use_pnorm=use_pnorm
+        )
         edit_actor_base_cls = partial(
-            MLP, hidden_dims=hidden_dims, dropout_rate=actor_drop, activate_final=True, use_pnorm=use_pnorm
+            MLPResnetEncoding,
+            encoder=encoder_def,
+            network=edit_actor_base_mlp,
         )
         edit_actor_def = TanhNormal(edit_actor_base_cls, action_dim)
-        edit_observations = jnp.concatenate([dummy_observations, jnp.ones((batch_size, action_dim))], axis=1)
-        edit_actor_params = edit_actor_def.init(actor_key, edit_observations)["params"]
+        # edit_observations = jnp.concatenate([dummy_observations, jnp.ones((batch_size, action_dim))], axis=1)
+        edit_actor_params = edit_actor_def.init(actor_key, dummy_observations["observations"], dummy_actions)["params"]
         edit_actor = TrainState.create(
             apply_fn=edit_actor_def.apply, 
             params=edit_actor_params, 
@@ -363,20 +388,52 @@ class ExpoPiLearnerCache(Agent):
                 optax.adam(learning_rate=actor_lr),
             )
         )
+        # breakpoint()
 
         # Init critic #
-        critic_base_cls = partial(
-            MLP,
-            hidden_dims=hidden_dims,
-            activate_final=True,
-            dropout_rate=critic_dropout_rate,
-            use_layer_norm=critic_layer_norm,
-            use_pnorm=use_pnorm,
-            # activations=nn.swish,
-            activations=nn.relu,
+        # critic_base_cls = partial(
+        #     MLP,
+        #     hidden_dims=hidden_dims,
+        #     activate_final=True,
+        #     dropout_rate=critic_dropout_rate,
+        #     use_layer_norm=critic_layer_norm,
+        #     use_pnorm=use_pnorm,
+        #     # activations=nn.swish,
+        #     activations=nn.relu,
+        # )
+        # critic_cls = partial(StateActionValue, base_cls=critic_base_cls)
+
+        if not shared_actor_critic_encoder:
+            encoder_def_vision = encoders[encoder_name]()
+            encoder_def = DualEncodingWrapper(
+                encoder_def_vision,
+                use_proprio=True,
+                proprioceptive_dims=None,
+                stop_gradient=False,
+                enable_stacking=True,
+            )
+        
+        critic_base_mlp = partial(
+            MLPEXPO, hidden_dims=hidden_dims, dropout_rate=actor_drop, activate_final=True, use_pnorm=use_pnorm
         )
-        critic_cls = partial(StateActionValue, base_cls=critic_base_cls)
-        critic_def = Ensemble(critic_cls, num=num_qs)
+        
+        # critic_backbone = partial(
+        #     MLP,
+        #     hidden_dims=hidden_dims,
+        #     activate_final=True,
+        #     dropout_rate=critic_dropout_rate,
+        #     use_layer_norm=critic_layer_norm,
+        #     activations=nn.relu,
+        # )
+        
+        # critic_backbone = ensemblize(critic_backbone, num_qs)(
+        #     name="critic_ensemble"
+        # )
+        # critic_def = partial(
+        #     Critic, encoder=encoder_def, network=critic_backbone
+        # )(name="critic") # Takes in both observations and actions as input to give Q(s,a)
+
+        # critic_def = Ensemble(critic_cls, num=num_qs)
 
         if critic_params is None:
             print("\n\n\nInitializing critic parameters loaded from checkpoint...\n\n\n")
@@ -414,6 +471,13 @@ class ExpoPiLearnerCache(Agent):
             params=temp_params,
             tx=optax.adam(learning_rate=temp_lr),
         )
+
+        # Init Pi0 model #
+        # Initialize target_actor as a PiPolicy object with is_target=True; This ensures optimizer states are not created for target_actor #
+        # target_actor = PiPolicy(rng=rng, config=config, is_target=True)
+        rng, init_rng = jax.random.split(rng)
+        actor = PiPolicy(rng=init_rng, config=config, is_target=False)
+        target_actor = actor
 
         del dummy_observations, dummy_actions, edit_observations
         del edit_actor_params, critic_params, temp_params
