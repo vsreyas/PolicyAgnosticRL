@@ -240,6 +240,24 @@ class ImageReplayBufferPi:
             *self.data_config.model_transforms.inputs,]
         # breakpoint()
         self.data_transforms = _transforms.compose(self.data_transforms)
+        ### Data Transforms from openpi printed here for reference ###
+        ### self.data_transforms ###
+        #     CompositeTransform(transforms=[LiberoInputs(model_type=<ModelType.PI05: 'pi05'>), Normalize(norm_stats={'state': NormStats(mean=array([-0.02333199, -0.03835219,  1.09924734,  2.60959983, -2.11390162,
+        #    -0.50495809,  0.02827548, -0.02936155]), std=array([0.06683931, 0.14670692, 0.05888397, 0.32470447, 0.71371919,
+        #    0.24628362, 0.01386034, 0.01282625]), q01=array([-1.99917656e-01, -3.03506839e-01,  9.98982466e-01,  1.84780613e+00,
+        #    -3.10419695e+00, -1.15770817e+00,  2.19688888e-03, -4.00499479e-02]), q99=array([ 0.11406736,  0.21919124,  1.20753114,  3.25425425, -0.00430786,
+        #    -0.04692425,  0.04000679, -0.00655253])), 'actions': NormStats(mean=array([ 0.0312492 , -0.0297108 , -0.04181153,  0.00633662,  0.00524822,
+        #    -0.01924808, -0.1543818 ]), std=array([0.21885398, 0.36008978, 0.2588155 , 0.03193701, 0.04399477,
+        #    0.10117135, 0.98801124]), q01=array([-0.41016962, -0.82262786, -0.4774634 , -0.10073657, -0.10404021,
+        #    -0.31517271, -1.        ]), q99=array([0.58339288, 0.79488643, 0.61317268, 0.10166893, 0.14995007,
+        #    0.19370399, 1.        ]))}, use_quantiles=True, strict=False), InjectDefaultPrompt(prompt=None), 
+        # ResizeImages(height=224, width=224), 
+        # TokenizePrompt(tokenizer=<openpi.models.tokenizer.PaligemmaTokenizer object at 0x7fbf100b3690>, discrete_state_input=False), 
+        # PadStatesAndActions(model_action_dim=32)])
+        ##############################
+        self.fast_data_transforms = _transforms.compose([
+            _transforms.Normalize(self.data_norm_stats, use_quantiles=self.data_config.use_quantile_norm),
+        ])
         self.task_name = task_name
         self.use_8D = use_8D
         self.final_step_sparse_reward = final_step_sparse_reward
@@ -315,21 +333,21 @@ class ImageReplayBufferPi:
             ds = ds.unbatch()   # windows become elements here
             return ds
 
-        dataset = files.interleave(
-            per_file,
-            cycle_length=tf.data.AUTOTUNE,
-            num_parallel_calls=tf.data.AUTOTUNE,
-            deterministic=not self.is_train,
-        )
-        # dataset = files.flat_map(
+        # dataset = files.interleave(
         #     per_file,
-        #     # cycle_length=tf.data.AUTOTUNE,
-        #     # num_parallel_calls=tf.data.AUTOTUNE,
-        #     # deterministic=not self.is_train,
+        #     cycle_length=tf.data.AUTOTUNE,
+        #     num_parallel_calls=tf.data.AUTOTUNE,
+        #     deterministic=not self.is_train,
         # )
+        dataset = files.flat_map(
+            per_file,
+            # cycle_length=tf.data.AUTOTUNE,
+            # num_parallel_calls=tf.data.AUTOTUNE,
+            # deterministic=not self.is_train,
+        )
         
         if self.is_train:
-            dataset = dataset.shuffle(8192, seed=seed, reshuffle_each_iteration=True)
+            dataset = dataset.shuffle(20000, seed=seed, reshuffle_each_iteration=True)
             dataset = dataset.repeat()
 
         # yields raw serialized examples
@@ -824,90 +842,166 @@ class ImageReplayBufferPi:
                 out_ns["image_mask"]["left_wrist_0_rgb"], # 18
                 out_ns["image_mask"]["right_wrist_0_rgb"],# 19
             ]
-
-        outputs = tf.py_function(
-            func=_apply_data_transforms_numpy,
-            inp=[
-                state_tf, # (W+1,)
-                actions_tf, # (W,)
-                image_tf[0], # (W+1, H, W, C)
-                image_tf[1], # (W+1, H, W, C)
-                prompt_tf, # (W,)
-                state_tf_ns, # (W,)
-                image_tf_ns[0], # (W, H, W, C)
-                image_tf_ns[1], # (W, H, W, C)
-                next_actions_tf, # (W,)
-            ],
-            Tout=[
-                tf.float32,  # state
-                tf.float32,  # actions
-
-                tf.float32,  # base_0_rgb
-                tf.float32,  # left_wrist_0_rgb
-                tf.float32,  # right_wrist_0_rgb
-
-                tf.bool,     # mask base
-                tf.bool,     # mask left
-                tf.bool,     # mask right
-
-                tf.int32,    # tokenized_prompt
-                tf.bool,     # tokenized_prompt_mask
-                tf.int32,    # token_ar_mask
-                tf.bool,     # token_loss_mask
-
-                tf.float32,  # next state
-                tf.float32,  # next actions
-
-                # Next images
-                tf.float32,  # base_0_rgb
-                tf.float32,  # left_wrist_0_rgb
-                tf.float32,  # right_wrist_0_rgb
-
-                # Next image masks
-                tf.bool,     # mask base
-                tf.bool,     # mask left
-                tf.bool,     # mask right
-            ]
-        )
-
-        idx = 0
-        out['observations'] = {}
-        out['observations']["proprio"] = outputs[idx]; idx += 1
-        # out["actions"] = outputs[idx]; idx += 1 #drop the last action to align dimensions
-        out["actions"] = actions_tf; idx += 1
-
         
-        out['observations']["image"] = outputs[idx]; idx += 1
-        out['observations']["wrist_image"] = outputs[idx]; idx += 1
-        out['observations']["image_3"] = outputs[idx]; idx += 1
+        def _apply_fast_data_transforms_numpy(states, next_states):
+            if hasattr(states, "numpy"):
+                states = states.numpy()
+            if hasattr(next_states, "numpy"):
+                next_states = next_states.numpy()
+            
+            if self.use_8D and states.shape[-1] != 8:
+                states = convert_state_15_to_8(states)
+                next_states = convert_state_15_to_8(next_states)
+            
+            inputs = {
+                "state": states,
+            }
+            inputs_ns = {
+                "state": next_states,
+            }
+            out = self.fast_data_transforms(inputs)
+            out_ns = self.fast_data_transforms(inputs_ns)
+            return out["state"], out_ns["state"]
+
+        if not self.drop_images_from_output:
+            outputs = tf.py_function(
+                func=_apply_data_transforms_numpy,
+                inp=[
+                    state_tf, # (W+1,)
+                    actions_tf, # (W,)
+                    image_tf[0], # (W+1, H, W, C)
+                    image_tf[1], # (W+1, H, W, C)
+                    prompt_tf, # (W,)
+                    state_tf_ns, # (W,)
+                    image_tf_ns[0], # (W, H, W, C)
+                    image_tf_ns[1], # (W, H, W, C)
+                    next_actions_tf, # (W,)
+                ],
+                Tout=[
+                    tf.float32,  # state
+                    tf.float32,  # actions
+
+                    tf.float32,  # base_0_rgb
+                    tf.float32,  # left_wrist_0_rgb
+                    tf.float32,  # right_wrist_0_rgb
+
+                    tf.bool,     # mask base
+                    tf.bool,     # mask left
+                    tf.bool,     # mask right
+
+                    tf.int32,    # tokenized_prompt
+                    tf.bool,     # tokenized_prompt_mask
+                    tf.int32,    # token_ar_mask
+                    tf.bool,     # token_loss_mask
+
+                    tf.float32,  # next state
+                    tf.float32,  # next actions
+
+                    # Next images
+                    tf.float32,  # base_0_rgb
+                    tf.float32,  # left_wrist_0_rgb
+                    tf.float32,  # right_wrist_0_rgb
+
+                    # Next image masks
+                    tf.bool,     # mask base
+                    tf.bool,     # mask left
+                    tf.bool,     # mask right
+                ]
+            )
+
+            idx = 0
+            out['observations'] = {}
+            out['observations']["proprio"] = outputs[idx]; idx += 1
+            # out["actions"] = outputs[idx]; idx += 1 #drop the last action to align dimensions
+            out["actions"] = actions_tf; idx += 1
+
+            
+            out['observations']["image"] = outputs[idx]; idx += 1
+            out['observations']["wrist_image"] = outputs[idx]; idx += 1
+            out['observations']["image_3"] = outputs[idx]; idx += 1
 
 
-        out["observations_image_mask"] = {}
-        out["observations_image_mask"]["image"] = outputs[idx]; idx += 1
-        out["observations_image_mask"]["wrist_image"] = outputs[idx]; idx += 1
-        out["observations_image_mask"]["image_3"] = outputs[idx]; idx += 1
+            out["observations_image_mask"] = {}
+            out["observations_image_mask"]["image"] = outputs[idx]; idx += 1
+            out["observations_image_mask"]["wrist_image"] = outputs[idx]; idx += 1
+            out["observations_image_mask"]["image_3"] = outputs[idx]; idx += 1
 
-        out["tokenized_prompt"] = outputs[idx]; idx += 1
-        out["tokenized_prompt_mask"]= outputs[idx]; idx += 1
-        out["token_ar_mask"] = outputs[idx]; idx += 1
-        out["token_loss_mask"] = outputs[idx]; idx += 1
-        
-        out['prompt'] = out['prompt']
+            out["tokenized_prompt"] = outputs[idx]; idx += 1
+            out["tokenized_prompt_mask"]= outputs[idx]; idx += 1
+            out["token_ar_mask"] = outputs[idx]; idx += 1
+            out["token_loss_mask"] = outputs[idx]; idx += 1
+            
+            out['prompt'] = out['prompt']
 
-        # Apply to next states/images
-        out['next_observations'] = {}
-        out['next_observations']["proprio"] = outputs[idx]; idx += 1
-        # out["next_actions"] = outputs[idx]; idx += 1
-        out["next_actions"] = next_actions_tf; idx += 1
+            # Apply to next states/images
+            out['next_observations'] = {}
+            out['next_observations']["proprio"] = outputs[idx]; idx += 1
+            # out["next_actions"] = outputs[idx]; idx += 1
+            out["next_actions"] = next_actions_tf; idx += 1
 
-        out['next_observations']["image"] = outputs[idx]; idx += 1
-        out['next_observations']["wrist_image"] = outputs[idx]; idx += 1
-        out['next_observations']["image_3"] = outputs[idx]; idx += 1
+            out['next_observations']["image"] = outputs[idx]; idx += 1
+            out['next_observations']["wrist_image"] = outputs[idx]; idx += 1
+            out['next_observations']["image_3"] = outputs[idx]; idx += 1
 
-        out['next_observations_image_mask'] = {}
-        out['next_observations_image_mask']["image"] = outputs[idx]; idx += 1
-        out['next_observations_image_mask']["wrist_image"] = outputs[idx]; idx += 1
-        out['next_observations_image_mask']["image_3"] = outputs[idx]; idx += 1
+            out['next_observations_image_mask'] = {}
+            out['next_observations_image_mask']["image"] = outputs[idx]; idx += 1
+            out['next_observations_image_mask']["wrist_image"] = outputs[idx]; idx += 1
+            out['next_observations_image_mask']["image_3"] = outputs[idx]; idx += 1
+        else:
+            # Experimenting with speeding things up #
+            # state_tf_norm, state_tf_ns_norm = _apply_fast_data_transforms_numpy(state_tf, state_tf_ns)
+            states_norm_outputs = tf.py_function(
+                func=_apply_fast_data_transforms_numpy,
+                inp=[
+                    state_tf, # (W+1,)
+                    state_tf_ns, # (W,)
+                ],
+                Tout=[
+                    tf.float32,  # state
+                    tf.float32,  # next state
+                ]
+            )
+            state_tf_norm = states_norm_outputs[0]
+            state_tf_ns_norm = states_norm_outputs[1]
+
+            idx = 0
+            out['observations'] = {}
+            out['observations']["proprio"] = state_tf_norm
+            # out["actions"] = outputs[idx]; idx += 1 #drop the last action to align dimensions
+            out["actions"] = actions_tf; idx += 1
+
+            
+            out['observations']["image"] = image_tf[0]
+            out['observations']["wrist_image"] = image_tf[1]
+            out['observations']["image_3"] = image_tf[0]
+
+
+            out["observations_image_mask"] = {}
+            out["observations_image_mask"]["image"] = tf.ones_like(image_tf[0], dtype=tf.bool)
+            out["observations_image_mask"]["wrist_image"] = tf.ones_like(image_tf[1], dtype=tf.bool)
+            out["observations_image_mask"]["image_3"] = tf.ones_like(image_tf[0], dtype=tf.bool)
+
+            out["tokenized_prompt"] = prompt_tf
+            out["tokenized_prompt_mask"]= tf.ones_like(prompt_tf, dtype=tf.bool)
+            out["token_ar_mask"] = tf.zeros_like(prompt_tf, dtype=tf.int32)
+            out["token_loss_mask"] = tf.ones_like(prompt_tf, dtype=tf.bool)
+            
+            out['prompt'] = prompt_tf
+
+            # Apply to next states/images
+            out['next_observations'] = {}
+            out['next_observations']["proprio"] = state_tf_ns_norm
+            # out["next_actions"] = outputs[idx]; idx += 1
+            out["next_actions"] = next_actions_tf; idx += 1
+
+            out['next_observations']["image"] = image_tf_ns[0]
+            out['next_observations']["wrist_image"] = image_tf_ns[1]
+            out['next_observations']["image_3"] = image_tf_ns[0]
+
+            out['next_observations_image_mask'] = {}
+            out['next_observations_image_mask']["image"] = tf.ones_like(image_tf_ns[0], dtype=tf.bool)
+            out['next_observations_image_mask']["wrist_image"] = tf.ones_like(image_tf_ns[1], dtype=tf.bool)
+            out['next_observations_image_mask']["image_3"] = tf.ones_like(image_tf_ns[0], dtype=tf.bool)
 
         # Add episode ID and episode timestep
         # Priority: 1) stored_episode_id from TFRecord, 2) filename_episode_id from filename, 3) -1 as fallback
@@ -944,15 +1038,16 @@ class ImageReplayBufferPi:
             text_features = emb.cpu().numpy().squeeze().astype("float32")
             return text_features
 
-        clip_emb = tf.py_function(
-            func=_encode_clip,
-            inp=[out["prompt"][0]],
-            Tout=tf.float32,
-        )
-        clip_emb.set_shape([512])  # ViT-B/32 output dim
-        num_samples = tf.shape(out["prompt"])[0]
-        clip_emb = tf.repeat(clip_emb[None, :], num_samples, axis=0)
-        out['observations']["language"] = clip_emb
+        if not self.drop_images_from_output:
+            clip_emb = tf.py_function(
+                func=_encode_clip,
+                inp=[out["prompt"][0]],
+                Tout=tf.float32,
+            )
+            clip_emb.set_shape([512])  # ViT-B/32 output dim
+            num_samples = tf.shape(out["prompt"])[0]
+            clip_emb = tf.repeat(clip_emb[None, :], num_samples, axis=0)
+            out['observations']["language"] = clip_emb
 
         # Keep prompt for inference #
         MAX_PROMPT_BYTES = 256
@@ -966,14 +1061,15 @@ class ImageReplayBufferPi:
             padded = tf.pad(byte_values, [[0, pad_len]])
             return padded  # [MAX_PROMPT_BYTES]
         
-        encoded_prompts = tf.map_fn(
-            encode_prompt_to_bytes,
-            out["prompt"],
-            fn_output_signature=tf.TensorSpec([MAX_PROMPT_BYTES], tf.uint8),
-        )
-        out["prompt_bytes"] = encoded_prompts
-        # breakpoint()
-        out.pop("prompt")
+        if not self.drop_images_from_output:
+            encoded_prompts = tf.map_fn(
+                encode_prompt_to_bytes,
+                out["prompt"],
+                fn_output_signature=tf.TensorSpec([MAX_PROMPT_BYTES], tf.uint8),
+            )
+            out["prompt_bytes"] = encoded_prompts
+            # breakpoint()
+            out.pop("prompt")
 
         if "vlm_output" in parsed_tensors:
             vlm_output_tf = parsed_tensors["vlm_output"]

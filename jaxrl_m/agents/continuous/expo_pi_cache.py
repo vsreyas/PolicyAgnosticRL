@@ -7,8 +7,8 @@ import flax
 import gym
 import jax
 jax.config.update("jax_log_compiles", True)
-jax.config.update("jax_explain_cache_misses", True)
-jax.config.update("jax_traceback_filtering", "off")  # more context in logs
+# jax.config.update("jax_explain_cache_misses", True)
+# jax.config.update("jax_traceback_filtering", "off")  # more context in logs
 
 import jax.numpy as jnp
 import optax
