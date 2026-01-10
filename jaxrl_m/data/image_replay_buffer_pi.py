@@ -224,7 +224,8 @@ class ImageReplayBufferPi:
         self.use_wrist_view = use_wrist_view
         
         # device = "cuda" if torch.cuda.is_available() else "cpu"
-        device = "cuda:0" if torch.cuda.is_available() else "cpu" # For multi-gpu case
+        # device = "cuda:0" if torch.cuda.is_available() else "cpu" # For multi-gpu case
+        device = "cpu"
         self._clip_model, self._clip_preprocess = clip.load("ViT-B/32", device=device)
         self._clip_model.eval()
         self._clip_device = device
@@ -328,7 +329,7 @@ class ImageReplayBufferPi:
         # )
         
         if self.is_train:
-            dataset = dataset.shuffle(2048, seed=seed, reshuffle_each_iteration=True)
+            dataset = dataset.shuffle(8192, seed=seed, reshuffle_each_iteration=True)
             dataset = dataset.repeat()
 
         # yields raw serialized examples
@@ -1083,8 +1084,8 @@ class ImageReplayBufferPi:
         return self.tf_dataset.batch(
                 batch_size,
                 num_parallel_calls=tf.data.experimental.AUTOTUNE,
-                drop_remainder=True,
-                # drop_remainder=False,
+                # drop_remainder=True,
+                drop_remainder=False,
                 deterministic=not self.is_train,).prefetch(tf.data.AUTOTUNE).as_numpy_iterator()
         # for batch in tf_iter:
         #     flat = {}

@@ -8,6 +8,10 @@ import cv2
 import flax
 import gym
 import jax
+jax.config.update("jax_log_compiles", True)
+jax.config.update("jax_explain_cache_misses", True)
+jax.config.update("jax_traceback_filtering", "off")  # more context in logs
+
 import jax.numpy as jnp
 import numpy as np
 import seaborn as sns
@@ -549,7 +553,7 @@ def train_agent(_):
 
 
     # TODO: Remove hardcode and init with flags appropriately #
-    num_trajectories_to_collect = 5
+    num_trajectories_to_collect = 1
     online_env_steps = 0
     online_trajectories_added = 0
 

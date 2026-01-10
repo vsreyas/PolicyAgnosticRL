@@ -6,6 +6,10 @@ from typing import Dict, Optional, Sequence, Tuple
 import flax
 import gym
 import jax
+jax.config.update("jax_log_compiles", True)
+jax.config.update("jax_explain_cache_misses", True)
+jax.config.update("jax_traceback_filtering", "off")  # more context in logs
+
 import jax.numpy as jnp
 import optax
 from flax import struct
@@ -19,6 +23,7 @@ import jax.tree_util as jtu
 
 import numpy as np
 import copy
+import time
 
 from jaxrl_m.utils.expo_utils import (
     TanhNormal,
@@ -76,6 +81,7 @@ def compute_q_all(critic_fn, critic_params, observations, actions):
     ),
 )
 def _edit_actor_loss_and_grad(
+    edit_actor,
     actor_params,
     critic_params,
     temp_params,
@@ -150,12 +156,15 @@ def _edit_actor_loss_and_grad(
     (loss, metrics), grads = jax.value_and_grad(
         loss_fn, has_aux=True
     )(actor_params)
-    return grads, metrics
+    edit_actor = edit_actor.apply_gradients(grads=grads)
+
+    return edit_actor, grads, metrics
 
 
-@partial(jax.jit, static_argnames=("critic_apply_fn", "edit_actor_apply_fn", "target_critic_apply_fn", "q_clip_low", "q_clip_high"))
+@partial(jax.jit, static_argnames=("critic_apply_fn", "edit_actor_apply_fn", "target_critic_apply_fn", "q_clip_low", "q_clip_high", "tau"))
 def _critic_loss_and_grad(
     critic_params,
+    target_critic_params,
     vlm_output,
     actions,
     # target_q,
@@ -163,6 +172,7 @@ def _critic_loss_and_grad(
     key,
     critic_apply_fn,
     # #
+    target_params, # Subsampled target critic parameters
     next_vlm_output,
     next_base_actions,
     sample_key,
@@ -170,10 +180,12 @@ def _critic_loss_and_grad(
     edit_actor_params,
     edit_action_scale,
     target_critic_apply_fn,
-    target_critic_params,
     terminals,
     rewards,
     discount,
+    # #
+    critic,
+    tau,
     # #
     q_clip_low,
     q_clip_high,
@@ -183,7 +195,7 @@ def _critic_loss_and_grad(
     r_observations = jnp.concatenate([next_vlm_output, next_base_actions], axis=1) # (1, pi0_hidden_dims + action_horizon * action_dim)
     r_samples, _ =  _sample_actions(sample_key, edit_actor_apply_fn, edit_actor_params, r_observations) # (n_edit_samples, action_horizon * action_dim)
     next_actions = r_samples * edit_action_scale + next_base_actions
-    next_qs = compute_q(target_critic_apply_fn, target_critic_params, next_vlm_output, next_actions) # (batch_size, )
+    next_qs = compute_q(target_critic_apply_fn, target_params, next_vlm_output, next_actions) # (batch_size, )
     masks = 1.0 - terminals
     target_q = rewards + discount * masks * next_qs # (batch_size, )
     target_q = jax.lax.stop_gradient(target_q)
@@ -243,8 +255,23 @@ def _critic_loss_and_grad(
     (loss, metrics), grads = jax.value_and_grad(
         loss_fn, has_aux=True
     )(critic_params)
-    return grads, metrics
+    critic = critic.apply_gradients(grads=grads)
+    target_critic_params = optax.incremental_update(
+        critic.params, target_critic_params, tau
+    )
+    return critic, target_critic_params, grads, metrics
 
+@partial(jax.jit, static_argnames="temp_apply_fn")
+def _temperature_loss_and_grad(temp, temp_params, entropy, target_entropy, temp_apply_fn):
+    def loss_fn(temp_params):
+        temperature = temp_apply_fn({"params": temp_params})
+        temp_loss = temperature * (entropy - target_entropy).mean()
+        return temp_loss, {"temp_loss": temp_loss}
+
+    (loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(temp_params)
+    temp = temp.apply_gradients(grads=grads)
+
+    return temp, grads, metrics
 
 @partial(jax.jit, static_argnames="apply_fn")
 def _sample_actions(rng, apply_fn, params, observations: np.ndarray) -> np.ndarray:
@@ -345,7 +372,7 @@ class ExpoPiLearnerCache(Agent):
         action_dim = action_dim * action_horizon
 
         if target_entropy is None:
-            target_entropy = -action_dim / 2
+            target_entropy = -action_dim / 2.0
             
             if adjust_target_entropy:
                 target_entropy = -action_dim / 2 + action_dim * jnp.log(edit_action_scale)
@@ -763,7 +790,8 @@ class ExpoPiLearnerCache(Agent):
         seed, rng = jax.random.split(rng)
         vlm_output = batch['vlm_output']
         # Use JITted version #
-        grads, actor_info = _edit_actor_loss_and_grad(
+        edit_actor, grads, actor_info = _edit_actor_loss_and_grad(
+            self.edit_actor,
             self.edit_actor.params,
             self.critic.params,
             self.temp.params,
@@ -780,19 +808,18 @@ class ExpoPiLearnerCache(Agent):
         )
 
         actor_info["edit_actor_grad_norm"] = optax.global_norm(grads)
-        edit_actor = self.edit_actor.apply_gradients(grads=grads)
+        # edit_actor = self.edit_actor.apply_gradients(grads=grads)
         actor_info["edit_actor_param_norm"] = optax.global_norm(edit_actor.params)
 
         return self.replace(edit_actor=edit_actor, rng=rng), actor_info
         
     def update_temperature(self, entropy: float) -> Tuple[Agent, Dict[str, float]]:
-        def temperature_loss_fn(temp_params):
-            temperature = self.temp.apply_fn({"params": temp_params})
-            temp_loss = temperature * (entropy - self.target_entropy).mean()
-            return temp_loss, {"temp_loss": temp_loss} # , "entropy": entropy, "target_entropy": self.target_entropy.mean(), "temperature": temperature.mean()}
+        # temp, grads, temp_info = temperature_loss_fn(self.temp.params, entropy, self.target_entropy, self.temp.apply_fn)
+        temp, grads, temp_info = _temperature_loss_and_grad(self.temp, self.temp.params, entropy, self.target_entropy, self.temp.apply_fn)
+        # temp = self.temp.apply_gradients(grads=grads)
 
-        grads, temp_info = jax.grad(temperature_loss_fn, has_aux=True)(self.temp.params)
-        temp = self.temp.apply_gradients(grads=grads)
+        temp_info['temp_grad_norm'] = optax.global_norm(grads)
+        temp_info['temp_param_norm'] = optax.global_norm(temp.params)
 
         return self.replace(temp=temp), temp_info
 
@@ -847,11 +874,12 @@ class ExpoPiLearnerCache(Agent):
         # target_q = batch["rewards"] + self.discount * masks * next_qs # (batch_size, )
 
         # Use JITted version #
-        # timer.tick("critic_loss_and_grad_time")
+        timer.tick("critic_loss_and_grad_time")
         key, rng = jax.random.split(rng)
         key, sample_key = jax.random.split(key)
-        grads, info = _critic_loss_and_grad(
+        critic, target_critic_params, grads, info = _critic_loss_and_grad(
             self.critic.params,
+            self.target_critic.params,
             current_vlm_output,
             actions,
             # target_q,
@@ -859,6 +887,7 @@ class ExpoPiLearnerCache(Agent):
             rng,
             self.critic.apply_fn,
             # #
+            target_params,
             next_vlm_output,
             next_base_actions,
             sample_key,
@@ -866,23 +895,30 @@ class ExpoPiLearnerCache(Agent):
             self.edit_actor.params,
             self.edit_action_scale,
             self.target_critic.apply_fn,
-            target_params,
             batch["terminals"],
             batch["rewards"],
             self.discount,
             # #
+            self.critic,
+            self.tau,
+            # #
             self.q_clip_low,
             self.q_clip_high,
         )
+        timer.tock("critic_loss_and_grad_time")
 
+        timer.tick("apply_gradients_time")
         info["critic_grad_norm"] = optax.global_norm(grads)
-        critic = self.critic.apply_gradients(grads=grads)
+        # critic = self.critic.apply_gradients(grads=grads)
+        timer.tock("apply_gradients_time")
         # timer.tock("critic_loss_and_grad_time")
 
-        target_critic_params = optax.incremental_update(
-            critic.params, self.target_critic.params, self.tau
-        )
+        timer.tick("incremental_update_time")
+        # target_critic_params = optax.incremental_update(
+        #     critic.params, self.target_critic.params, self.tau
+        # )
         target_critic = self.target_critic.replace(params=target_critic_params)
+        timer.tock("incremental_update_time")
 
         info["critic_param_norm"] = optax.global_norm(critic.params)
         info["target_critic_param_norm"] = optax.global_norm(target_critic.params)
@@ -938,6 +974,10 @@ class ExpoPiLearnerCache(Agent):
         timer.tock("preprocess_time")
         timer.tick("update_critic_time")
 
+        batch_size = state.shape[0]
+        print("---")
+        print("Batch size for update: ", batch_size)
+
         seed = kwargs.pop("seed", None)
         assert seed is not None, "Seed must be provided"
         seed, rng = jax.random.split(seed)
@@ -954,6 +994,7 @@ class ExpoPiLearnerCache(Agent):
             break
         
         new_agent, critic_info = new_agent.update_critic(batch, timer=timer, seed=rng)
+
         critic_info = append_substr_to_dict_keys(critic_info, "critic")
         timer.tock("update_critic_time")
         # breakpoint()
