@@ -916,12 +916,14 @@ class ExpoPiLearnerCache(Agent):
         state = batch['observations']['proprio'][:, :8].copy()
         next_state = batch['next_observations']['proprio'][:, :8].copy()
         # breakpoint()
-        # # Normalize state and actions #
-        # # Observations #
+        # Normalize state and actions #
+        # Observations #
         # observations = self.actor.convert_to_openpi_format_infer(batch, obs_key="observations")
         # obs = self.actor.input_data_transforms(observations)
         # next_observations = self.actor.convert_to_openpi_format_infer(batch, obs_key="next_observations")
         # next_obs = self.actor.input_data_transforms(next_observations)
+        # state = obs['state'][:, :8].copy()
+        # next_state = next_obs['state'][:, :8].copy()
         # Filter batch to only keep relevant information #
         relevant_keys = [
             "actions", "rewards", "masks", "mc_returns", 

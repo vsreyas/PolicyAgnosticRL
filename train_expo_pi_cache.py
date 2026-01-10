@@ -445,6 +445,7 @@ def train_agent(_):
             use_reverse_data_paths=False,
             alpha=0.1,
             scale_success_reward=False,
+            drop_images_from_output=True, # Do not need it as we are caching things are trajectory generation time #
         )
         # breakpoint()
         libero_config = get_libero_config()
@@ -548,7 +549,7 @@ def train_agent(_):
 
 
     # TODO: Remove hardcode and init with flags appropriately #
-    num_trajectories_to_collect = 1
+    num_trajectories_to_collect = 5
     online_env_steps = 0
     online_trajectories_added = 0
 
@@ -674,6 +675,7 @@ def train_agent(_):
                     use_reverse_data_paths=True,
                     alpha=0.1,
                     scale_success_reward=False,
+                    drop_images_from_output=True,
                     **FLAGS.config.image_replay_buffer_kwargs,
                 )
                 timer.tock("recreate_image_replay_buffer_iterator")

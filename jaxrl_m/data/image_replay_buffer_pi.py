@@ -209,6 +209,7 @@ class ImageReplayBufferPi:
         keep_only_full_chuked_windows: bool = True,
         alpha: float = 1.0,  # Reward scaling factor for terminal states
         scale_success_reward: bool = False,  # Whether to scale terminal rewards by alpha/(1-gamma)
+        drop_images_from_output: bool = False,
     ):
         self.goal_relabeling_strategy = goal_relabeling_strategy
         self.goal_relabeling_kwargs = goal_relabeling_kwargs
@@ -248,6 +249,7 @@ class ImageReplayBufferPi:
         self.keep_only_full_chuked_windows = keep_only_full_chuked_windows
         self.alpha = alpha
         self.scale_success_reward = scale_success_reward
+        self.drop_images_from_output = drop_images_from_output
         dataset = self._construct_tf_dataset(data_paths, seed)
 
         self.train = train
@@ -312,21 +314,21 @@ class ImageReplayBufferPi:
             ds = ds.unbatch()   # windows become elements here
             return ds
 
-        # dataset = files.interleave(
-        #     per_file,
-        #     cycle_length=tf.data.AUTOTUNE,
-        #     num_parallel_calls=tf.data.AUTOTUNE,
-        #     deterministic=not self.is_train,
-        # )
-        dataset = files.flat_map(
+        dataset = files.interleave(
             per_file,
-            # cycle_length=tf.data.AUTOTUNE,
-            # num_parallel_calls=tf.data.AUTOTUNE,
-            # deterministic=not self.is_train,
+            cycle_length=tf.data.AUTOTUNE,
+            num_parallel_calls=tf.data.AUTOTUNE,
+            deterministic=not self.is_train,
         )
+        # dataset = files.flat_map(
+        #     per_file,
+        #     # cycle_length=tf.data.AUTOTUNE,
+        #     # num_parallel_calls=tf.data.AUTOTUNE,
+        #     # deterministic=not self.is_train,
+        # )
         
         if self.is_train:
-            dataset = dataset.shuffle(4096, seed=seed, reshuffle_each_iteration=True)
+            dataset = dataset.shuffle(2048, seed=seed, reshuffle_each_iteration=True)
             dataset = dataset.repeat()
 
         # yields raw serialized examples
@@ -1008,6 +1010,20 @@ class ImageReplayBufferPi:
             )
             out['rewards'] = out['rewards'] + terminal_bonus
 
+        if self.drop_images_from_output:
+            out['observations'].pop('image')
+            out['observations'].pop('wrist_image')
+            out['observations'].pop('image_3')
+            out['observations_image_mask'].pop('image')
+            out['observations_image_mask'].pop('wrist_image')
+            out['observations_image_mask'].pop('image_3')
+            out['next_observations'].pop('image')
+            out['next_observations'].pop('wrist_image')
+            out['next_observations'].pop('image_3')
+            out['next_observations_image_mask'].pop('image')
+            out['next_observations_image_mask'].pop('wrist_image')
+            out['next_observations_image_mask'].pop('image_3')
+
         return out
     
     def _filter_last_ah_timesteps(self, out):
@@ -1067,8 +1083,8 @@ class ImageReplayBufferPi:
         return self.tf_dataset.batch(
                 batch_size,
                 num_parallel_calls=tf.data.experimental.AUTOTUNE,
-                # drop_remainder=True,
-                drop_remainder=False,
+                drop_remainder=True,
+                # drop_remainder=False,
                 deterministic=not self.is_train,).prefetch(tf.data.AUTOTUNE).as_numpy_iterator()
         # for batch in tf_iter:
         #     flat = {}
