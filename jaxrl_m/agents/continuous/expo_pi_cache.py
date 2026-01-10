@@ -302,7 +302,7 @@ class ExpoPiLearnerCache(Agent):
         batch_split: int = 1, 
         M: int = 0,
         n_edit_samples: int = 4, 
-        edit_action_scale: float = 0.25,
+        edit_action_scale: float = 0.1,
         actor_layer_norm: bool = True,
         clip_sampler: bool = True,
         decay_steps: Optional[int] = int(3e6),
@@ -871,16 +871,19 @@ class ExpoPiLearnerCache(Agent):
         new_agent = self
         # breakpoint()
         timer.tick("total_update_time")
-        timer.tick("update_critic_time")
+        timer.tick("preprocess_time")
 
         # Preprocess batch at once to save computation #
         batch = self.preproess_batch(_observations.copy())
-        # Normalize state and actions #
-        # Observations #
-        observations = self.actor.convert_to_openpi_format_infer(batch, obs_key="observations")
-        obs = self.actor.input_data_transforms(observations)
-        next_observations = self.actor.convert_to_openpi_format_infer(batch, obs_key="next_observations")
-        next_obs = self.actor.input_data_transforms(next_observations)
+        state = batch['observations']['proprio'][:, :8].copy()
+        next_state = batch['next_observations']['proprio'][:, :8].copy()
+        # breakpoint()
+        # # Normalize state and actions #
+        # # Observations #
+        # observations = self.actor.convert_to_openpi_format_infer(batch, obs_key="observations")
+        # obs = self.actor.input_data_transforms(observations)
+        # next_observations = self.actor.convert_to_openpi_format_infer(batch, obs_key="next_observations")
+        # next_obs = self.actor.input_data_transforms(next_observations)
         # Filter batch to only keep relevant information #
         relevant_keys = [
             "actions", "rewards", "masks", "mc_returns", 
@@ -888,8 +891,12 @@ class ExpoPiLearnerCache(Agent):
             "next_actions",
         ]
         batch = {k: v for k, v in batch.items() if k in relevant_keys}
-        batch['state'] = obs['state'][:, :8].copy()
-        batch['next_state'] = next_obs['state'][:, :8].copy()
+        # Normalization of state has already happened in image_replay_buffer_pi.py #
+        batch['state'] = state
+        batch['next_state'] = next_state
+
+        timer.tock("preprocess_time")
+        timer.tick("update_critic_time")
 
         seed = kwargs.pop("seed", None)
         assert seed is not None, "Seed must be provided"

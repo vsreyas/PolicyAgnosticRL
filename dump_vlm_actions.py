@@ -214,8 +214,10 @@ def main(_):
                 # breakpoint()
                 
                 # Extract states
-                current_state = obs['state'][:, :8]  # State dimension (8D)
-                next_state = next_obs['state'][:, :8]
+                # current_state = obs['state'][:, :8]  # State dimension (8D)
+                # next_state = next_obs['state'][:, :8]
+                current_state = batch_processed['observations']['proprio'][:, :8]
+                next_state = batch_processed['next_observations']['proprio'][:, :8]
                 
                 # Sample VLM outputs from current observations using base policy
                 # This is what batch['current_vlm_output'] would contain

@@ -20,7 +20,7 @@ import numpy as np
 from typing import Dict, Any
 import torch
 import clip
-from robosuite.utils.transform_utils import quat2axisangle    
+from robosuite.utils.transform_utils import quat2axisangle
 import json
 from tqdm import tqdm
 

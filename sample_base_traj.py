@@ -540,6 +540,7 @@ def train_agent(_):
             trajectories = []
             q_vs_mc_returns_vals = []
             for traj_index in range(num_trajectories_to_collect):
+                print("Traj Index: ", traj_index)
                 timer.tick("trajectory_sampling_time")
                 trajs, _q_vs_mc_returns_vals = data_collection_trajectory_sampler.sample(
                     env_data_collection_policy_fn,

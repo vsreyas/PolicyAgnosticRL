@@ -83,6 +83,7 @@ class TrajSampler(object):
                 # print(f"Max traj length: {self.max_traj_length}")
                 
                 observation_storing = copy.deepcopy(observation)
+                # print("deepcopy done")
 
                 # current_vlm_output = vlm_output_fn(observation)
                 # out_dict = {
@@ -95,6 +96,7 @@ class TrajSampler(object):
                     out_dict = {}
                     for k in padding_dict.keys():
                         out_dict[k] = np.zeros(padding_dict[k])
+                # print("padding dict done")
                 
                 if current_action_sequence is None or current_action_index >= half_H:
                     if goal_relabel_fn is not None:
@@ -112,6 +114,8 @@ class TrajSampler(object):
                         current_vlm_output = out_dict["vlm_output"]
 
                         valid_timesteps_for_action_chunk.append(step)
+                    
+                    # print("policy fn completed")
 
                     # Normalize shapes:
                     if isinstance(current_action_sequence, np.ndarray):
@@ -156,6 +160,9 @@ class TrajSampler(object):
                     assert len(step_variables) == 4
                     next_observation, r, done, info = step_variables
                 
+                # print("Completed env step")
+                # print("Done: ", done)
+                
                 if done:
                     terminals = len(trajectory['rewards']) < self._env.max_steps
                     truncates = not terminals
@@ -193,6 +200,7 @@ class TrajSampler(object):
                     transition[key] = out_dict[key]
 
                 add_to(trajectory, transition)
+                # print("add to trajectory done")
 
                 # terminate on success
                 if (
@@ -205,6 +213,8 @@ class TrajSampler(object):
 
                 observation = next_observation
                 step += 1
+                # print("step incremented")
+                # print("---")
 
             # get MC return
             if calc_mc_return_fn is not None:
