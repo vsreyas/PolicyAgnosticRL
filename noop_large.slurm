@@ -1,11 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=openpi-loraft-vision_fullft
+#SBATCH --job-name=rlvr-v1
 #SBATCH --partition=general          # partition name
-#SBATCH --constraint=VRAM_80GB
 #SBATCH --gres=gpu:1
-#SBATCH --mem=128G
-#SBATCH --time=24:00:00          # time (1 day)
+#SBATCH --constraint=VRAM_80GB
+#SBATCH --cpus-per-task=20
+#SBATCH --mem=100G
+#SBATCH --time=48:00:00
 #SBATCH --output=/data/user_data/skowshik/rlvr-debug/outcome_%j.out      # Standard output file (%j is job ID)
 #SBATCH --error=/data/user_data/skowshik/rlvr-debug/outcome_%j.out       # Standard error file (%j is job ID)
 
+
 conda run -n openpi python noop.py
+
