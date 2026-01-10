@@ -18,7 +18,7 @@ from jaxrl_m.utils.expo_utils import (
 )
 from jaxrl_m.agents.continuous.expo_pi import compute_q_all
 
-chkpt = pickle.load(open('results_expo_debug-td-clean_v6/seed_0/checkpoint_4500.pkl', 'rb'))
+chkpt = pickle.load(open('/home/sreyas/vla/PolicyAgnosticRL/results_expo_debug-expo_clean_v7/checkpoint_11999.pkl', 'rb'))
 critic_params = chkpt['critic_params']
 # breakpoint()
 vlm_cache = pickle.load(open('/home/sreyas/vla/PolicyAgnosticRL/pkl_files/CLEAN_traj15_V3_eval_imgfix.pkl', 'rb'))
@@ -130,8 +130,8 @@ ep_success_id = get_ep_rows(successful_episode_ids[-1])
 ep_failed_id = get_ep_rows(failed_episode_ids[-1])
 
 print("\n\n\n\n\n")
-print("Successful episode ID: ", successful_episode_ids[0])
-print("Failed episode ID: ", failed_episode_ids[0])
+print("Successful episode ID: ", successful_episode_ids[-1])
+print("Failed episode ID: ", failed_episode_ids[-1])
 print("\n\n\n\n\n")
 
 

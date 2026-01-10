@@ -126,7 +126,6 @@ def main(_):
 
     # Get example batch to initialize agent
     logging.info("Getting example batch...")
-    example_batch = next(dataset_iterator)
 
     # breakpoint()
     
@@ -134,11 +133,15 @@ def main(_):
     logging.info("Creating EXPO agent...")
     rng = jax.random.PRNGKey(FLAGS.seed)
     rng, construct_rng = jax.random.split(rng)
+
+    example_batch = next(dataset_iterator)
+    # breakpoint()
     
     agent = ExpoPiLearner.create(
         config=pi_config,
         seed=FLAGS.seed,
         observations=example_batch,
+        # batch_size=FLAGS.config.batch_size,
         rng=construct_rng,
         N=FLAGS.num_actions_to_sample,
         n_edit_samples=FLAGS.num_edit_samples,

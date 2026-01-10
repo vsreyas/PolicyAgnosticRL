@@ -170,10 +170,10 @@ CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENG
 
 
 ### Remote machine Max Lab run
-WANDB_ENTITY=shreyas-kowshik CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./train_expo_pi_cache.py --config=configs/libero_config.py:expo --task_name="put both moka pots on the stove" --num_online_epochs=10000 --seed=0 --task_name="put both moka pots on the stove" --config.batch_size=16 --config.agent_kwargs.batch_size=16 --environment_name=libero --wandb_experiment_name=expo_trial --num_edit_samples=4 --num_actions_to_sample=4 --num_offline_epochs=0 --final_step_sparse_reward=False --critic_warmup_steps 0 --online_trajectory_collection_frequency 1000 --config.utd_ratio=4 --config.num_eval_episodes=10 --config.num_episodes_per_video=5 --config.eval_interval=1000 --reward_scale=1.0 --reward_bias=-0.1 --config.libero_tfrecord_regexp="/home/sreyas/vla/PolicyAgnosticRL/CLEAN_traj30_v1/*.tfrecord" --reward_scale=1.0 --reward_bias=-0.1 --filter_successful_trajectories=False --critic_params_path="/home/sreyas/vla/PolicyAgnosticRL/results_expo_debug-td-clean_v6/seed_0/checkpoint_4500.pkl" --config.save_dir="./results_expo_debug-expo_clean_v6" --num_parallel_envs 1 | tee logs/debug.log
+WANDB_ENTITY=shreyas-kowshik CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python ./train_expo_pi_cache.py --config=configs/libero_config.py:expo --task_name="put both moka pots on the stove" --num_online_epochs=100000 --seed=0 --task_name="put both moka pots on the stove" --config.batch_size=32 --config.agent_kwargs.batch_size=32 --environment_name=libero --wandb_experiment_name=expo_trial --num_edit_samples=4 --num_actions_to_sample=4 --num_offline_epochs=0 --final_step_sparse_reward=False --critic_warmup_steps 0 --online_trajectory_collection_frequency 100 --config.utd_ratio=8 --config.num_eval_episodes=10 --config.num_episodes_per_video=5 --config.eval_interval=1000 --reward_scale=1.0 --reward_bias=-0.1 --config.libero_tfrecord_regexp="/home/sreyas/vla/PolicyAgnosticRL/clean_skip_*/results_expo/image_replay_buffer/*.tfrecord" --reward_scale=1.0 --reward_bias=-0.1 --filter_successful_trajectories=False --critic_params_path="/home/sreyas/vla/PolicyAgnosticRL/results_expo_debug-td-clean_v7/seed_0/checkpoint_4500.pkl" --config.save_dir="./results_expo_debug-expo_clean_v8" --num_parallel_envs 1 | tee logs/debug.log
 
 ### Dump tf_record to visualize training dumps
-python dump_tf_record.py --tfrecord_path "/home/sreyas/vla/PolicyAgnosticRL/CLEAN_traj15_V3_eval_imgfix/results_expo/image_replay_buffer/episode_9.tfrecord" --output_gif_path "/home/sreyas/vla/PolicyAgnosticRL/failure.gif" 
+python dump_tf_record.py --tfrecord_path "/home/sreyas/vla/PolicyAgnosticRL/CLEAN_traj15_V3_eval_imgfix/results_expo/image_replay_buffer/episode_0.tfrecord" --output_gif_path "/home/sreyas/vla/PolicyAgnosticRL/img.gif" 
 
 ```
 
@@ -189,8 +189,8 @@ CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false env -u PYOPENGL_PLATF
 CUDA_VISIBLE_DEVICES=0 python -m pdb dump_vlm_actions.py \
     --config=configs/libero_config.py:expo \
     --task_name="put both moka pots on the stove" \
-    --output_path="/home/sreyas/vla/PolicyAgnosticRL/CLEAN_traj15_V3_eval_imgfix.pkl" \
-    --replay_buffer_path="/home/sreyas/vla/PolicyAgnosticRL/CLEAN_traj15_V3_eval_imgfix/results_expo/image_replay_buffer/*.tfrecord" \
+    --output_path="/home/sreyas/vla/PolicyAgnosticRL/clean_new_v3.pkl" \
+    --replay_buffer_path="/home/sreyas/vla/PolicyAgnosticRL/clean_skip_v3/results_expo/image_replay_buffer/*.tfrecord" \
     --num_actions_to_sample=4 \
     --num_edit_samples=4 \
     --seed=0 \
@@ -203,10 +203,10 @@ CUDA_VISIBLE_DEVICES=0 python -m pdb dump_vlm_actions.py \
 ```
 WANDB_ENTITY=shreyas-kowshik CUDA_VISIBLE_DEVICES=0 python -m pdb train_expo_pi_critic_ws.py \
     --config=configs/libero_config.py:expo \
-    --vlm_cache_path="/home/sreyas/vla/PolicyAgnosticRL/pkl_files/CLEAN_traj74_V3_imgfix_merged_50pos_25_neg.pkl" \
+    --vlm_cache_path="/home/sreyas/vla/PolicyAgnosticRL/pkl_files/clean_new_merged_skip_v1_v3.pkl" \
     --num_train_steps=100000 \
     --wandb_project_name="critic-warmstart" \
-    --wandb_experiment_name="critic_cache_ws_debug-td-clean_v6" \
+    --wandb_experiment_name="critic_cache_ws_debug-td-clean_v7" \
     --seed=0 \
     --config.agent_kwargs.batch_size=256 \
     --config.batch_size=256 \
@@ -216,7 +216,7 @@ WANDB_ENTITY=shreyas-kowshik CUDA_VISIBLE_DEVICES=0 python -m pdb train_expo_pi_
     --reward_scale=1.0 \
     --reward_bias=-0.1 \
     --num_actions_to_sample=4 \
-    --config.save_dir="./results_expo_debug-td-clean_v6" \
+    --config.save_dir="./results_expo_debug-td-clean_v7" \
     --config.q_clip_low=-10000.0 \
     --config.q_clip_high=10000.0
 

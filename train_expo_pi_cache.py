@@ -441,7 +441,10 @@ def train_agent(_):
             task_name=FLAGS.task_name, 
             final_step_sparse_reward=FLAGS.final_step_sparse_reward,
             # filter_successful_trajectories=FLAGS.filter_successful_trajectories,
-            filter_successful_trajectories=True,
+            filter_successful_trajectories=False,
+            use_reverse_data_paths=False,
+            alpha=0.1,
+            scale_success_reward=False,
         )
         # breakpoint()
         libero_config = get_libero_config()
@@ -520,7 +523,8 @@ def train_agent(_):
     agent = ExpoPiLearnerCache.create(
         config=pi_config,
         seed=FLAGS.seed,
-        observations=example_batch,
+        # observations=example_batch,
+        batch_size=FLAGS.config.batch_size,
         rng=construct_rng,
         N=FLAGS.num_actions_to_sample,
         n_edit_samples=FLAGS.num_edit_samples,
@@ -544,14 +548,15 @@ def train_agent(_):
 
 
     # TODO: Remove hardcode and init with flags appropriately #
-    num_trajectories_to_collect = 10
+    num_trajectories_to_collect = 1
     online_env_steps = 0
     online_trajectories_added = 0
-    online_env_steps_this_epoch = 0
 
     ### EXPO agent training ###
     ### Online training ###
     for i in range(FLAGS.num_offline_epochs + FLAGS.num_online_epochs + 1):
+        online_env_steps_this_epoch = 0
+
         if i >= FLAGS.num_offline_epochs and FLAGS.num_online_epochs > 0:
             timer.tick("online_iter_total")
             # logging.info("Switching to online training...")
@@ -666,7 +671,9 @@ def train_agent(_):
                     use_language=FLAGS.use_lang, config=pi_config,
                     final_step_sparse_reward=False, # Use rewards from environment and DO NOT override with sparse 0/1 rewards at final step #
                     filter_successful_trajectories=False, # Use success buffer #
-                    use_reverse_data_paths=False,
+                    use_reverse_data_paths=True,
+                    alpha=0.1,
+                    scale_success_reward=False,
                     **FLAGS.config.image_replay_buffer_kwargs,
                 )
                 timer.tock("recreate_image_replay_buffer_iterator")
@@ -681,7 +688,7 @@ def train_agent(_):
             
             # Sample a batch from online and do update #
             # RLPD style online + offline update #
-            # offline_batch = next(offline_train_iterator)
+            offline_batch = next(offline_train_iterator)
             # offline_batch['diffusion_actions'] = offline_batch['actions']
             # offline_batch['next_diffusion_actions'] = offline_batch['next_actions']
 
@@ -719,8 +726,8 @@ def train_agent(_):
                 #     )
                 #     online_batch = next(online_train_iterator)
                 
-                # batch = concatenate_batches([offline_batch, online_batch])
-                batch = online_batch
+                batch = concatenate_batches([offline_batch, online_batch])
+                # batch = online_batch
                 # Do this as it cleanly handles termination/truncation for bootstrapping during critic update #
                 # The function effectively sets mask as 0.0 only where reward == 1.0, so for unsuccessful trajectory, it will have 'dones' as 0.0 at end #
                 # batch = set_batch_masks(

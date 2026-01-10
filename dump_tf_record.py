@@ -14,7 +14,7 @@ from tqdm import tqdm
 # Add the parent directory to path to import jaxrl_m modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from jaxrl_m.data.image_replay_buffer_pi import ImageReplayBufferPi
+from jaxrl_m.data.img_replay_buffer_pi_old import ImageReplayBufferPi
 from openpi.training.config import get_config
 
 

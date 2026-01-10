@@ -22,7 +22,7 @@ print("Imports 2")
 ### Debugging setup ###
 def inspect_tfrecords():
     # TFRECORD_PATTERN = "/data/hf_cache/datasets/LIBERO/libero_10_tf/*.tfrecord"
-    TFRECORD_PATTERN = "/home/sreyas/vla/PolicyAgnosticRL/libero_10_pi05_put_the_two_mocha_pots_on_the_stove/results_expo/image_replay_buffer/episode_0.tfrecord"
+    TFRECORD_PATTERN = "/home/sreyas/vla/PolicyAgnosticRL/results_expo_debug-expo_clean_v4/seed_0/image_replay_buffer/episode_0.tfrecord"
 
     PROTO_TYPE_SPEC = {
         "observations/images0": tf.uint8,
@@ -39,7 +39,6 @@ def inspect_tfrecords():
         "diffusion_actions": tf.float32,
         "next_state_vlm_output": tf.float32,
         "next_state_diffusion_actions": tf.float32,
-        "valid_timesteps_for_action_chunk": tf.int32,
     }
 
     # 1. Get files
@@ -206,9 +205,6 @@ class ImageReplayBufferPi:
         filter_successful_trajectories: bool = False,
         filter_last_ah_timesteps: bool = True,
         use_reverse_data_paths:bool = False,
-        keep_only_full_chuked_windows: bool = True,
-        alpha: float = 1.0,  # Reward scaling factor for terminal states
-        scale_success_reward: bool = False,  # Whether to scale terminal rewards by alpha/(1-gamma)
     ):
         self.goal_relabeling_strategy = goal_relabeling_strategy
         self.goal_relabeling_kwargs = goal_relabeling_kwargs
@@ -245,9 +241,6 @@ class ImageReplayBufferPi:
         self.filter_successful_trajectories = filter_successful_trajectories
         self.filter_last_ah_timesteps = filter_last_ah_timesteps
         self.use_reverse_data_paths = use_reverse_data_paths
-        self.keep_only_full_chuked_windows = keep_only_full_chuked_windows
-        self.alpha = alpha
-        self.scale_success_reward = scale_success_reward
         dataset = self._construct_tf_dataset(data_paths, seed)
 
         self.train = train
@@ -417,7 +410,6 @@ class ImageReplayBufferPi:
 
         "vlm_output": tf.float32,
         "diffusion_actions": tf.float32,
-        "valid_timesteps_for_action_chunk": tf.int32,
     }
 
     def _decode_example_with_filename(self, example_proto, filename):
@@ -518,7 +510,6 @@ class ImageReplayBufferPi:
         terminals_tf = parsed_tensors["terminals"]
         truncates_tf = parsed_tensors["truncates"]
         masks_tf = parsed_tensors["masks"]
-        valid_timesteps_for_action_chunk_tf = parsed_tensors["valid_timesteps_for_action_chunk"]
 
         # Handle the extra time step later
 
@@ -718,6 +709,19 @@ class ImageReplayBufferPi:
         length = tf.shape(actions_tf)[0] # (W=T - ah + 1,)
         prompt_tf = tf.repeat(parsed_tensors["language"][None], repeats=length)  # shape: (length,) # (W=T - ah + 1,)
         out['prompt'] = prompt_tf
+
+        if "vlm_output" in parsed_tensors:
+            vlm_output_tf = parsed_tensors["vlm_output"]
+            diffusion_actions_tf = parsed_tensors["diffusion_actions"]
+            _vlm_output_tf = tf.gather(vlm_output_tf, start_idx)
+            _diffusion_actions_tf = tf.gather(diffusion_actions_tf, start_idx)
+            next_state_vlm_output_tf = tf.gather(vlm_output_tf, start_idx_ns)
+            next_state_diffusion_actions_tf = tf.gather(diffusion_actions_tf, start_idx_ns)
+
+            out['vlm_output'] = _vlm_output_tf
+            out['diffusion_actions'] = _diffusion_actions_tf
+            out['next_vlm_output'] = next_state_vlm_output_tf
+            out['next_diffusion_actions'] = next_state_diffusion_actions_tf
 
         def _apply_data_transforms_numpy(
             state, actions,
@@ -972,42 +976,10 @@ class ImageReplayBufferPi:
         # breakpoint()
         out.pop("prompt")
 
-        if "vlm_output" in parsed_tensors:
-            vlm_output_tf = parsed_tensors["vlm_output"]
-            diffusion_actions_tf = parsed_tensors["diffusion_actions"]
-            _vlm_output_tf = tf.gather(vlm_output_tf, start_idx)
-            _diffusion_actions_tf = tf.gather(diffusion_actions_tf, start_idx)
-            next_state_vlm_output_tf = tf.gather(vlm_output_tf, start_idx_ns)
-            next_state_diffusion_actions_tf = tf.gather(diffusion_actions_tf, start_idx_ns)
-
-            out['vlm_output'] = _vlm_output_tf
-            out['diffusion_actions'] = _diffusion_actions_tf
-            out['next_vlm_output'] = next_state_vlm_output_tf
-            out['next_diffusion_actions'] = next_state_diffusion_actions_tf
-
         # Filter out last `ah` timesteps in all data and keep only `terminal` timestep if it is present #
         if self.filter_last_ah_timesteps:
             out = self._filter_last_ah_timesteps(out)
         
-        if self.keep_only_full_chuked_windows:
-            out = self._keep_only_full_chuked_windows(out, valid_timesteps_for_action_chunk_tf)
-
-        # Scale rewards for terminal timesteps by alpha/(1-gamma)
-        if self.scale_success_reward and 'rewards' in out and 'terminals' in out:
-            # Calculate the scaled reward value
-            terminal_reward_scale = self.alpha / (1.0 - self.discount)
-
-            # Find terminal timesteps (where terminals > 0.5)
-            is_terminal = tf.greater(out['terminals'], 0.5)
-
-            # Add the scaled reward to terminal timesteps
-            terminal_bonus = tf.where(
-                is_terminal,
-                tf.constant(terminal_reward_scale, dtype=out['rewards'].dtype),
-                tf.zeros_like(out['rewards'])
-            )
-            out['rewards'] = out['rewards'] + terminal_bonus
-
         return out
     
     def _filter_last_ah_timesteps(self, out):
@@ -1034,33 +1006,6 @@ class ImageReplayBufferPi:
 
         # out is a nested dict; tf.nest can traverse it
         return tf.nest.map_structure(gather0, out)
-    
-    def _keep_only_full_chuked_windows(self, out, valid_timesteps_for_action_chunk_tf):
-        # Filter to keep only timesteps whose episode_timestep values exist in valid_timesteps_for_action_chunk_tf
-        # valid_timesteps_for_action_chunk_tf contains the actual valid timestep indices
-
-        # Get the episode_timestep values from out
-        episode_timesteps = out["episode_timestep"]  # shape [W]
-
-        # Reshape valid indices to ensure it's 1D
-        valid_set = tf.reshape(valid_timesteps_for_action_chunk_tf, [-1])
-
-        # For each episode_timestep value, check if it exists in valid_set
-        def is_valid(timestep):
-            return tf.reduce_any(tf.equal(valid_set, timestep))
-
-        keep_mask = tf.map_fn(is_valid, episode_timesteps, fn_output_signature=tf.bool)
-
-        # Get indices where keep_mask is True
-        keep_idx = tf.where(keep_mask)[:, 0]  # shape [K]
-
-        # gather every leaf along axis=0 using the same indices
-        def gather0(x):
-            return tf.gather(x, keep_idx)
-
-        # out is a nested dict; tf.nest can traverse it
-        return tf.nest.map_structure(gather0, out)
-        
  
     def iterator(self, batch_size, training=True):
 
@@ -1244,9 +1189,6 @@ def save_trajectory_as_tfrecord(trajectory: Dict[str, np.ndarray], path: str):
                     ),
                     "vlm_output": tensor_feature(
                         np.array(trajectory["vlm_output"], dtype=np.float32) # DO NOT drop last step
-                    ),
-                    "valid_timesteps_for_action_chunk": tensor_feature(
-                        np.array(trajectory["valid_timesteps_for_action_chunk"], dtype=np.int32) # DO NOT drop last step
                     ),
 
                     **(

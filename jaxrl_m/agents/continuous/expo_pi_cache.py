@@ -268,7 +268,8 @@ class ExpoPiLearnerCache(Agent):
         cls,
         config: TrainConfig,
         seed: int,
-        observations: Data,
+        # observations: Data,
+        batch_size: int,
         action_dim: int = 7,
         state_dim: int = 8,
         action_horizon: int = 10,
@@ -328,7 +329,7 @@ class ExpoPiLearnerCache(Agent):
             if adjust_target_entropy:
                 target_entropy = -action_dim / 2 + action_dim * jnp.log(edit_action_scale)
 
-        batch_size = observations[batch_size_dict_key].shape[0]
+        # batch_size = observations[batch_size_dict_key].shape[0]
 
 
         rng = jax.random.PRNGKey(seed)

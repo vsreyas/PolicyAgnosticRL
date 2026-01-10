@@ -403,13 +403,13 @@ def train_agent(_):
         # LOG: Data stored in hf_cache on babel, can access on common path; Loads for example, 'libero_10' path as tf_records #
         # LOG: `dataset` will store the offline dataset to train on #
         # Iterates over to yield a dict with bunch of keys which can include observations, actions, rewards, masks, next_observations, etc. #
-        dataset = get_libero_tfrecord_dataset(
-            tfrecord_regexp=FLAGS.config.libero_tfrecord_regexp, use_wrist_view=FLAGS.use_wrist_view, 
-            use_language=FLAGS.use_lang, config=pi_config, is_pi=True, **FLAGS.config.dataset_kwargs,
-            task_name=FLAGS.task_name, 
-            final_step_sparse_reward=FLAGS.final_step_sparse_reward,
-            filter_successful_trajectories=FLAGS.filter_successful_trajectories,
-        )
+        # dataset = get_libero_tfrecord_dataset(
+        #     tfrecord_regexp=FLAGS.config.libero_tfrecord_regexp, use_wrist_view=FLAGS.use_wrist_view, 
+        #     use_language=FLAGS.use_lang, config=pi_config, is_pi=True, **FLAGS.config.dataset_kwargs,
+        #     task_name=FLAGS.task_name, 
+        #     final_step_sparse_reward=FLAGS.final_step_sparse_reward,
+        #     filter_successful_trajectories=FLAGS.filter_successful_trajectories,
+        # )
         # breakpoint()
         libero_config = get_libero_config()
 
@@ -449,9 +449,9 @@ def train_agent(_):
     sharding = jax.sharding.PositionalSharding(devices)
     # Create data iterators
     # LOG: Offline dataset #
-    offline_train_iterator = dataset.iterator(
-        batch_size=FLAGS.config.agent_kwargs.batch_size
-    )
+    # offline_train_iterator = dataset.iterator(
+    #     batch_size=FLAGS.config.agent_kwargs.batch_size
+    # )
     # Online dataset/buffer #
     # Online iterators will be set when switching to online training.
     online_train_iterator = None
@@ -460,7 +460,7 @@ def train_agent(_):
     # breakpoint()
 
     ### Sharding Data ###
-    example_batch = next(offline_train_iterator)
+    # example_batch = next(offline_train_iterator)
     # example_batch = shard_batch(example_batch, sharding) # DO NOT shard here, will be handled in the expo agent forward passes
     
     ### Create trajectory sampler ###
@@ -486,7 +486,8 @@ def train_agent(_):
     agent = ExpoPiLearnerCache.create(
         config=pi_config,
         seed=FLAGS.seed,
-        observations=example_batch,
+        # observations=example_batch,
+        batch_size=FLAGS.config.batch_size,
         rng=construct_rng,
         N=FLAGS.num_actions_to_sample,
         n_edit_samples=FLAGS.num_edit_samples,
@@ -504,7 +505,7 @@ def train_agent(_):
 
 
     # TODO: Remove hardcode and init with flags appropriately #
-    num_trajectories_to_collect = 15
+    num_trajectories_to_collect = 200
     online_env_steps = 0
     online_trajectories_added = 0
     online_env_steps_this_epoch = 0

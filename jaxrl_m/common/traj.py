@@ -51,6 +51,8 @@ class TrajSampler(object):
         H = self.action_horizon
         half_H = max(1, H // 2)
 
+        assert H % half_H == 0, "H must be divisible by half_H to ensure vlm_output is properly built up"
+
         for _ in range(num_episodes):
             trajectory = defaultdict(list)
             # print("Starting new trajectory")
@@ -67,9 +69,12 @@ class TrajSampler(object):
             step = 0
             current_action_index = 0
             current_action_sequence = None
+            padding_dict = None
 
             current_vlm_output = None
             curr_episode_q_vs_mc_returns_vals = []
+            valid_timesteps_for_action_chunk = []
+
             while not done and step < self.max_traj_length:
                 # breakpoint()
                 # from PIL import Image; Image.fromarray(observation['image'].astype('uint8')).save('image.png')
@@ -83,8 +88,13 @@ class TrajSampler(object):
                 # out_dict = {
                 #     "vlm_output": current_vlm_output,
                 # }
-                out_dict = policy_fn(observation)
-                current_vlm_output = out_dict["vlm_output"]
+                # out_dict = policy_fn(observation)
+                # current_vlm_output = out_dict["vlm_output"]
+                
+                if padding_dict is not None:
+                    out_dict = {}
+                    for k in padding_dict.keys():
+                        out_dict[k] = np.zeros(padding_dict[k])
                 
                 if current_action_sequence is None or current_action_index >= half_H:
                     if goal_relabel_fn is not None:
@@ -92,8 +102,16 @@ class TrajSampler(object):
                     else:
                         # try:
                         out_dict = policy_fn(observation)
+
+                        if padding_dict is None:
+                            padding_dict = {}
+                            for k in out_dict.keys():
+                                padding_dict[k] = out_dict[k].shape
+                        
                         current_action_sequence = out_dict["actions"]
                         current_vlm_output = out_dict["vlm_output"]
+
+                        valid_timesteps_for_action_chunk.append(step)
 
                     # Normalize shapes:
                     if isinstance(current_action_sequence, np.ndarray):
@@ -143,6 +161,16 @@ class TrajSampler(object):
                     truncates = not terminals
 
                     out_dict_final_observation = policy_fn(next_observation)
+
+                    if terminals:
+                        # Pick the last valid timestep for vlm_output and update it #
+                        last_valid_timestep_for_action_chunk = len(trajectory['rewards']) - H + 1
+                        out_dict_last_valid_timestep = policy_fn(trajectory['observations'][last_valid_timestep_for_action_chunk])
+                        out_dict_last_valid_timestep.pop('actions')
+                        for k in out_dict_last_valid_timestep.keys():
+                            trajectory[k][last_valid_timestep_for_action_chunk] = out_dict_last_valid_timestep[k]
+                        
+                        valid_timesteps_for_action_chunk.append(last_valid_timestep_for_action_chunk)
                 else:
                     terminals = False
                     truncates = False
@@ -213,6 +241,9 @@ class TrajSampler(object):
             if 'vlm_output' in out_dict_final_observation:
                 trajectory['vlm_output'].append(out_dict_final_observation['vlm_output'])
                 trajectory['diffusion_actions'].append(out_dict_final_observation['diffusion_actions'])
+            
+            valid_timesteps_for_action_chunk = sorted(valid_timesteps_for_action_chunk)
+            trajectory['valid_timesteps_for_action_chunk'] = valid_timesteps_for_action_chunk
 
             trajectories.append(trajectory)
             # breakpoint()

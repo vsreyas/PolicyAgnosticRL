@@ -4,8 +4,9 @@ import pickle
 from typing import List
 
 data_files = [
-    'CLEAN_traj30_V3_imgfix.pkl',
-    'CLEAN_traj44_V3_imgfix.pkl',
+    'clean_new_v1.pkl',
+    'clean_new_v2.pkl',
+    'clean_new_v3.pkl',
 ]
 _data = []
 episodes_so_far = 0
@@ -49,4 +50,4 @@ df['mc_returns'] = data['mc_returns']
 # out = df[df['dones'] == True]
 # breakpoint()
 
-pickle.dump(data, open('pkl_files/CLEAN_traj74_V3_imgfix_merged.pkl', 'wb'))
+pickle.dump(data, open('pkl_files/clean_new_merged_skip_v1_v3.pkl', 'wb'))
