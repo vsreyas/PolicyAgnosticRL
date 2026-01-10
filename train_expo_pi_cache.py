@@ -685,10 +685,6 @@ def train_agent(_):
                 )
             
             # breakpoint()
-            
-            # Sample a batch from online and do update #
-            # RLPD style online + offline update #
-            offline_batch = next(offline_train_iterator)
             # offline_batch['diffusion_actions'] = offline_batch['actions']
             # offline_batch['next_diffusion_actions'] = offline_batch['next_actions']
 
@@ -706,7 +702,12 @@ def train_agent(_):
                 agent, info = agent.update(batch, utd_ratio=FLAGS.config.utd_ratio, timer=timer, update_only_critic=True, output_only_base_actions=True, seed=rng_update)
             else:
                 # try:
+                # Sample a batch from online and do update #
+                # RLPD style online + offline update #
+                timer.tick("batch_sampling_time")
+                offline_batch = next(offline_train_iterator)
                 online_batch = next(online_train_iterator)
+                timer.tock("batch_sampling_time")
                 # except StopIteration:
                 #     # No successful trajectories in online buffer, construct full buffer #
                 #     image_replay_buffer = ImageReplayBufferPi(
@@ -726,7 +727,9 @@ def train_agent(_):
                 #     )
                 #     online_batch = next(online_train_iterator)
                 
+                timer.tick("concatenate_batches_time")
                 batch = concatenate_batches([offline_batch, online_batch])
+                timer.tock("concatenate_batches_time")
                 # batch = online_batch
                 # Do this as it cleanly handles termination/truncation for bootstrapping during critic update #
                 # The function effectively sets mask as 0.0 only where reward == 1.0, so for unsuccessful trajectory, it will have 'dones' as 0.0 at end #

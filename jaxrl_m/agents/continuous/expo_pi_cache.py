@@ -153,19 +153,40 @@ def _edit_actor_loss_and_grad(
     return grads, metrics
 
 
-@partial(jax.jit, static_argnames=("critic_apply_fn", "q_clip_low", "q_clip_high"))
+@partial(jax.jit, static_argnames=("critic_apply_fn", "edit_actor_apply_fn", "target_critic_apply_fn", "q_clip_low", "q_clip_high"))
 def _critic_loss_and_grad(
     critic_params,
     vlm_output,
     actions,
-    target_q,
+    # target_q,
     mc_target,
     key,
     critic_apply_fn,
+    # #
+    next_vlm_output,
+    next_base_actions,
+    sample_key,
+    edit_actor_apply_fn,
+    edit_actor_params,
+    edit_action_scale,
+    target_critic_apply_fn,
+    target_critic_params,
+    terminals,
+    rewards,
+    discount,
+    # #
     q_clip_low,
     q_clip_high,
 ):
     """Single jitted step for critic: forward + loss + grad."""
+
+    r_observations = jnp.concatenate([next_vlm_output, next_base_actions], axis=1) # (1, pi0_hidden_dims + action_horizon * action_dim)
+    r_samples, _ =  _sample_actions(sample_key, edit_actor_apply_fn, edit_actor_params, r_observations) # (n_edit_samples, action_horizon * action_dim)
+    next_actions = r_samples * edit_action_scale + next_base_actions
+    next_qs = compute_q(target_critic_apply_fn, target_critic_params, next_vlm_output, next_actions) # (batch_size, )
+    masks = 1.0 - terminals
+    target_q = rewards + discount * masks * next_qs # (batch_size, )
+    target_q = jax.lax.stop_gradient(target_q)
 
     def loss_fn(critic_params):
         qs = critic_apply_fn(
@@ -793,13 +814,13 @@ class ExpoPiLearnerCache(Agent):
         # Sample next_actions by sampling from current edit policy #
         next_base_actions = batch['next_diffusion_actions']
         next_vlm_output = batch['next_vlm_output'] # (batch_size, pi0_hidden_dims)
-        next_base_actions = next_base_actions.reshape(-1, self.action_dim)
-        r_observations = jnp.concatenate([next_vlm_output, next_base_actions], axis=1) # (1, pi0_hidden_dims + action_horizon * action_dim)
-        r_samples, _ =  _sample_actions(rng, self.edit_actor.apply_fn, self.edit_actor.params, r_observations) # (n_edit_samples, action_horizon * action_dim)
-        next_actions = r_samples * self.edit_action_scale + next_base_actions
+        # next_base_actions = next_base_actions.reshape(-1, self.action_dim)
+        # r_observations = jnp.concatenate([next_vlm_output, next_base_actions], axis=1) # (1, pi0_hidden_dims + action_horizon * action_dim)
+        # r_samples, _ =  _sample_actions(rng, self.edit_actor.apply_fn, self.edit_actor.params, r_observations) # (n_edit_samples, action_horizon * action_dim)
+        # next_actions = r_samples * self.edit_action_scale + next_base_actions
+
         # next_actions = next_actions.reshape(1, self.action_horizon, self.action_dim // self.action_horizon)
         # next_actions = next_actions.reshape(-1, self.action_dim) # (batch_size, action_horizon * action_dim)
-
         # Subsample from `N` actions on next state
         # key, rng = jax.random.split(key)
         # action_indices = jax.random.randint(rng, shape=(batch_size,), minval=0, maxval=self.N)
@@ -812,34 +833,51 @@ class ExpoPiLearnerCache(Agent):
         current_vlm_output = batch['vlm_output']
         # No need to append state here as it is already appended in the batch #
         actions = batch["actions"].reshape(-1, self.action_dim) # (batch_size, action_horizon * action_dim)
-
+        next_base_actions = next_base_actions.reshape(-1, self.action_dim)
         # seed, rng = jax.random.split(rng)
         target_params = subsample_ensemble(
             rng, self.target_critic.params, self.num_min_qs, self.num_qs
         )
         
-        next_qs = compute_q(self.target_critic.apply_fn, target_params, next_vlm_output, next_actions) # (batch_size, )
-        masks = 1.0 - batch['terminals']
-        target_q = batch["rewards"] + self.discount * masks * next_qs # (batch_size, )
+        # r_observations = jnp.concatenate([next_vlm_output, next_base_actions], axis=1) # (1, pi0_hidden_dims + action_horizon * action_dim)
+        # r_samples, _ =  _sample_actions(rng, self.edit_actor.apply_fn, self.edit_actor.params, r_observations) # (n_edit_samples, action_horizon * action_dim)
+        # next_actions = r_samples * self.edit_action_scale + next_base_actions
+        # next_qs = compute_q(self.target_critic.apply_fn, target_params, next_vlm_output, next_actions) # (batch_size, )
+        # masks = 1.0 - batch['terminals']
+        # target_q = batch["rewards"] + self.discount * masks * next_qs # (batch_size, )
 
         # Use JITted version #
-        timer.tick("critic_loss_and_grad_time")
+        # timer.tick("critic_loss_and_grad_time")
         key, rng = jax.random.split(rng)
+        key, sample_key = jax.random.split(key)
         grads, info = _critic_loss_and_grad(
             self.critic.params,
             current_vlm_output,
             actions,
-            target_q,
+            # target_q,
             batch["mc_returns"],
             rng,
             self.critic.apply_fn,
+            # #
+            next_vlm_output,
+            next_base_actions,
+            sample_key,
+            self.edit_actor.apply_fn,
+            self.edit_actor.params,
+            self.edit_action_scale,
+            self.target_critic.apply_fn,
+            target_params,
+            batch["terminals"],
+            batch["rewards"],
+            self.discount,
+            # #
             self.q_clip_low,
             self.q_clip_high,
         )
 
         info["critic_grad_norm"] = optax.global_norm(grads)
         critic = self.critic.apply_gradients(grads=grads)
-        timer.tock("critic_loss_and_grad_time")
+        # timer.tock("critic_loss_and_grad_time")
 
         target_critic_params = optax.incremental_update(
             critic.params, self.target_critic.params, self.tau
@@ -910,8 +948,11 @@ class ExpoPiLearnerCache(Agent):
 
             mini_batch = jax.tree_util.tree_map(slice, batch)
             seed, rng = jax.random.split(seed)
-            new_agent, critic_info = new_agent.update_critic(mini_batch, timer=timer, seed=rng)
-            critic_info = append_substr_to_dict_keys(critic_info, "critic")
+
+            break
+        
+        new_agent, critic_info = new_agent.update_critic(batch, timer=timer, seed=rng)
+        critic_info = append_substr_to_dict_keys(critic_info, "critic")
         timer.tock("update_critic_time")
         # breakpoint()
         
