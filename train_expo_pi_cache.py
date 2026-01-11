@@ -553,7 +553,7 @@ def train_agent(_):
 
 
     # TODO: Remove hardcode and init with flags appropriately #
-    num_trajectories_to_collect = 1
+    num_trajectories_to_collect = 5
     online_env_steps = 0
     online_trajectories_added = 0
 
@@ -588,15 +588,36 @@ def train_agent(_):
                 q_vs_mc_returns_vals = []
                 for traj_index in range(num_trajectories_to_collect):
                     timer.tick("trajectory_sampling_time")
-                    trajs, _q_vs_mc_returns_vals = data_collection_trajectory_sampler.sample(
-                        env_data_collection_policy_fn,
-                        vlm_output_fn,
-                        num_episodes=1,
-                        replay_buffer=state_replay_buffer,
-                        calc_mc_return_fn=functools.partial(calc_mc_return_fn, discount=FLAGS.config.agent_kwargs.discount, reward_bias=FLAGS.reward_bias),
-                        store_max_trajectory_reward=True,
-                        terminate_on_success=False,
-                    )
+
+                    sampled_trajectories_successfully = False
+                    while not sampled_trajectories_successfully:
+                        try:
+                            trajs, _q_vs_mc_returns_vals = data_collection_trajectory_sampler.sample(
+                                env_data_collection_policy_fn,
+                                vlm_output_fn,
+                                num_episodes=1,
+                                replay_buffer=state_replay_buffer,
+                                calc_mc_return_fn=functools.partial(calc_mc_return_fn, discount=FLAGS.config.agent_kwargs.discount, reward_bias=FLAGS.reward_bias),
+                                store_max_trajectory_reward=True,
+                                terminate_on_success=False,
+                            )
+                            sampled_trajectories_successfully = True
+                            break
+                        except:
+                            print("Trajectory sampling timed out")
+                            del train_env
+                            import gc; gc.collect()
+                            train_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
+                            data_collection_trajectory_sampler = TrajSampler(
+                                train_env,
+                                clip_action=FLAGS.clip_action,
+                                reward_scale=FLAGS.reward_scale,
+                                reward_bias=FLAGS.reward_bias,
+                                max_traj_length=FLAGS.config.get("max_episode_steps", 1000),
+                                action_horizon=pi_config.model.action_horizon,
+                                # action_horizon=1,
+                            )
+
                     traj = trajs[0]
                     # breakpoint()
                     _q_vs_mc_returns_vals = _q_vs_mc_returns_vals[0]

@@ -24,6 +24,27 @@ from robosuite.utils.transform_utils import quat2axisangle
 import json
 from tqdm import tqdm
 
+import signal
+from contextlib import contextmanager
+
+STEP_TIME_LIMIT = 600
+class TimeoutError(Exception):
+    pass
+
+def _raise_timeout(signum, frame):
+    raise TimeoutError("Timed out")
+
+@contextmanager
+def time_limit(seconds: int):
+    old = signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, seconds)  # more flexible than alarm
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+class StepTimeout(RuntimeError): pass
 
 def load_language_embeddings(path: str) -> dict[int, np.ndarray]:
     """
@@ -486,7 +507,13 @@ class LiberoEnvWrapper(gym.Wrapper):
         raise NotImplementedError("reset_to_state not implemented for Libero yet.")
 
     def step(self, action):
-        obs, reward, done, info = self.env.step(action)
+        try:
+            with time_limit(STEP_TIME_LIMIT):
+                obs, reward, done, info = self.env.step(action)# may STILL not interrupt if stuck in native code
+        except StepTimeout:
+            raise StepTimeout("env.step() timed out")
+        
+        # obs, reward, done, info = self.env.step(action)
 
         self.__step += 1
         if self.env.check_success():

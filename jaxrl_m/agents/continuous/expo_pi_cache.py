@@ -135,6 +135,7 @@ def _edit_actor_loss_and_grad(
             "edit_q": q.mean(),
             "edit_actor_loss": edit_actor_loss,
             "entropy": -log_probs.mean(),
+            # "log_probs": log_probs.mean(),
         }
 
         edit_actions = edit_actions.reshape(-1, 10, 7)
@@ -281,6 +282,10 @@ def _sample_actions(rng, apply_fn, params, observations: np.ndarray) -> np.ndarr
 
 
 class ExpoPiLearnerCache(Agent):
+    """
+    Update temperature based computation based on SB3: https://stable-baselines3.readthedocs.io/en/v1.0/_modules/stable_baselines3/sac/sac.html?utm_source=chatgpt.com
+    Original implementation seems to be buggy
+    """
     actor: PiPolicy
     critic: TrainState
     target_critic: TrainState
@@ -340,7 +345,7 @@ class ExpoPiLearnerCache(Agent):
         init_temperature: float = 1.0,
         backup_entropy: bool = True,
         use_pnorm: bool = False,
-        adjust_target_entropy: bool = False, 
+        adjust_target_entropy: bool = True, # NOTE: Make it `True` so that outputs are valid 
         use_critic_resnet: bool = False,
         time_dim: int = 128,
         actor_drop: Optional[float] = None, 
