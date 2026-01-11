@@ -100,27 +100,30 @@ def main(_):
                 config=pi_config,
                 final_step_sparse_reward=False,
                 filter_successful_trajectories=False,
+                alpha=1.0,
+                scale_success_reward=True,
                 **FLAGS.config.image_replay_buffer_kwargs,
             )
             dataset_iterator = replay_buffer.iterator(
                 batch_size=FLAGS.config.agent_kwargs.batch_size
             )
         else:
-            # Load from offline dataset
-            dataset = get_libero_tfrecord_dataset(
-                tfrecord_regexp=FLAGS.config.libero_tfrecord_regexp,
-                use_wrist_view=FLAGS.use_wrist_view,
-                use_language=FLAGS.use_lang,
-                config=pi_config,
-                is_pi=True,
-                task_name=FLAGS.task_name,
-                train=False,
-                final_step_sparse_reward=True,
-                **FLAGS.config.dataset_kwargs,
-            )
-            dataset_iterator = dataset.iterator(
-                batch_size=FLAGS.config.agent_kwargs.batch_size
-            )
+            raise NotImplementedError("No replay buffer path provided")
+            # # Load from offline dataset
+            # dataset = get_libero_tfrecord_dataset(
+            #     tfrecord_regexp=FLAGS.config.libero_tfrecord_regexp,
+            #     use_wrist_view=FLAGS.use_wrist_view,
+            #     use_language=FLAGS.use_lang,
+            #     config=pi_config,
+            #     is_pi=True,
+            #     task_name=FLAGS.task_name,
+            #     train=False,
+            #     final_step_sparse_reward=True,
+            #     **FLAGS.config.dataset_kwargs,
+            # )
+            # dataset_iterator = dataset.iterator(
+            #     batch_size=FLAGS.config.agent_kwargs.batch_size
+            # )
     else:
         raise NotImplementedError(f"Environment {FLAGS.environment_name} not supported")
 

@@ -365,7 +365,7 @@ class ExpoPiLearnerCache(Agent):
         batch_split: int = 1, 
         M: int = 0,
         n_edit_samples: int = 4, 
-        edit_action_scale: float = 0.1,
+        edit_action_scale: float = 0.5,
         actor_layer_norm: bool = True,
         clip_sampler: bool = True,
         decay_steps: Optional[int] = int(3e6),

@@ -454,8 +454,8 @@ def train_agent(_):
             # filter_successful_trajectories=FLAGS.filter_successful_trajectories,
             filter_successful_trajectories=False,
             use_reverse_data_paths=False,
-            alpha=0.1,
-            scale_success_reward=False,
+            alpha=1.0,
+            scale_success_reward=True,
             drop_images_from_output=True, # Do not need it as we are caching things are trajectory generation time #
         )
         # breakpoint()
@@ -638,7 +638,7 @@ def train_agent(_):
                                 )
                                 sampled_trajectories_successfully = True
                                 break
-                        except StepTimeout:
+                        except:
                             print("Trajectory sampling timed out")
                             del train_env
                             import gc; gc.collect()
@@ -733,8 +733,8 @@ def train_agent(_):
                     final_step_sparse_reward=False, # Use rewards from environment and DO NOT override with sparse 0/1 rewards at final step #
                     filter_successful_trajectories=False, # Use success buffer #
                     use_reverse_data_paths=True,
-                    alpha=0.1,
-                    scale_success_reward=False,
+                    alpha=1.0,
+                    scale_success_reward=True,
                     drop_images_from_output=True,
                     **FLAGS.config.image_replay_buffer_kwargs,
                 )
@@ -789,9 +789,10 @@ def train_agent(_):
                 #     )
                 #     online_batch = next(online_train_iterator)
                 
-                timer.tick("concatenate_batches_time")
-                batch = concatenate_batches([offline_batch, online_batch])
-                timer.tock("concatenate_batches_time")
+                # timer.tick("concatenate_batches_time")
+                # batch = concatenate_batches([offline_batch, online_batch])
+                # timer.tock("concatenate_batches_time")
+                batch = online_batch
                 # batch = online_batch
                 # Do this as it cleanly handles termination/truncation for bootstrapping during critic update #
                 # The function effectively sets mask as 0.0 only where reward == 1.0, so for unsuccessful trajectory, it will have 'dones' as 0.0 at end #
