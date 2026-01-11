@@ -507,11 +507,11 @@ class LiberoEnvWrapper(gym.Wrapper):
         raise NotImplementedError("reset_to_state not implemented for Libero yet.")
 
     def step(self, action):
-        try:
-            with time_limit(STEP_TIME_LIMIT):
-                obs, reward, done, info = self.env.step(action)# may STILL not interrupt if stuck in native code
-        except StepTimeout:
-            raise StepTimeout("env.step() timed out")
+        # try:
+            # with time_limit(STEP_TIME_LIMIT):
+        obs, reward, done, info = self.env.step(action)# may STILL not interrupt if stuck in native code
+        # except StepTimeout:
+        #     raise StepTimeout("env.step() timed out")
         
         # obs, reward, done, info = self.env.step(action)
 

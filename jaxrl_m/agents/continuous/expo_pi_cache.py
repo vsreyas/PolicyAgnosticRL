@@ -264,10 +264,19 @@ def _critic_loss_and_grad(
 
 @partial(jax.jit, static_argnames="temp_apply_fn")
 def _temperature_loss_and_grad(temp, temp_params, entropy, target_entropy, temp_apply_fn):
+    # jax.debug.print(
+    #     "entropy={e}, target={t}, c={c}, log_temp={lt}, temp={a}",
+    #     e=entropy,
+    #     t=target_entropy,
+    #     c=(entropy - target_entropy).mean(),
+    #     lt=jnp.log(temp_apply_fn({"params": temp_params})),
+    #     a=temp_apply_fn({"params": temp_params}),
+    # )
     def loss_fn(temp_params):
         temperature = temp_apply_fn({"params": temp_params})
-        temp_loss = temperature * (entropy - target_entropy).mean()
-        return temp_loss, {"temp_loss": temp_loss}
+        log_temp = jnp.log(temperature)
+        temp_loss = temperature * jax.lax.stop_gradient((entropy - target_entropy).mean())
+        return temp_loss, {"temp_loss": temp_loss, "log_temp": log_temp, "temperature": temperature}
 
     (loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(temp_params)
     temp = temp.apply_gradients(grads=grads)
@@ -341,7 +350,7 @@ class ExpoPiLearnerCache(Agent):
         critic_layer_norm: bool = True,
         critic_params: Optional[at.Params] = None,
         target_entropy: Optional[float] = None,
-        entropy_scale: float = 0.1, 
+        entropy_scale: float = 1.0, 
         init_temperature: float = 1.0,
         backup_entropy: bool = True,
         use_pnorm: bool = False,
@@ -355,7 +364,7 @@ class ExpoPiLearnerCache(Agent):
         batch_split: int = 1, 
         M: int = 0,
         n_edit_samples: int = 4, 
-        edit_action_scale: float = 0.1,
+        edit_action_scale: float = 0.25,
         actor_layer_norm: bool = True,
         clip_sampler: bool = True,
         decay_steps: Optional[int] = int(3e6),
@@ -466,7 +475,10 @@ class ExpoPiLearnerCache(Agent):
         temp = TrainState.create(
             apply_fn=temp_def.apply,
             params=temp_params,
-            tx=optax.adam(learning_rate=temp_lr),
+            tx = optax.chain(
+                optax.clip_by_global_norm(1.0),
+                optax.adam(learning_rate=temp_lr),
+            )
         )
 
         del dummy_observations, dummy_actions, edit_observations
@@ -815,6 +827,7 @@ class ExpoPiLearnerCache(Agent):
         actor_info["edit_actor_grad_norm"] = optax.global_norm(grads)
         # edit_actor = self.edit_actor.apply_gradients(grads=grads)
         actor_info["edit_actor_param_norm"] = optax.global_norm(edit_actor.params)
+        actor_info["target_entropy"] = self.target_entropy
 
         return self.replace(edit_actor=edit_actor, rng=rng), actor_info
         

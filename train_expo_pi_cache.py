@@ -65,6 +65,7 @@ from jaxrl_m.vision import encoders
 from jaxrl_m.utils.train_utils import preprocess_action, repack_action
 from jaxrl_m.agents.continuous.expo_pi_cache import ExpoPiLearnerCache, compute_q, compute_q_all
 from jaxrl_m.utils.expo_utils import calc_mc_return_fn
+from jaxrl_m.envs.libero import StepTimeout, time_limit, STEP_TIME_LIMIT
 
 try:
     from jax_smi import initialise_tracking  # type: ignore
@@ -556,6 +557,8 @@ def train_agent(_):
     num_trajectories_to_collect = 5
     online_env_steps = 0
     online_trajectories_added = 0
+    env_recreation_frequency = 10
+    env_recreation_count = 0
 
     ### EXPO agent training ###
     ### Online training ###
@@ -568,6 +571,7 @@ def train_agent(_):
 
             ### Collect Trajectories ###
             if i % FLAGS.online_trajectory_collection_frequency == 0:
+                env_recreation_count += 1
                 print("Collecting trajectories...")
                 data_collection_rng_key, rng = jax.random.split(rng)
                 
@@ -584,6 +588,22 @@ def train_agent(_):
                     timer=timer,
                 )
 
+                if env_recreation_count % env_recreation_frequency == 0:
+                    print("Recreating environment...")
+                    del train_env
+                    import gc; gc.collect()
+                    train_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
+                    data_collection_trajectory_sampler = TrajSampler(
+                        train_env,
+                        clip_action=FLAGS.clip_action,
+                        reward_scale=FLAGS.reward_scale,
+                        reward_bias=FLAGS.reward_bias,
+                        max_traj_length=FLAGS.config.get("max_episode_steps", 1000),
+                        action_horizon=pi_config.model.action_horizon,
+                        # action_horizon=1,
+                    )
+                    env_recreation_count = 0
+
                 trajectories = []
                 q_vs_mc_returns_vals = []
                 for traj_index in range(num_trajectories_to_collect):
@@ -591,19 +611,27 @@ def train_agent(_):
 
                     sampled_trajectories_successfully = False
                     while not sampled_trajectories_successfully:
+                        # try:
+                        #     with time_limit(STEP_TIME_LIMIT):
+                        #         obs, reward, done, info = self.env.step(action)# may STILL not interrupt if stuck in native code
+                        # except StepTimeout:
+                        #     raise StepTimeout("env.step() timed out")
+                        # try:
+
                         try:
-                            trajs, _q_vs_mc_returns_vals = data_collection_trajectory_sampler.sample(
-                                env_data_collection_policy_fn,
-                                vlm_output_fn,
-                                num_episodes=1,
-                                replay_buffer=state_replay_buffer,
-                                calc_mc_return_fn=functools.partial(calc_mc_return_fn, discount=FLAGS.config.agent_kwargs.discount, reward_bias=FLAGS.reward_bias),
-                                store_max_trajectory_reward=True,
-                                terminate_on_success=False,
-                            )
-                            sampled_trajectories_successfully = True
-                            break
-                        except:
+                            with time_limit(STEP_TIME_LIMIT):
+                                trajs, _q_vs_mc_returns_vals = data_collection_trajectory_sampler.sample(
+                                    env_data_collection_policy_fn,
+                                    vlm_output_fn,
+                                    num_episodes=1,
+                                    replay_buffer=state_replay_buffer,
+                                    calc_mc_return_fn=functools.partial(calc_mc_return_fn, discount=FLAGS.config.agent_kwargs.discount, reward_bias=FLAGS.reward_bias),
+                                    store_max_trajectory_reward=True,
+                                    terminate_on_success=False,
+                                )
+                                sampled_trajectories_successfully = True
+                                break
+                        except StepTimeout:
                             print("Trajectory sampling timed out")
                             del train_env
                             import gc; gc.collect()
