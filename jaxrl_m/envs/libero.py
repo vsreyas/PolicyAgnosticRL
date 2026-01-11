@@ -1,3 +1,7 @@
+import resource
+soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (min(65535, hard), hard))
+
 import os
 import cv2
 import gzip

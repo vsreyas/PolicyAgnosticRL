@@ -1,5 +1,11 @@
 """Script for offline to online RL."""
 
+# Try increasing the number of open files limit
+import resource
+soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (min(65535, hard), hard))
+
+
 import os
 import time
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -8,7 +14,7 @@ import cv2
 import flax
 import gym
 import jax
-jax.config.update("jax_log_compiles", True)
+# jax.config.update("jax_log_compiles", True)
 # jax.config.update("jax_explain_cache_misses", True)
 # jax.config.update("jax_traceback_filtering", "off")  # more context in logs
 
@@ -557,7 +563,7 @@ def train_agent(_):
     num_trajectories_to_collect = 5
     online_env_steps = 0
     online_trajectories_added = 0
-    env_recreation_frequency = 10
+    env_recreation_frequency = 3
     env_recreation_count = 0
 
     ### EXPO agent training ###
@@ -589,6 +595,7 @@ def train_agent(_):
                 )
 
                 if env_recreation_count % env_recreation_frequency == 0:
+                    train_env.env.close()
                     print("Recreating environment...")
                     del train_env
                     import gc; gc.collect()

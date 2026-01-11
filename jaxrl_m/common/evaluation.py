@@ -499,6 +499,7 @@ def evaluate_with_trajectories_libero(
     # horizon-related state for this single env
     current_action_index = 0          # where we are inside current horizon
     current_action_sequence = None    # shape (H, D) or (1, D)
+    current_diffusion_actions = None
 
     q_vs_mc_returns_vals = []
     current_vlm_output = None
@@ -508,6 +509,9 @@ def evaluate_with_trajectories_libero(
         # print("q_vs_mc_returns_vals", len(q_vs_mc_returns_vals))
         # print("curr_episode_q_vs_mc_returns_vals", len(curr_episode_q_vs_mc_returns_vals))
         # print("--------------------------------")
+
+        current_vlm_output = None
+        current_actions_for_vlm_output = None
         # ---------------------------------------------------------
         # 1. Call policy when we need a refill
         # ---------------------------------------------------------
@@ -519,6 +523,8 @@ def evaluate_with_trajectories_libero(
             out_dict = policy_fn(observations)
             current_action_sequence = out_dict['actions']
             current_vlm_output = out_dict['vlm_output']
+            current_diffusion_actions = out_dict['diffusion_actions']
+            current_actions_for_vlm_output = out_dict['actions']
             
             # state = observations['proprio'][:, :8] # State dimension
             # breakpoint()
@@ -558,6 +564,7 @@ def evaluate_with_trajectories_libero(
         # 2. Pick the action for this step
         # ---------------------------------------------------------
         actions = current_action_sequence[current_action_index]
+        diffusion_actions = current_diffusion_actions[current_action_index]
         current_action_index += 1
 
         # ---------------------------------------------------------
@@ -587,10 +594,16 @@ def evaluate_with_trajectories_libero(
             observation=obs,
             next_observation=next_obs,
             action=actions,
+            diffusion_action=diffusion_actions,
             reward=rewards,
             done=dones,
             info={},  # to match vectorized version
         )
+
+        if current_vlm_output is not None:
+            transition['vlm_output'] = current_vlm_output
+        if current_actions_for_vlm_output is not None:
+            transition['actions_for_vlm_output'] = current_actions_for_vlm_output
 
         if save_video and episode_count < max_episodes_for_video:
             transition["image"] = images.copy()

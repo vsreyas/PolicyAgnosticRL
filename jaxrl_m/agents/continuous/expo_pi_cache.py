@@ -6,7 +6,7 @@ from typing import Dict, Optional, Sequence, Tuple
 import flax
 import gym
 import jax
-jax.config.update("jax_log_compiles", True)
+# jax.config.update("jax_log_compiles", True)
 # jax.config.update("jax_explain_cache_misses", True)
 # jax.config.update("jax_traceback_filtering", "off")  # more context in logs
 
@@ -349,6 +349,7 @@ class ExpoPiLearnerCache(Agent):
         critic_weight_decay: Optional[float] = None,
         critic_layer_norm: bool = True,
         critic_params: Optional[at.Params] = None,
+        edit_actor_params: Optional[at.Params] = None,
         target_entropy: Optional[float] = None,
         entropy_scale: float = 1.0, 
         init_temperature: float = 1.0,
@@ -364,7 +365,7 @@ class ExpoPiLearnerCache(Agent):
         batch_split: int = 1, 
         M: int = 0,
         n_edit_samples: int = 4, 
-        edit_action_scale: float = 0.25,
+        edit_action_scale: float = 0.1,
         actor_layer_norm: bool = True,
         clip_sampler: bool = True,
         decay_steps: Optional[int] = int(3e6),
@@ -416,7 +417,13 @@ class ExpoPiLearnerCache(Agent):
         )
         edit_actor_def = TanhNormal(edit_actor_base_cls, action_dim)
         edit_observations = jnp.concatenate([dummy_observations, jnp.ones((batch_size, action_dim))], axis=1)
-        edit_actor_params = edit_actor_def.init(actor_key, edit_observations)["params"]
+
+        if edit_actor_params is None:
+            print("\n\n\nInitializing edit actor parameters from scratch...\n\n\n")
+            edit_actor_params = edit_actor_def.init(actor_key, edit_observations)["params"]
+        else:
+            print("\n\n\nInitializing edit actor parameters loaded from checkpoint...\n\n\n")
+
         edit_actor = TrainState.create(
             apply_fn=edit_actor_def.apply, 
             params=edit_actor_params, 
