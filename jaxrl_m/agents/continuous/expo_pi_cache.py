@@ -345,7 +345,7 @@ class ExpoPiLearnerCache(Agent):
         rng : PRNGKey | None = None,
         actor_lr: float = 3e-4,
         critic_lr: float = 3e-4,
-        temp_lr: float = 3e-4,
+        temp_lr: float = 2e-3,
         hidden_dims: Sequence[int] = (256, 256),
         discount: float = 0.99,
         tau: float = 0.005,
@@ -357,7 +357,7 @@ class ExpoPiLearnerCache(Agent):
         critic_params: Optional[at.Params] = None,
         edit_actor_params: Optional[at.Params] = None,
         target_entropy: Optional[float] = None,
-        entropy_scale: float = 0.005,
+        entropy_scale: float = 1.0,
         init_temperature: float = 1.0,
         backup_entropy: bool = True,
         use_pnorm: bool = False,
@@ -371,7 +371,7 @@ class ExpoPiLearnerCache(Agent):
         batch_split: int = 1, 
         M: int = 0,
         n_edit_samples: int = 4, 
-        edit_action_scale: float = 0.1,
+        edit_action_scale: float = 0.5,
         actor_layer_norm: bool = True,
         clip_sampler: bool = True,
         decay_steps: Optional[int] = int(3e6),
@@ -383,6 +383,7 @@ class ExpoPiLearnerCache(Agent):
         batch_size_dict_key: str = 'actions',
         q_clip_low: Optional[float] = -10000.0,
         q_clip_high: Optional[float] = 10000.0,
+        entropy_mul_scale_factor: float = 1.0,
     ):
         # Assertions
         assert N >= n_edit_samples, f"N must be greater than or equal to n_edit_samples, got N={N} and n_edit_samples={n_edit_samples}"

@@ -204,6 +204,11 @@ flags.DEFINE_bool(
     False,
     "Filter successful trajectories.",
 )
+flags.DEFINE_float(
+    "scale_success_alpha",
+    0.05,
+    "Alpha for the reward scaling factor.",
+)
 
 ### Try subprocenv ###
 import multiprocessing as mp
@@ -531,6 +536,12 @@ def train_agent(_):
     offline_dataset_size = None
 
     # breakpoint()
+    if FLAGS.scale_success_alpha > 0:
+        alpha = FLAGS.scale_success_alpha
+        scale_success_reward = True
+    else:
+        alpha = 1.0
+        scale_success_reward = False
     
     ####### Dataset and evironment setup ###########
     if FLAGS.environment_name=="libero":
@@ -544,16 +555,19 @@ def train_agent(_):
         # LOG: Data stored in hf_cache on babel, can access on common path; Loads for example, 'libero_10' path as tf_records #
         # LOG: `dataset` will store the offline dataset to train on #
         # Iterates over to yield a dict with bunch of keys which can include observations, actions, rewards, masks, next_observations, etc. #
+        
+        
         dataset = get_libero_tfrecord_dataset(
             tfrecord_regexp=FLAGS.config.libero_tfrecord_regexp, use_wrist_view=FLAGS.use_wrist_view, 
             use_language=FLAGS.use_lang, config=pi_config, is_pi=True, **FLAGS.config.dataset_kwargs,
             task_name=FLAGS.task_name, 
             final_step_sparse_reward=FLAGS.final_step_sparse_reward,
             # filter_successful_trajectories=FLAGS.filter_successful_trajectories,
-            filter_successful_trajectories=False,
+            # filter_successful_trajectories=False,
+            filter_successful_trajectories=True,
             use_reverse_data_paths=False,
-            alpha=1.0,
-            scale_success_reward=True,
+            alpha=alpha,
+            scale_success_reward=scale_success_reward,
             drop_images_from_output=True, # Do not need it as we are caching things are trajectory generation time #
         )
         # breakpoint()
@@ -762,7 +776,7 @@ def train_agent(_):
                             #     action_horizon=pi_config.model.action_horizon,
                             #     # action_horizon=1,
                             # )
-                            train_env.restart()
+                            train_env._restart()
                             data_collection_trajectory_sampler = TrajSampler(
                                 train_env,
                                 clip_action=FLAGS.clip_action,
@@ -854,8 +868,8 @@ def train_agent(_):
                     final_step_sparse_reward=False, # Use rewards from environment and DO NOT override with sparse 0/1 rewards at final step #
                     filter_successful_trajectories=False, # Use success buffer #
                     use_reverse_data_paths=False,
-                    alpha=1.0,
-                    scale_success_reward=True,
+                    alpha=alpha,
+                    scale_success_reward=scale_success_reward,
                     drop_images_from_output=True,
                     **FLAGS.config.image_replay_buffer_kwargs,
                 )
@@ -877,12 +891,14 @@ def train_agent(_):
             if i < FLAGS.critic_warmup_steps:
                 print("Critic warmup...Updating only critic")
                 # batch = offline_batch
-                batch = next(online_train_iterator)
+                offline_batch = next(offline_train_iterator)
+                online_batch = next(online_train_iterator)
+                batch = concatenate_batches([offline_batch, online_batch])
                 # breakpoint()
                 # batch = set_batch_masks(
                 #     batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
                 # )
-                agent, info = agent.update(batch, utd_ratio=FLAGS.config.utd_ratio, timer=timer, update_only_critic=True, output_only_base_actions=True, seed=rng_update)
+                agent, info = agent.update(batch, utd_ratio=FLAGS.config.utd_ratio, timer=timer, seed=rng_update, update_only_critic=True)
             else:
                 # try:
                 # Sample a batch from online and do update #
@@ -911,9 +927,9 @@ def train_agent(_):
                 #     online_batch = next(online_train_iterator)
                 
                 # timer.tick("concatenate_batches_time")
-                # batch = concatenate_batches([offline_batch, online_batch])
+                batch = concatenate_batches([offline_batch, online_batch])
                 # timer.tock("concatenate_batches_time")
-                batch = online_batch
+                # batch = online_batch
                 # batch = online_batch
                 # Do this as it cleanly handles termination/truncation for bootstrapping during critic update #
                 # The function effectively sets mask as 0.0 only where reward == 1.0, so for unsuccessful trajectory, it will have 'dones' as 0.0 at end #
@@ -1001,7 +1017,7 @@ def train_agent(_):
                                         break
                                 except (StepTimeout, TimeoutError, EOFError, BrokenPipeError) as e:
                                     print(f"Evaluation failed/timed out: {type(e).__name__}: {e}")
-                                    eval_env.restart()
+                                    eval_env._restart()
 
                             # eval_policy_fn = get_policy_fn(
                             #     agent=agent,
