@@ -198,10 +198,10 @@ def _critic_loss_and_grad(
 ):
     """Single jitted step for critic: forward + loss + grad."""
 
-    # r_observations = jnp.concatenate([next_vlm_output, next_base_actions], axis=1) # (1, pi0_hidden_dims + action_horizon * action_dim)
-    # r_samples, _ =  _sample_actions(sample_key, edit_actor_apply_fn, edit_actor_params, r_observations) # (n_edit_samples, action_horizon * action_dim)
-    # next_actions = r_samples * edit_action_scale + next_base_actions
-    next_actions = batch_next_actions
+    r_observations = jnp.concatenate([next_vlm_output, next_base_actions], axis=1) # (1, pi0_hidden_dims + action_horizon * action_dim)
+    r_samples, _ =  _sample_actions(sample_key, edit_actor_apply_fn, edit_actor_params, r_observations) # (n_edit_samples, action_horizon * action_dim)
+    next_actions = r_samples * edit_action_scale + next_base_actions
+    # next_actions = batch_next_actions
     next_qs = compute_q(target_critic_apply_fn, target_params, next_vlm_output, next_actions) # (batch_size, )
     masks = 1.0 - terminals
     target_q = rewards + discount * masks * next_qs # (batch_size, )
@@ -361,7 +361,7 @@ class ExpoPiLearnerCache(Agent):
         init_temperature: float = 1.0,
         backup_entropy: bool = True,
         use_pnorm: bool = False,
-        adjust_target_entropy: bool = True, # NOTE: Make it `True` so that outputs are valid 
+        adjust_target_entropy: bool = True, # NOTE: Make it `True` so that outputs are valid
         use_critic_resnet: bool = False,
         time_dim: int = 128,
         actor_drop: Optional[float] = None, 

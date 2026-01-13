@@ -31,6 +31,9 @@ from tqdm import tqdm
 import signal
 from contextlib import contextmanager
 
+import hydra
+from hydra.core.global_hydra import GlobalHydra
+
 STEP_TIME_LIMIT = 600
 class TimeoutError(Exception):
     pass
@@ -149,10 +152,13 @@ def get_dataset(
 # === Config loader
 # ======================================================
 
+
 def get_libero_config(env_name="libero_10"):
     """Loads Hydra config for Libero (same structure as Calvin configs)."""
-    import hydra
-    hydra.initialize(config_path="libero_config", version_base=None)
+    # import hydra
+    if not GlobalHydra.instance().is_initialized():
+        hydra.initialize(config_path="libero_config", version_base=None)
+    # hydra.initialize(config_path="libero_config", version_base=None)
     return hydra.compose(config_name=env_name)
 
 

@@ -205,6 +205,101 @@ flags.DEFINE_bool(
     "Filter successful trajectories.",
 )
 
+### Try subprocenv ###
+import multiprocessing as mp
+from multiprocessing.connection import wait
+
+def env_worker(conn, make_env_fn):
+    # Import robosuite / libero INSIDE the subprocess
+    env = make_env_fn()
+    try:
+        while True:
+            msg = conn.recv()
+            cmd = msg[0]
+            if cmd == "reset":
+                conn.send(env.reset())
+            elif cmd == "get_attr":
+                conn.send(getattr(env, "max_steps"))
+            elif cmd == "step":
+                action = msg[1]
+                conn.send(env.step(action))
+            elif cmd == "close":
+                try:
+                    env.close()
+                except Exception:
+                    pass
+                conn.send(None)
+                break
+            else:
+                raise RuntimeError(f"Unknown cmd: {cmd}")
+    finally:
+        try:
+            env.close()
+        except Exception:
+            pass
+
+class SubprocEnv:
+    def __init__(self, make_env_fn):
+        self.make_env_fn = make_env_fn
+        self._ctx = mp.get_context("spawn")
+        self._start()
+
+    def _start(self):
+        self.parent_conn, child_conn = self._ctx.Pipe()
+        self.proc = self._ctx.Process(target=env_worker, args=(child_conn, self.make_env_fn), daemon=True)
+        self.proc.start()
+
+    def _restart(self):
+        self.kill()
+        self._start()
+
+    def kill(self):
+        try:
+            if self.proc.is_alive():
+                self.proc.terminate()
+                self.proc.join(timeout=5)
+        finally:
+            try:
+                self.parent_conn.close()
+            except Exception:
+                pass
+
+    def call(self, cmd, *args, timeout_s=300):
+        self.parent_conn.send((cmd, *args))
+        ready = wait([self.parent_conn], timeout=timeout_s)
+        if not ready:
+            # hung in native code -> hard reset
+            self._restart()
+            raise TimeoutError(f"{cmd} timed out after {timeout_s}s")
+        return self.parent_conn.recv()
+
+    def reset(self, timeout_s=300):
+        return self.call("reset", timeout_s=timeout_s)
+
+    def step(self, action, timeout_s=300):
+        return self.call("step", action, timeout_s=timeout_s)
+
+    def close(self):
+        try:
+            self.call("close", timeout_s=5)
+        except Exception:
+            pass
+        self.kill()
+    
+    def get_attr(self, name: str):
+        return self.call("get_attr", name)
+
+    @property
+    def max_steps(self):
+        # assumes underlying env exposes `max_steps`
+        return self.get_attr("max_steps")
+
+def make_env(task_name):
+    from jaxrl_m.envs.libero import get_libero_env, get_libero_config
+    cfg = get_libero_config()
+    return get_libero_env(cfg=cfg, task_name=task_name, is_pi=True)
+########################################################################################################################
+
 # 2: 07 2 13
 BASE_POLICY_TYPE_TO_CLASS = {
     BasePolicyTypes.OpenVLA: OpenVLAAgent,
@@ -462,9 +557,11 @@ def train_agent(_):
             drop_images_from_output=True, # Do not need it as we are caching things are trajectory generation time #
         )
         # breakpoint()
-        libero_config = get_libero_config()
+        # libero_config = get_libero_config()
 
-        train_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
+        # train_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
+        # train_env = make_env()
+        train_env = SubprocEnv(make_env_fn=functools.partial(make_env, task_name=FLAGS.task_name))
         # if FLAGS.num_parallel_envs > 1:
         #     num_parallel_envs = FLAGS.num_parallel_envs
         #     task_name = FLAGS.task_name
@@ -479,13 +576,17 @@ def train_agent(_):
         #     )
         # else:
         #     eval_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
-        eval_env = train_env
+        # eval_env = train_env
+        eval_env = SubprocEnv(make_env_fn=functools.partial(make_env, task_name=FLAGS.task_name))
+
+        # breakpoint()
     else:
        raise NotImplementedError
 
-    if action_space is None:
-        action_space = train_env.action_space
-    assert action_space.high.ndim == 1, action_space.shape
+    # if action_space is None:
+    #     action_space = train_env.action_space
+    # assert action_space.high.ndim == 1, action_space.shape
+
     # Create replay buffer
     # LOG: Libero comes under this for now #
     if FLAGS.config.image_observations:
@@ -601,22 +702,23 @@ def train_agent(_):
                     timer=timer,
                 )
 
-                if env_recreation_count % env_recreation_frequency == 0:
-                    train_env.env.close()
-                    print("Recreating environment...")
-                    train_env = None
-                    import gc; gc.collect()
-                    train_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
-                    data_collection_trajectory_sampler = TrajSampler(
-                        train_env,
-                        clip_action=FLAGS.clip_action,
-                        reward_scale=FLAGS.reward_scale,
-                        reward_bias=FLAGS.reward_bias,
-                        max_traj_length=FLAGS.config.get("max_episode_steps", 1000),
-                        action_horizon=pi_config.model.action_horizon,
-                        # action_horizon=1,
-                    )
-                    env_recreation_count = 0
+                # if env_recreation_count % env_recreation_frequency == 0:
+                #     train_env.env.close()
+                #     print("Recreating environment...")
+                #     train_env = None
+                #     import gc; gc.collect()
+                #     # train_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
+                #     train_env = make_env()
+                #     data_collection_trajectory_sampler = TrajSampler(
+                #         train_env,
+                #         clip_action=FLAGS.clip_action,
+                #         reward_scale=FLAGS.reward_scale,
+                #         reward_bias=FLAGS.reward_bias,
+                #         max_traj_length=FLAGS.config.get("max_episode_steps", 1000),
+                #         action_horizon=pi_config.model.action_horizon,
+                #         # action_horizon=1,
+                #     )
+                #     env_recreation_count = 0
 
                 trajectories = []
                 q_vs_mc_returns_vals = []
@@ -645,11 +747,22 @@ def train_agent(_):
                                 )
                                 sampled_trajectories_successfully = True
                                 break
-                        except:
-                            print("Trajectory sampling timed out")
-                            del train_env
-                            import gc; gc.collect()
-                            train_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
+                        # except:
+                        except (StepTimeout, TimeoutError, EOFError, BrokenPipeError) as e:
+                            print(f"Trajectory sampling failed/timed out: {type(e).__name__}: {e}")
+                            # del train_env
+                            # import gc; gc.collect()
+                            # train_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
+                            # data_collection_trajectory_sampler = TrajSampler(
+                            #     train_env,
+                            #     clip_action=FLAGS.clip_action,
+                            #     reward_scale=FLAGS.reward_scale,
+                            #     reward_bias=FLAGS.reward_bias,
+                            #     max_traj_length=FLAGS.config.get("max_episode_steps", 1000),
+                            #     action_horizon=pi_config.model.action_horizon,
+                            #     # action_horizon=1,
+                            # )
+                            train_env.restart()
                             data_collection_trajectory_sampler = TrajSampler(
                                 train_env,
                                 clip_action=FLAGS.clip_action,
@@ -659,6 +772,7 @@ def train_agent(_):
                                 action_horizon=pi_config.model.action_horizon,
                                 # action_horizon=1,
                             )
+
 
                     traj = trajs[0]
                     # breakpoint()
@@ -873,14 +987,36 @@ def train_agent(_):
                                 timer=timer,
                                 debug_mode=False,
                             )
-                            trajectories, q_vs_mc_returns_vals = evaluate_with_trajectories_libero(
-                            eval_policy_fn,
-                            eval_env,
-                            FLAGS.config.num_eval_episodes,
-                            action_horizon=pi_config.model.action_horizon,
-                            # action_horizon=1,
-                            use_full_horizon_for_refill=True, # For proper Q vs MC Returns calculation #
-                        )
+
+                            evaluated_trajectories_successfully = False
+                            while not evaluated_trajectories_successfully:
+                                try:
+                                    with time_limit(STEP_TIME_LIMIT):
+                                        trajectories, q_vs_mc_returns_vals = evaluate_with_trajectories_libero(
+                                            eval_policy_fn,
+                                            eval_env,
+                                            FLAGS.config.num_eval_episodes,
+                                        )
+                                        evaluated_trajectories_successfully = True
+                                        break
+                                except (StepTimeout, TimeoutError, EOFError, BrokenPipeError) as e:
+                                    print(f"Evaluation failed/timed out: {type(e).__name__}: {e}")
+                                    eval_env.restart()
+
+                            # eval_policy_fn = get_policy_fn(
+                            #     agent=agent,
+                            #     rng=eval_policy_fn_key,
+                            #     timer=timer,
+                            #     debug_mode=False,
+                            # )
+                        #     trajectories, q_vs_mc_returns_vals = evaluate_with_trajectories_libero(
+                        #     eval_policy_fn,
+                        #     eval_env,
+                        #     FLAGS.config.num_eval_episodes,
+                        #     action_horizon=pi_config.model.action_horizon,
+                        #     # action_horizon=1,
+                        #     use_full_horizon_for_refill=True, # For proper Q vs MC Returns calculation #
+                        # )
                     
                     # breakpoint()
 
