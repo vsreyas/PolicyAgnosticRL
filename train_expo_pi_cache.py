@@ -564,7 +564,7 @@ def train_agent(_):
 
 
     # TODO: Remove hardcode and init with flags appropriately #
-    num_trajectories_to_collect = 7
+    num_trajectories_to_collect = 5
     online_env_steps = 0
     online_trajectories_added = 0
     env_recreation_frequency = 1
@@ -739,7 +739,7 @@ def train_agent(_):
                     use_language=FLAGS.use_lang, config=pi_config,
                     final_step_sparse_reward=False, # Use rewards from environment and DO NOT override with sparse 0/1 rewards at final step #
                     filter_successful_trajectories=False, # Use success buffer #
-                    use_reverse_data_paths=True,
+                    use_reverse_data_paths=False,
                     alpha=1.0,
                     scale_success_reward=True,
                     drop_images_from_output=True,
