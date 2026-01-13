@@ -1,5 +1,10 @@
 """Script for offline to online RL."""
 
+# Try increasing the number of open files limit
+import resource
+soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (min(65535, hard), hard))
+
 import os
 import time
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -414,20 +419,20 @@ def train_agent(_):
         libero_config = get_libero_config()
 
         train_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
-        if FLAGS.num_parallel_envs > 1:
-            num_parallel_envs = FLAGS.num_parallel_envs
-            task_name = FLAGS.task_name
-            eval_env = gym.vector.AsyncVectorEnv(
-                [
-                    lambda: get_libero_env(
-                        cfg=libero_config, task_id = ind*num_parallel_envs, task_name=task_name, is_pi=True,
-                    )
-                    for ind in range(num_parallel_envs)
-                ],
-                context="forkserver", shared_memory=False, # the default "fork" is incompatible with JAX
-            )
-        else:
-            eval_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
+        # if FLAGS.num_parallel_envs > 1:
+        #     num_parallel_envs = FLAGS.num_parallel_envs
+        #     task_name = FLAGS.task_name
+        #     eval_env = gym.vector.AsyncVectorEnv(
+        #         [
+        #             lambda: get_libero_env(
+        #                 cfg=libero_config, task_id = ind*num_parallel_envs, task_name=task_name, is_pi=True,
+        #             )
+        #             for ind in range(num_parallel_envs)
+        #         ],
+        #         context="forkserver", shared_memory=False, # the default "fork" is incompatible with JAX
+        #     )
+        # else:
+        #     eval_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
     else:
        raise NotImplementedError
 

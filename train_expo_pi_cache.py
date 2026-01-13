@@ -256,6 +256,9 @@ def get_policy_fn(
             )
         )
         # breakpoint()
+        # print(timer.get_total_times(reset=False))
+        
+        # breakpoint()
 
         return out_dict
 
@@ -462,20 +465,21 @@ def train_agent(_):
         libero_config = get_libero_config()
 
         train_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
-        if FLAGS.num_parallel_envs > 1:
-            num_parallel_envs = FLAGS.num_parallel_envs
-            task_name = FLAGS.task_name
-            eval_env = gym.vector.AsyncVectorEnv(
-                [
-                    lambda: get_libero_env(
-                        cfg=libero_config, task_id = ind*num_parallel_envs, task_name=task_name, is_pi=True,
-                    )
-                    for ind in range(num_parallel_envs)
-                ],
-                context="forkserver", shared_memory=False, # the default "fork" is incompatible with JAX
-            )
-        else:
-            eval_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
+        # if FLAGS.num_parallel_envs > 1:
+        #     num_parallel_envs = FLAGS.num_parallel_envs
+        #     task_name = FLAGS.task_name
+        #     eval_env = gym.vector.AsyncVectorEnv(
+        #         [
+        #             lambda: get_libero_env(
+        #                 cfg=libero_config, task_id = ind*num_parallel_envs, task_name=task_name, is_pi=True,
+        #             )
+        #             for ind in range(num_parallel_envs)
+        #         ],
+        #         context="forkserver", shared_memory=False, # the default "fork" is incompatible with JAX
+        #     )
+        # else:
+        #     eval_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
+        eval_env = train_env
     else:
        raise NotImplementedError
 
@@ -509,7 +513,7 @@ def train_agent(_):
     # breakpoint()
 
     ### Sharding Data ###
-    example_batch = next(offline_train_iterator)
+    # example_batch = next(offline_train_iterator)
     # example_batch = shard_batch(example_batch, sharding) # DO NOT shard here, will be handled in the expo agent forward passes
     
     ### Create trajectory sampler ###
@@ -560,11 +564,14 @@ def train_agent(_):
 
 
     # TODO: Remove hardcode and init with flags appropriately #
-    num_trajectories_to_collect = 5
+    num_trajectories_to_collect = 7
     online_env_steps = 0
     online_trajectories_added = 0
-    env_recreation_frequency = 3
+    env_recreation_frequency = 1
     env_recreation_count = 0
+    save_interval = 100
+
+    # breakpoint()
 
     ### EXPO agent training ###
     ### Online training ###
@@ -597,7 +604,7 @@ def train_agent(_):
                 if env_recreation_count % env_recreation_frequency == 0:
                     train_env.env.close()
                     print("Recreating environment...")
-                    del train_env
+                    train_env = None
                     import gc; gc.collect()
                     train_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
                     data_collection_trajectory_sampler = TrajSampler(
@@ -1119,6 +1126,7 @@ def train_agent(_):
                 #         pass
                 timer.tock("evaluation/total")
 
+            if i % save_interval == 0:
                 if FLAGS.config.save_dir:
                     os.makedirs(FLAGS.config.save_dir, exist_ok=True)
                     final_checkpoint_path = os.path.join(FLAGS.config.save_dir, f"checkpoint_{i}.pkl")

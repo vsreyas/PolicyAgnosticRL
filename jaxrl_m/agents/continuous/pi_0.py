@@ -154,6 +154,7 @@ class PiPolicy(BasePolicy):
         self.data_norm_stats = self.data_config.norm_stats
         self.input_data_transforms = [*self.data_config.repack_transforms.inputs,
             *self.data_config.data_transforms.inputs,
+            # LOG: Normalization is using `use_quantile_norm` so actions are normalized to [-1,1] range #
             _transforms.Normalize(self.data_norm_stats, use_quantiles=self.data_config.use_quantile_norm),
             *self.data_config.model_transforms.inputs,]
         self.input_data_transforms = _transforms.compose(self.input_data_transforms)
@@ -163,7 +164,9 @@ class PiPolicy(BasePolicy):
             *self.data_config.data_transforms.outputs,
             *self.data_config.repack_transforms.outputs,
         ]
+        # LOG: output_data_transforms: Includes "UnNormalizing" actions back from [-1,1] to original scale #
         self.output_data_transforms = _transforms.compose(self.output_data_transforms)
+        # breakpoint()
 
         self.data_loader_dummy = Dummy_Dataloader(self.data_config)
         self.output_data_transforms_without_unnorm = [
@@ -172,6 +175,7 @@ class PiPolicy(BasePolicy):
             *self.data_config.repack_transforms.outputs,
         ]
         self.output_data_transforms_without_unnorm = _transforms.compose(self.output_data_transforms_without_unnorm)
+        self.normalize = _transforms.Normalize(self.data_norm_stats, use_quantiles=self.data_config.use_quantile_norm)
         self.unnormalize = _transforms.Unnormalize(self.data_norm_stats, use_quantiles=self.data_config.use_quantile_norm)
         self._infer_cache: dict[int, Callable] = {}
         self._vlm_cache: dict[int, Callable] = {}
@@ -205,6 +209,22 @@ class PiPolicy(BasePolicy):
         logging.info(f"Total trainable parameters: {total_trainable_params:,} ({trainable_percentage:.2f}%)")
         logging.info(f"Total frozen parameters: {total_model_params - total_trainable_params:,}")
         logging.info(f"First 10 trainable params: {trainable_param_names_str[:10]}")
+    
+    def unnorm_actions(self, actions: np.ndarray) -> np.ndarray:
+        input_dict = {
+            "actions": actions,
+            "state": np.zeros((1, 8)),
+        }
+        outputs = self.unnormalize(input_dict)
+        return outputs["actions"]
+    
+    def norm_actions(self, actions: np.ndarray) -> np.ndarray:
+        input_dict = {
+            "actions": actions,
+            "state": np.zeros((1, 8)),
+        }
+        outputs = self.normalize(input_dict)
+        return outputs["actions"]
 
     # ------------------------------------------------------------------------------------
     # INFERENCE

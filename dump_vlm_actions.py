@@ -100,7 +100,7 @@ def main(_):
                 config=pi_config,
                 final_step_sparse_reward=False,
                 filter_successful_trajectories=False,
-                alpha=1.0,
+                alpha=0.05,
                 scale_success_reward=True,
                 **FLAGS.config.image_replay_buffer_kwargs,
             )

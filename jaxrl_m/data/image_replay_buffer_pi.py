@@ -347,7 +347,7 @@ class ImageReplayBufferPi:
         )
         
         if self.is_train:
-            dataset = dataset.shuffle(20000, seed=seed, reshuffle_each_iteration=True)
+            dataset = dataset.shuffle(512, seed=seed, reshuffle_each_iteration=True)
             dataset = dataset.repeat()
 
         # yields raw serialized examples
@@ -843,11 +843,15 @@ class ImageReplayBufferPi:
                 out_ns["image_mask"]["right_wrist_0_rgb"],# 19
             ]
         
-        def _apply_fast_data_transforms_numpy(states, next_states):
+        def _apply_fast_data_transforms_numpy(states, next_states, actions, next_actions):
             if hasattr(states, "numpy"):
                 states = states.numpy()
             if hasattr(next_states, "numpy"):
                 next_states = next_states.numpy()
+            if hasattr(actions, "numpy"):
+                actions = actions.numpy()
+            if hasattr(next_actions, "numpy"):
+                next_actions = next_actions.numpy()
             
             if self.use_8D and states.shape[-1] != 8:
                 states = convert_state_15_to_8(states)
@@ -855,13 +859,15 @@ class ImageReplayBufferPi:
             
             inputs = {
                 "state": states,
+                "actions": actions,
             }
             inputs_ns = {
                 "state": next_states,
+                "actions": next_actions,
             }
             out = self.fast_data_transforms(inputs)
             out_ns = self.fast_data_transforms(inputs_ns)
-            return out["state"], out_ns["state"]
+            return out["state"], out_ns["state"], out["actions"], out_ns["actions"]
 
         if not self.drop_images_from_output:
             outputs = tf.py_function(
@@ -950,25 +956,31 @@ class ImageReplayBufferPi:
         else:
             # Experimenting with speeding things up #
             # state_tf_norm, state_tf_ns_norm = _apply_fast_data_transforms_numpy(state_tf, state_tf_ns)
-            states_norm_outputs = tf.py_function(
+            norm_outputs = tf.py_function(
                 func=_apply_fast_data_transforms_numpy,
                 inp=[
                     state_tf, # (W+1,)
                     state_tf_ns, # (W,)
+                    actions_tf, # (W,)
+                    next_actions_tf, # (W,)
                 ],
                 Tout=[
                     tf.float32,  # state
                     tf.float32,  # next state
+                    tf.float32,  # actions
+                    tf.float32,  # next actions
                 ]
             )
-            state_tf_norm = states_norm_outputs[0]
-            state_tf_ns_norm = states_norm_outputs[1]
+            state_tf_norm = norm_outputs[0]
+            state_tf_ns_norm = norm_outputs[1]
+            actions_norm = norm_outputs[2]
+            next_actions_norm = norm_outputs[3]
 
             idx = 0
             out['observations'] = {}
             out['observations']["proprio"] = state_tf_norm
             # out["actions"] = outputs[idx]; idx += 1 #drop the last action to align dimensions
-            out["actions"] = actions_tf; idx += 1
+            out["actions"] = actions_norm; idx += 1
 
             
             out['observations']["image"] = image_tf[0]
@@ -992,7 +1004,7 @@ class ImageReplayBufferPi:
             out['next_observations'] = {}
             out['next_observations']["proprio"] = state_tf_ns_norm
             # out["next_actions"] = outputs[idx]; idx += 1
-            out["next_actions"] = next_actions_tf; idx += 1
+            out["next_actions"] = next_actions_norm; idx += 1
 
             out['next_observations']["image"] = image_tf_ns[0]
             out['next_observations']["wrist_image"] = image_tf_ns[1]
