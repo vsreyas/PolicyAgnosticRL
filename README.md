@@ -168,7 +168,7 @@ WANDB_ENTITY=shreyas-kowshik CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCAT
 WANDB_ENTITY=shreyas-kowshik CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python ./train_expo_pi_cache.py --config=configs/libero_config.py:expo --task_name="put both moka pots on the stove" --num_online_epochs=1000000 --seed=0 --task_name="put both moka pots on the stove" --config.batch_size=256 --config.agent_kwargs.batch_size=256 --environment_name=libero --wandb_experiment_name=expo_trial --num_edit_samples=8 --num_actions_to_sample=8 --num_offline_epochs=0 --final_step_sparse_reward=False --critic_warmup_steps 0 --online_trajectory_collection_frequency 100 --config.utd_ratio=16 --config.num_eval_episodes=10 --config.num_episodes_per_video=5 --config.eval_interval=1000 --reward_scale=1.0 --reward_bias=-0.1 --config.libero_tfrecord_regexp="/home/skowshik/vla/codebase/PolicyAgnosticRL/clean_skip_v2_server/results_expo/image_replay_buffer/*.tfrecord" --reward_scale=1.0 --reward_bias=-0.1 --filter_successful_trajectories=False --critic_params_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/critic_ws/checkpoint_4500.pkl" --config.save_dir="./results_expo_debug-expo_clean_v8" --num_parallel_envs 1 | tee logs/debug.log
 
 ### Dump tf_record to visualize training dumps
-python dump_tf_record.py --tfrecord_path "/data/user_data/skowshik/clean_skip_v1_server/results_expo/image_replay_buffer/episode_2.tfrecord" --output_gif_path "/home/skowshik/vla/codebase/PolicyAgnosticRL/img2.mp4"
+python dump_tf_record.py --tfrecord_path "/home/skowshik/vla/codebase/PolicyAgnosticRL/libero_10_pi05_put_the_two_mocha_pots_on_the_stove/results_expo/image_replay_buffer/episode_6.tfrecord" --output_gif_path "/home/skowshik/vla/codebase/PolicyAgnosticRL/img_umap6.mp4"
 
 
 ### Eval and visualize trained model
@@ -185,10 +185,24 @@ export MUJOCO_GL=osmesa
 export PYOPENGL_PLATFORM=osmesa
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 
-CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=osmesa LIBGL_ALWAYS_SOFTWARE=1 MESA_GL_VERSION_OVERRIDE=3.3 PYOPENGL_PLATFORM=osmesa python -m pdb ./sample_base_traj.py --config=configs/libero_config.py:expo --task_name="put both moka pots on the stove" --num_online_epochs=10000 --seed=0 --task_name="put both moka pots on the stove" --config.eval_interval=1 --config.batch_size=32 --config.agent_kwargs.batch_size=32 --environment_name=libero --wandb_experiment_name=expo_trial --num_edit_samples=4 --num_actions_to_sample=4 --num_offline_epochs=0 --final_step_sparse_reward=False --critic_warmup_steps 50 --online_trajectory_collection_frequency 50 --config.utd_ratio=2 --config.num_eval_episodes=10 --config.num_episodes_per_video=2 --config.eval_interval=50 --reward_scale=1.0 --reward_bias=-0.1 --reward_scale=1.0 --reward_bias=-0.1 --filter_successful_trajectories=False | tee logs/debug.log
+CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=osmesa LIBGL_ALWAYS_SOFTWARE=1 MESA_GL_VERSION_OVERRIDE=3.3 PYOPENGL_PLATFORM=osmesa python -m pdb ./sample_base_traj.py --config=configs/libero_config.py:expo --task_name="put both moka pots on the stove" --num_online_epochs=10000 --seed=0 --task_name="put both moka pots on the stove" --config.eval_interval=1 --config.batch_size=32 --config.agent_kwargs.batch_size=32 --environment_name=libero --wandb_experiment_name=expo_trial --num_edit_samples=4 --num_actions_to_sample=4 --num_offline_epochs=0 --final_step_sparse_reward=False --critic_warmup_steps 50 --online_trajectory_collection_frequency 50 --config.utd_ratio=2 --config.num_eval_episodes=10 --config.num_episodes_per_video=2 --config.eval_interval=50 --reward_scale=1.0 --reward_bias=-0.1 --reward_scale=1.0 --reward_bias=-0.1 --filter_successful_trajectories=False --config.batch_size=32 --config.agent_kwargs.batch_size=32 | tee logs/debug.log
 
 ```
 
+# UMap visualize actions
+CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./sample_base_traj.py --config=configs/libero_config.py:expo --task_name="put both moka pots on the stove" --num_online_epochs=10000 --seed=0 --task_name="put both moka pots on the stove" --config.eval_interval=1 --config.batch_size=32 --config.agent_kwargs.batch_size=32 --environment_name=libero --wandb_experiment_name=expo_trial --num_edit_samples=4 --num_actions_to_sample=4 --num_offline_epochs=0 --final_step_sparse_reward=False --critic_warmup_steps 50 --online_trajectory_collection_frequency 50 --config.utd_ratio=2 --config.num_eval_episodes=10 --config.num_episodes_per_video=2 --config.eval_interval=50 --reward_scale=1.0 --reward_bias=-0.1 --reward_scale=1.0 --reward_bias=-0.1 --filter_successful_trajectories=False --num_diffusion_samples=32 --normalize_diffusion_actions=True --num_trajectories_to_collect=30 | tee logs/debug.log
+
+CUDA_VISIBLE_DEVICES=0 python -m pdb umap_action_vis.py \
+    --config=configs/libero_config.py:expo \
+    --task_name="put both moka pots on the stove" \
+    --output_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/umap_vis_debug/" \
+    --replay_buffer_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/libero_10_pi05_put_the_two_mocha_pots_on_the_stove/results_expo/image_replay_buffer/episode_6.tfrecord" \
+    --seed=0 \
+    --config.agent_kwargs.batch_size=512 \
+    --config.batch_size=512 \
+    --critic_params_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/results_expo_debug-td-clean_v10-scale5_actnorm/seed_0/checkpoint_4500.pkl"
+
+##########################
 
 # Caching
 ```
@@ -196,12 +210,12 @@ CUDA_VISIBLE_DEVICES=0 python -m pdb dump_vlm_actions.py \
     --config=configs/libero_config.py:expo \
     --task_name="put both moka pots on the stove" \
     --output_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/clean_skip_v1_server_scale5_actnorm.pkl" \
-    --replay_buffer_path="/data/user_data/skowshik/clean_skip_v1_server/results_expo/image_replay_buffer/*.tfrecord" \
+    --replay_buffer_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/libero_10_pi05_put_the_two_mocha_pots_on_the_stove/results_expo/image_replay_buffer/*.tfrecord" \
     --num_actions_to_sample=4 \
     --num_edit_samples=4 \
     --seed=0 \
-    --config.agent_kwargs.batch_size=512 \
-    --config.batch_size=512
+    --config.agent_kwargs.batch_size=5120 \
+    --config.batch_size=5120
 
 --replay_buffer_path="/data/user_data/skowshik/clean_skip_v4_server/results_expo/
 ```

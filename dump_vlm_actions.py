@@ -141,7 +141,7 @@ def main(_):
     rng, construct_rng = jax.random.split(rng)
 
     example_batch = next(dataset_iterator)
-    # breakpoint()
+    breakpoint()
     
     agent = ExpoPiLearner.create(
         config=pi_config,

@@ -37,6 +37,7 @@ from jaxrl_m.utils.expo_utils import (
     repeat_observations_batched,
     repeat_observations_openpi,
     append_substr_to_dict_keys,
+    add_batch_dim,
 )
 from jaxrl_m.common.typing import Batch, Data, PRNGKey
 
@@ -650,7 +651,7 @@ class ExpoPiLearnerCache(Agent):
     
     
 
-    def sample_actions(self, _observations: Data, is_target=False,*args, **kwargs):
+    def sample_actions(self, _observations: Data, is_target=False, *args, **kwargs):
         '''
         For given state/observation, samles self.N actions from base policy; For first self.n_edit_samples actions, samples from edit_actor;
         Combine all (N + n_edit_samples) actions and compute Q-values; Return the action with the highest Q-value;
@@ -740,13 +741,47 @@ class ExpoPiLearnerCache(Agent):
         seed = kwargs.pop("seed", None)
         seed, rng = jax.random.split(seed)
         output_action_chunk = kwargs.pop("output_action_chunk", True)
+        num_diffusion_samples = kwargs.pop("num_diffusion_samples", 1)
+        normalize_actions = kwargs.pop("normalize_actions", False)
         # Repeat observations to sample `N` actions#
         # observations = repeat_observations(_observations, self.N, axis=0)
         observations = _observations
 
-        seed, rng = jax.random.split(seed)
-        actions, vlm_output, processed_obs = self.actor.sample_actions_with_vlm_output(rng, observations)
-        diffusion_actions = actions.copy() # (1, action_horizon, action_dim)
+        rng_actions, rng = jax.random.split(seed)
+        actions, vlm_output, processed_obs = self.actor.sample_actions_with_vlm_output(rng_actions, observations)
+
+        if num_diffusion_samples == 1:
+            diffusion_actions = actions.copy() # (1, action_horizon, action_dim)
+        else:
+            # breakpoint()
+            rng, rng_diffusion = jax.random.split(rng)
+            batched_obs = add_batch_dim(observations)
+            observations_repeated = repeat_observations_openpi(batched_obs, num_diffusion_samples, axis=0)
+            diffusion_actions, _, _ = self.actor.sample_actions_with_vlm_output(rng_diffusion, observations_repeated)
+
+            if normalize_actions:
+                diffusion_actions = self.actor.norm_actions(diffusion_actions)
+
+        # # Sample `N` actions from base policy #
+        # # Repeat observations to sample `N` actions
+        # timer.tick("repeat_observations_openpi_time")
+        # observations_repeated = repeat_observations_openpi(obs, self.N, axis=0) # (batch_size * N, ...)
+        # timer.tock("repeat_observations_openpi_time")
+
+        # # Get actions and vlm output for all observations above # (batch_size * N,)
+        # actor_to_sample = self.actor
+        # if is_target:
+        #     actor_to_sample = self.target_actor
+        # # breakpoint()
+        # timer.tick("sample_actions_with_vlm_output_time")
+        # pi0_actions, vlm_output = actor_to_sample.sample_actions_with_vlm_output(rng, observations_repeated, timer=timer) # (batch_size * N, action_horizon, action_dim)
+        # timer.tock("sample_actions_with_vlm_output_time")
+        # # breakpoint()
+        # vlm_output = jnp.mean(vlm_output[0][:, :512, :], axis=1) # Take mean representation across tokens, (batch_size * N, pi0_hidden_dims) #
+        # actions = pi0_actions
+        
+        # state = observations_repeated.state[:, :8]
+        # vlm_output = jnp.concatenate([vlm_output, state], axis=1) # (batch_size * N, pi0_hidden_dims + state_dim)
         
         
         # Take mean across tokens as representation from VLM #

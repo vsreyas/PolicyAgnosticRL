@@ -195,6 +195,21 @@ flags.DEFINE_bool(
     False,
     "Filter successful trajectories.",
 )
+flags.DEFINE_integer(
+    "num_diffusion_samples",
+    1,
+    "Number of diffusion samples to use to output `diffusion_actions` from base policy, useful for umap visualization/analysis; for actual training, use 1",
+)
+flags.DEFINE_bool(
+    "normalize_diffusion_actions",
+    False,
+    "Normalize diffusion actions before returning.; For actual training, use False, use True for umap visualization/analysis",
+)
+flags.DEFINE_integer(
+    "num_trajectories_to_collect",
+    200,
+    "Number of trajectories to collect from environment.",
+)
 
 # 2: 07 2 13
 BASE_POLICY_TYPE_TO_CLASS = {
@@ -230,6 +245,8 @@ def get_policy_fn(
     rng: jax.random.PRNGKey,
     timer: Timer | None = None,
     debug_mode: bool = False,
+    num_diffusion_samples: int = 1,
+    normalize_diffusion_actions: bool = False,
 ) -> Callable[[Data], np.ndarray]:
     def policy_fn(observations: Data, *args, **kwargs) -> np.ndarray:
         if not isinstance(observations, dict):
@@ -243,7 +260,7 @@ def get_policy_fn(
         # breakpoint()
         out_dict = jax.device_get(
             agent.sample_base_actions(
-                observations, *args, **kwargs, timer=timer, output_action_chunk=True, debug_mode=debug_mode
+                observations, *args, **kwargs, timer=timer, output_action_chunk=True, debug_mode=debug_mode, num_diffusion_samples=num_diffusion_samples, normalize_diffusion_actions=normalize_diffusion_actions,
             )
         )
         # breakpoint()
@@ -510,7 +527,7 @@ def train_agent(_):
 
 
     # TODO: Remove hardcode and init with flags appropriately #
-    num_trajectories_to_collect = 200
+    num_trajectories_to_collect = FLAGS.num_trajectories_to_collect
     online_env_steps = 0
     online_trajectories_added = 0
     online_env_steps_this_epoch = 0
@@ -535,6 +552,8 @@ def train_agent(_):
                 timer=timer,
                 # debug_mode=debug_mode,
                 debug_mode=True,
+                num_diffusion_samples=FLAGS.num_diffusion_samples,
+                normalize_diffusion_actions=FLAGS.normalize_diffusion_actions,
             )
             vlm_output_fn = get_vlm_output_fn(
                 agent=agent,

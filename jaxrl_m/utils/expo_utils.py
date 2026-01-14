@@ -303,9 +303,23 @@ def repeat_observations_openpi(obs: _model.Observation, N: int, axis: int = 0) -
         if isinstance(x, (jax.Array, np.ndarray)):
             return jnp.concatenate([x] * N, axis=axis)
         # Pass through other types (strings, etc.)
+        if isinstance(x, str):
+            return [x] * N
         return x
 
     return jax.tree.map(_tile_leaf, obs)
+
+def add_batch_dim(x):
+    if isinstance(x, str):
+        return x
+    elif x is None:
+        return None
+    elif isinstance(x, dict):
+        return {k: add_batch_dim(v) for k, v in x.items()}
+    elif isinstance(x, (np.ndarray, jax.Array)):
+        return jnp.expand_dims(x, axis=0)
+    else:
+        return x
 
 def append_substr_to_dict_keys(dict, substr):
     return {substr + '/' + k: v for k, v in dict.items()}
