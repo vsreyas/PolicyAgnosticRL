@@ -342,7 +342,7 @@ def dump_tfrecord_to_gif(
         save_mp4_from_images(base_images, output_gif_path)
     elif camera_view == "wrist" and wrist_images:
         # create_gif_from_images(wrist_images, output_gif_path, duration)
-        save_mp4_from_images(base_images, output_gif_path)
+        save_mp4_from_images(wrist_images, output_gif_path)
     elif camera_view == "both" and base_images and wrist_images:
         # Create side-by-side view
         print("Creating side-by-side view...")
@@ -386,7 +386,7 @@ def main():
         help="Path to the output GIF file",
     )
     parser.add_argument(
-        "--camera-view",
+        "--camera_view",
         type=str,
         default="base",
         choices=["base", "wrist", "both"],

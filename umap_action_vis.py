@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import glob
 import pickle
 from typing import Dict, List
 
@@ -12,6 +13,9 @@ import tensorflow as tf
 from absl import app, flags, logging
 from ml_collections import config_flags
 from tqdm import tqdm
+import imageio.v2 as imageio
+from PIL import Image
+
 
 from jaxrl_m.agents.continuous.expo_pi import ExpoPiLearner
 from jaxrl_m.data.image_replay_buffer_pi import ImageReplayBufferPi
@@ -29,6 +33,8 @@ from jaxrl_m.utils.expo_utils import (
 from flax.training.train_state import TrainState
 import optax
 from jaxrl_m.agents.continuous.expo_pi import compute_q_all
+import imageio.v3 as iio
+from typing import Iterable, Optional, Sequence, Tuple, Union
 
 import umap
 
@@ -42,6 +48,8 @@ print("\n\n\n IMPORTS DONE \n\n\n")
 print("="*80)
 
 FLAGS = flags.FLAGS
+FrameLike = Union[np.ndarray, "np.typing.NDArray"]  # keep it simple
+QuadFrame = Tuple[FrameLike, FrameLike, FrameLike, FrameLike]
 
 config_flags.DEFINE_config_file(
     "config",
@@ -112,6 +120,22 @@ flags.DEFINE_float(
     0.05,
     "Alpha for the reward scaling factor.",
 )
+flags.DEFINE_string(
+    "mp4_path_base_view",
+    None,
+    "Path to the mp4 file to visualize.",
+)
+flags.DEFINE_string(
+    "mp4_path_wrist_view",
+    None,
+    "Path to the mp4 file to visualize.",
+)
+flags.DEFINE_integer(
+    "action_horizon_length",
+    10,
+    "Action horizon length to use for the action visualization.",
+)
+
 
 def plot_actions_colored_by_q(
     q_values,
@@ -155,10 +179,12 @@ def plot_actions_colored_by_q(
 
     qmin = float(np.min(q))
     qmax = float(np.max(q))
-    if np.isclose(qmin, qmax):
-        # Avoid zero range normalization
-        eps = 1e-12 if abs(qmin) < 1e12 else 1.0
-        qmin, qmax = qmin - eps, qmax + eps
+
+    # breakpoint()
+    # if np.isclose(qmin, qmax):
+    #     # Avoid zero range normalization
+    #     eps = 1e-12 if abs(qmin) < 1e12 else 1.0
+    #     qmin, qmax = qmin - eps, qmax + eps
 
     # Linear color mapping: q -> [0, 1] via Normalize :contentReference[oaicite:0]{index=0}
     norm = mpl.colors.Normalize(vmin=qmin, vmax=qmax, clip=True)  # :contentReference[oaicite:1]{index=1}
@@ -190,6 +216,106 @@ def plot_actions_colored_by_q(
 
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight")  # :contentReference[oaicite:4]{index=4}
     plt.close(fig)
+
+# def plot_actions_colored_by_q(
+#     q_values,
+#     actions,
+#     out_path: Union[str, Path],
+#     *,
+#     cmap: str = "viridis",
+#     s: float = 25.0,
+#     alpha: float = 0.9,
+#     dpi: int = 200,
+#     title: Optional[str] = "Actions colored by Q value",
+#     annotate_q: bool = True,
+#     q_text_fmt: str = "{:.3f}",
+#     text_offset: tuple[float, float] = (3, 3),  # points
+#     max_annotate: int = 200,  # safety for large N
+# ) -> None:
+#     """
+#     Scatter-plot 2D actions with point color proportional to q_values, annotate with original q-values,
+#     and save to out_path.
+#     """
+#     q_raw = np.asarray(q_values).reshape(-1)   # keep ORIGINAL q-values for printing
+#     a_raw = np.asarray(actions)
+
+#     if a_raw.ndim != 2 or a_raw.shape[1] != 2:
+#         raise ValueError(f"`actions` must have shape (N, 2). Got {a_raw.shape}.")
+#     if q_raw.shape[0] != a_raw.shape[0]:
+#         raise ValueError(
+#             f"`q_values` and `actions` must have same N. Got {q_raw.shape[0]} vs {a_raw.shape[0]}."
+#         )
+
+#     # Keep only finite points (but preserve original values for those points)
+#     mask = np.isfinite(q_raw) & np.isfinite(a_raw).all(axis=1)
+#     q = q_raw[mask]
+#     a = a_raw[mask]
+
+#     if q.size == 0:
+#         raise ValueError("No finite (q, action) pairs to plot after filtering.")
+
+#     qmin_raw = float(np.min(q))
+#     qmax_raw = float(np.max(q))
+
+#     # If all q are identical, widen the norm *only for coloring*, not for printed values.
+#     if np.isclose(qmin_raw, qmax_raw):
+#         eps = 1e-12 if abs(qmin_raw) < 1e12 else 1.0
+#         norm = mpl.colors.Normalize(vmin=qmin_raw - eps, vmax=qmax_raw + eps, clip=True)
+#         identical_q = True
+#     else:
+#         norm = mpl.colors.Normalize(vmin=qmin_raw, vmax=qmax_raw, clip=True)
+#         identical_q = False
+
+#     fig, ax = plt.subplots(figsize=(6, 5))
+#     sc = ax.scatter(
+#         a[:, 0],
+#         a[:, 1],
+#         c=q,          # IMPORTANT: feed raw q-values here (no normalization done by you)
+#         cmap=cmap,
+#         norm=norm,
+#         s=s,
+#         alpha=alpha,
+#     )
+
+#     cbar = fig.colorbar(sc, ax=ax)
+#     cbar.set_label("Q value")
+
+#     # If all q are identical, force the colorbar to display the original value clearly.
+#     if identical_q:
+#         cbar.set_ticks([qmin_raw])
+#         cbar.set_ticklabels([q_text_fmt.format(qmin_raw)])
+
+#     ax.set_xlabel("action[0]")
+#     ax.set_ylabel("action[1]")
+#     if title is not None:
+#         ax.set_title(title)
+#     ax.grid(True, linewidth=0.5, alpha=0.4)
+
+#     # Annotate each point with ORIGINAL q-values (not normalized)
+#     if annotate_q:
+#         if q.shape[0] > max_annotate:
+#             # avoid unreadable plots / slowdowns
+#             idxs = np.linspace(0, q.shape[0] - 1, max_annotate).astype(int)
+#         else:
+#             idxs = np.arange(q.shape[0])
+
+#         for i in idxs:
+#             ax.annotate(
+#                 q_text_fmt.format(float(q[i])),
+#                 (a[i, 0], a[i, 1]),
+#                 textcoords="offset points",
+#                 xytext=text_offset,
+#                 ha="left",
+#                 va="bottom",
+#                 fontsize=7,
+#                 alpha=0.9,
+#             )
+
+#     fig.tight_layout()
+#     out_path = Path(out_path)
+#     out_path.parent.mkdir(parents=True, exist_ok=True)
+#     fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+#     plt.close(fig)
 
 def plot_q_trajectory(
     q_values: Union[np.ndarray, jnp.ndarray],
@@ -277,7 +403,143 @@ def process_batch(batch):
     vlm_output = batch['vlm_output']
     q_vals_sampled_action = compute_q_all(critic.apply_fn, critic.params, vlm_output, sampled_action)
 
+    # breakpoint()
+
     return q_vals, diffusion_actions_reduced, timesteps, q_vals_sampled_action[0]
+
+def mp4_to_frames(
+    video_path: str,
+    *,
+    plugin: str = "pyav",
+    stride: int = 1,
+    max_frames: Optional[int] = None,
+) -> List[np.ndarray]:
+    """
+    Convert a video into a list of frames.
+
+    Args:
+        video_path: Path to .mp4 (or any supported video).
+        plugin: Backend plugin (e.g., "pyav"). If you omit this, imageio will auto-select.
+        stride: Keep every k-th frame (1 = keep all).
+        max_frames: Stop after this many kept frames (None = keep all).
+
+    Returns:
+        List of frames as HxWxC uint8 NumPy arrays (typically RGB).
+    """
+    if stride < 1:
+        raise ValueError("stride must be >= 1")
+
+    frames: List[np.ndarray] = []
+    kept = 0
+
+    # Iterate frames (streaming decode); we then accumulate into a Python list.
+    for i, frame in enumerate(iio.imiter(video_path, plugin=plugin)):
+        if i % stride != 0:
+            continue
+        frames.append(frame)
+        kept += 1
+        if max_frames is not None and kept >= max_frames:
+            break
+
+    return frames
+
+def _to_uint8_rgb(frame: np.ndarray) -> np.ndarray:
+    """Convert frame to uint8 RGB (H, W, 3). Handles grayscale + RGBA + float."""
+    x = np.asarray(frame)
+
+    # Squeeze trivial dims
+    if x.ndim == 4 and x.shape[0] == 1:
+        x = x[0]
+
+    # Grayscale -> RGB
+    if x.ndim == 2:
+        x = np.repeat(x[:, :, None], 3, axis=2)
+
+    # RGBA -> RGB
+    if x.ndim == 3 and x.shape[2] == 4:
+        x = x[:, :, :3]
+
+    if x.ndim != 3 or x.shape[2] != 3:
+        raise ValueError(f"Expected frame with shape (H,W,3)/(H,W,4)/(H,W). Got {x.shape}")
+
+    # Float -> uint8
+    if np.issubdtype(x.dtype, np.floating):
+        # assume either [0,1] or [0,255]
+        mx = float(np.nanmax(x)) if x.size else 0.0
+        if mx <= 1.0:
+            x = np.clip(x * 255.0, 0.0, 255.0)
+        else:
+            x = np.clip(x, 0.0, 255.0)
+        x = x.astype(np.uint8)
+
+    # Int -> uint8
+    if x.dtype != np.uint8:
+        x = np.clip(x, 0, 255).astype(np.uint8)
+
+    return x
+
+
+def _resize_hw(frame_rgb_u8: np.ndarray, h: int, w: int) -> np.ndarray:
+    """Resize to exactly (h, w) using PIL. PIL takes size=(w, h)."""
+    im = Image.fromarray(frame_rgb_u8)
+    im = im.resize((w, h), resample=Image.BILINEAR)  # size is (width, height) :contentReference[oaicite:1]{index=1}
+    return np.asarray(im)
+
+
+def write_combined_frames_mp4_imageio(
+    combined_frames: Iterable[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
+    out_path: Union[str, os.PathLike],
+    *,
+    dim: int = 512,
+    fps: int = 10,
+    codec: str = "libx264",
+    pixelformat: str = "yuv420p",
+    quality: int = 8,
+) -> None:
+    """
+    Create a (dim, dim) MP4 where each frame is a 2x2 grid:
+      [ base_view | wrist_view ]
+      [  q_traj   |   umap     ]
+
+    combined_frames: iterable of 4-tuples of frames (any of: HxW, HxWx3, HxWx4; float or uint8)
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Allow odd dim but keep exact output size by splitting into (floor, ceil)
+    w_left = dim // 2
+    w_right = dim - w_left
+    h_top = dim // 2
+    h_bottom = dim - h_top
+
+    # If you want to avoid any codec issues, keep dim even:
+    # if dim % 2 != 0: raise ValueError("Use an even dim for best H.264 compatibility.")
+
+    with imageio.get_writer(
+        str(out_path),
+        fps=fps,
+        codec=codec,
+        quality=quality,
+        pixelformat=pixelformat,
+        macro_block_size=None,  # avoid implicit resizing/padding
+    ) as writer:
+        for (base_view, wrist_view, q_traj, umap_frame) in combined_frames:
+            b = _resize_hw(_to_uint8_rgb(base_view), h_top, w_left)
+            wv = _resize_hw(_to_uint8_rgb(wrist_view), h_top, w_right)
+            qt = _resize_hw(_to_uint8_rgb(q_traj), h_bottom, w_left)
+            um = _resize_hw(_to_uint8_rgb(umap_frame), h_bottom, w_right)
+
+            top = np.concatenate([b, wv], axis=1)      # (h_top, dim, 3)
+            bottom = np.concatenate([qt, um], axis=1)  # (h_bottom, dim, 3)
+            frame = np.concatenate([top, bottom], axis=0)  # (dim, dim, 3)
+
+            # Safety check: imageio expects consistent shape across frames :contentReference[oaicite:2]{index=2}
+            if frame.shape != (dim, dim, 3):
+                raise RuntimeError(f"Internal error: got {frame.shape}, expected {(dim, dim, 3)}")
+
+            writer.append_data(frame)
+
+
 
 def main(_):
     # Prevent TensorFlow from using GPUs
@@ -287,6 +549,11 @@ def main(_):
     devices = jax.local_devices()
     num_devices = len(devices)
     logging.info(f"Found {num_devices} JAX devices")
+
+    assert FLAGS.mp4_path_base_view is not None, "Base view mp4 path must be provided"
+    base_view_frames = mp4_to_frames(FLAGS.mp4_path_base_view)
+    assert FLAGS.mp4_path_wrist_view is not None, "Wrist view mp4 path must be provided"
+    wrist_view_frames = mp4_to_frames(FLAGS.mp4_path_wrist_view)
     
     assert FLAGS.config.batch_size % num_devices == 0, \
         f"Batch size {FLAGS.config.batch_size} must be divisible by num_devices {num_devices}"
@@ -344,8 +611,38 @@ def main(_):
         os.makedirs(FLAGS.output_path, exist_ok=True)
         for idx, timestep in enumerate(timesteps):
             plot_actions_colored_by_q(q_vals0[idx], diffusion_actions_reduced[idx], os.path.join(FLAGS.output_path, f"q_vals_{timestep}.png"))
+        
+        # Read all .png files in output path and load them as frames
+        png_files = glob.glob(os.path.join(FLAGS.output_path, "*.png"))
+        frames = [plt.imread(png_file) for png_file in sorted(png_files, key=lambda x: int(x.split('_')[-1].split('.')[0]))]
 
-        plot_q_trajectory(q_vals_sampled_action, os.path.join(FLAGS.output_path, "q_vals_sampled_action.png"))
+
+        combined_frames_for_plotting = []
+        cur_q_val = None
+        cur_umap_frame = None
+        # Create combined frames
+        for timestep in range(len(base_view_frames)):
+            base_view_frame = base_view_frames[timestep]
+            wrist_view_frame = wrist_view_frames[timestep]
+
+            if timestep in timesteps:
+                timestep_arr_idx = (timesteps == timestep).argmax()
+                cur_q_val = q_vals_sampled_action[:timestep_arr_idx]
+                cur_umap_frame = frames[timestep_arr_idx]
+                plot_q_trajectory(cur_q_val, os.path.join(FLAGS.output_path, "q_vals_sampled_action.png"))
+            
+            # Read the png file
+            q_traj_frame = plt.imread(os.path.join(FLAGS.output_path, "q_vals_sampled_action.png"))
+            combined_frames_for_plotting.append((base_view_frame, wrist_view_frame, q_traj_frame, cur_umap_frame))
+            
+
+        # plot_q_trajectory(q_vals_sampled_action, os.path.join(FLAGS.output_path, "q_vals_sampled_action.png"))
+
+        # breakpoint()
+
+        write_combined_frames_mp4_imageio(combined_frames_for_plotting, os.path.join(FLAGS.output_path, "combined_frames.mp4"))
+
+    # 
     
 
 
