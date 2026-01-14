@@ -226,7 +226,8 @@ def _critic_loss_and_grad(
 
         # critic_loss = (critic_loss_td + 0.2 * critic_loss_mc)
         # critic_loss = critic_loss_td
-        critic_loss_td = ((qs - target_q) ** 2).mean()
+        # critic_loss_td = ((qs - target_q) ** 2).mean()
+        critic_loss_td = optax.losses.huber_loss(qs, target_q).mean()
         critic_loss_mc = ((qs - mc_target) ** 2).mean()
         critic_loss = critic_loss_td # + 0.2 * critic_loss_mc
 

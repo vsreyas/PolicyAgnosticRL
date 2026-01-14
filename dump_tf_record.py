@@ -4,12 +4,13 @@
 import argparse
 import os
 import sys
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import tensorflow as tf
 from PIL import Image, ImageDraw, ImageFont
 from tqdm import tqdm
+import cv2
 
 # Add the parent directory to path to import jaxrl_m modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -17,6 +18,171 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from jaxrl_m.data.img_replay_buffer_pi_old import ImageReplayBufferPi
 from openpi.training.config import get_config
 
+# def save_mp4_from_images(
+#     images: List[np.ndarray],
+#     output_path: str,
+#     *,
+#     duration_ms: int = 100,          # like your GIF duration per frame
+#     fps: Optional[float] = None,      # overrides duration_ms if set
+#     codec: str = "mp4v",              # common MP4 codec; try "avc1" on some systems
+#     assume_rgb: bool = True,          # your frames are likely RGB; OpenCV expects BGR
+#     add_timestep_text: bool = True,
+# ) -> None:
+#     if not images:
+#         raise ValueError("No images provided")
+
+#     if not output_path.lower().endswith(".mp4"):
+#         output_path += ".mp4"
+
+#     if fps is None:
+#         fps = max(1.0, 1000.0 / float(duration_ms))
+
+#     # Normalize first frame to get (H, W)
+#     f0 = images[0]
+#     if f0.ndim == 4:
+#         f0 = f0[0]
+#     if f0.dtype != np.uint8:
+#         f0 = (np.clip(f0, 0, 1) * 255).astype(np.uint8) if f0.max() <= 1.0 else f0.astype(np.uint8)
+
+#     if f0.ndim != 3 or f0.shape[2] != 3:
+#         raise ValueError(f"Expected frame shape (H, W, 3); got {f0.shape}")
+
+#     h, w = f0.shape[:2]
+
+#     fourcc = cv2.VideoWriter_fourcc(*codec)
+#     writer = cv2.VideoWriter(output_path, fourcc, float(fps), (w, h))
+
+#     if not writer.isOpened():
+#         raise RuntimeError(
+#             f"Failed to open VideoWriter for {output_path}. "
+#             f"Try a different codec (e.g., 'avc1') or ensure OpenCV has FFmpeg/GStreamer support."
+#         )
+
+#     try:
+#         for t, frame in enumerate(images):
+#             if frame.ndim == 4:
+#                 frame = frame[0]
+
+#             if frame.dtype != np.uint8:
+#                 frame = (np.clip(frame, 0, 1) * 255).astype(np.uint8) if frame.max() <= 1.0 else frame.astype(np.uint8)
+
+#             if frame.shape[:2] != (h, w):
+#                 frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_AREA)
+
+#             if assume_rgb:
+#                 frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+#             if add_timestep_text:
+#                 cv2.putText(
+#                     frame,
+#                     f"Timestep: {t}",
+#                     (10, 30),
+#                     cv2.FONT_HERSHEY_SIMPLEX,
+#                     1.0,
+#                     (255, 255, 255),
+#                     2,
+#                     cv2.LINE_AA,
+#                 )
+
+#             writer.write(frame)
+#     finally:
+#         writer.release()
+
+import numpy as np
+import imageio.v2 as iio
+from PIL import Image, ImageDraw, ImageFont
+
+def _to_uint8_rgb(frame: np.ndarray) -> np.ndarray:
+    """Convert frame to (H,W,3) uint8 RGB."""
+    if frame.ndim == 4:
+        frame = frame[0]
+    if frame.dtype != np.uint8:
+        if frame.max() <= 1.0:
+            frame = (frame * 255.0).astype(np.uint8)
+        else:
+            frame = frame.astype(np.uint8)
+    if frame.shape[-1] == 4:  # RGBA -> RGB
+        frame = frame[..., :3]
+    return frame
+
+def _overlay_text_top_left(
+    frame_rgb_u8: np.ndarray,
+    text: str,
+    font_size: int = 20,
+    pad: int = 6,
+) -> np.ndarray:
+    """Overlay text with a dark translucent background at the top-left."""
+    im = Image.fromarray(frame_rgb_u8).convert("RGBA")
+
+    # Make a transparent overlay to support alpha
+    overlay = Image.new("RGBA", im.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay, "RGBA")
+
+    # Font (fall back cleanly)
+    try:
+        font = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size
+        )
+    except Exception:
+        try:
+            font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", font_size
+            )
+        except Exception:
+            font = ImageFont.load_default()
+
+    # Measure + background rect
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    x0, y0 = 8, 8
+    rect = (x0, y0, x0 + tw + 2 * pad, y0 + th + 2 * pad)
+
+    # Translucent background + white text
+    draw.rectangle(rect, fill=(0, 0, 0, 180))
+    draw.text((x0 + pad, y0 + pad), text, fill=(255, 255, 255, 255), font=font)
+
+    # Composite overlay onto the image
+    out = Image.alpha_composite(im, overlay).convert("RGB")
+    return np.asarray(out)
+
+def save_mp4_from_images(
+    frames,
+    output_path: str,
+    fps: float = 10.0,
+    timestamps=None,  # optional list of floats/strings; if None uses i/fps
+    show_frame_index: bool = False,
+    quality: int = 8,
+):
+    """
+    Write MP4 using imageio and overlay timestamps at the top.
+    - frames: iterable of (H,W,3) arrays (uint8 or float in [0,1])
+    - timestamps: optional list aligned with frames (float seconds or str)
+    """
+    # imageio's get_writer + append_data pattern (ffmpeg backend) :contentReference[oaicite:1]{index=1}
+    with iio.get_writer(
+        output_path,
+        fps=fps,
+        format="FFMPEG",
+        codec="libx264",
+        quality=quality,
+        macro_block_size=1,  # avoids auto-resize to multiples of 16 in many setups
+    ) as writer:
+        for i, frame in enumerate(frames):
+            frame_u8 = _to_uint8_rgb(np.asarray(frame))
+
+            if timestamps is None:
+                t = i
+                ts_str = f"{i}"
+            else:
+                ts = timestamps[i]
+                ts_str = f"{ts:8.3f}s" if isinstance(ts, (int, float, np.number)) else str(ts)
+
+            label = f"t={ts_str}"
+            if show_frame_index:
+                label += f" | frame={i}"
+
+            frame_u8 = _overlay_text_top_left(frame_u8, label)
+            writer.append_data(frame_u8)
 
 def create_gif_from_images(images: List[np.ndarray], output_path: str, duration: int = 100):
     """
@@ -172,9 +338,11 @@ def dump_tfrecord_to_gif(
 
     # Create GIFs based on camera_view selection
     if camera_view == "base" and base_images:
-        create_gif_from_images(base_images, output_gif_path, duration)
+        # create_gif_from_images(base_images, output_gif_path, duration)
+        save_mp4_from_images(base_images, output_gif_path)
     elif camera_view == "wrist" and wrist_images:
-        create_gif_from_images(wrist_images, output_gif_path, duration)
+        # create_gif_from_images(wrist_images, output_gif_path, duration)
+        save_mp4_from_images(base_images, output_gif_path)
     elif camera_view == "both" and base_images and wrist_images:
         # Create side-by-side view
         print("Creating side-by-side view...")
@@ -197,7 +365,8 @@ def dump_tfrecord_to_gif(
             combined = np.concatenate([base_img, wrist_img], axis=1)
             combined_images.append(combined)
 
-        create_gif_from_images(combined_images, output_gif_path, duration)
+        # create_gif_from_images(combined_images, output_gif_path, duration)
+        save_mp4_from_images(base_images, output_gif_path)
     else:
         print(f"❌ No images found for camera view: {camera_view}")
 
@@ -254,8 +423,8 @@ def main():
     args = parser.parse_args()
 
     # Validate output path
-    if not args.output_gif_path.endswith(".gif"):
-        args.output_gif_path += ".gif"
+    # if not args.output_gif_path.endswith(".gif"):
+    #     args.output_gif_path += ".gif"
 
     # Create output directory if it doesn't exist
     output_dir = os.path.dirname(args.output_gif_path)

@@ -27,6 +27,9 @@ from jaxrl_m.utils.timer_utils import Timer
 from openpi.training.config import get_config
 import openpi.models.model as _model
 
+print("\n\n\n IMPORTS DONE \n\n\n")
+print("="*80)
+
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string("environment_name", "libero", "Environment name.")
