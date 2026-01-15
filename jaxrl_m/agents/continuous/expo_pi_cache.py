@@ -103,7 +103,7 @@ def _edit_actor_loss_and_grad(
         # [B, D_vlm + D_action]
         edit_observations = jnp.concatenate([vlm_output, batch_actions], axis=1)
 
-        dist = edit_actor_apply_fn(
+        dist, means, log_stds = edit_actor_apply_fn(
             {"params": actor_params},
             edit_observations,
             training=False,
@@ -132,6 +132,8 @@ def _edit_actor_loss_and_grad(
         edit_actor_loss = (entropy_scale * log_probs * temperature - q).mean()
         # edit_actor_loss = -q.mean()
 
+        stds = jnp.exp(log_stds)
+
         metrics = {
             "edit_q": q.mean(),
             "edit_actor_loss": edit_actor_loss,
@@ -140,6 +142,14 @@ def _edit_actor_loss_and_grad(
             "log_probs_std": log_probs.std(),
             "log_probs_max": log_probs.max(),
             "log_probs_min": log_probs.min(),
+            "stds_mean": stds.mean(),
+            "stds_std": stds.std(),
+            "stds_max": stds.max(),
+            "stds_min": stds.min(),
+            "means_mean": means.mean(),
+            "means_std": means.std(),
+            "means_max": means.max(),
+            "means_min": means.min(),
         }
 
         edit_actions = edit_actions.reshape(-1, 10, 7)
@@ -294,8 +304,8 @@ def _temperature_loss_and_grad(temp, temp_params, entropy, target_entropy, temp_
 @partial(jax.jit, static_argnames="apply_fn")
 def _sample_actions(rng, apply_fn, params, observations: np.ndarray) -> np.ndarray:
     key, rng = jax.random.split(rng)
-    dist = apply_fn({"params": params}, observations)
-    return dist.sample(seed=key), rng
+    dist, means, log_stds = apply_fn({"params": params}, observations)
+    return dist.sample(seed=key), means, log_stds, rng
 
 
 class ExpoPiLearnerCache(Agent):
@@ -348,7 +358,7 @@ class ExpoPiLearnerCache(Agent):
         actor_lr: float = 3e-4,
         critic_lr: float = 3e-4,
         temp_lr: float = 2e-3,
-        hidden_dims: Sequence[int] = (256, 256),
+        hidden_dims: Sequence[int] = (512, 512, 512, 512),
         discount: float = 0.99,
         tau: float = 0.005,
         num_qs: int = 10,
@@ -662,6 +672,7 @@ class ExpoPiLearnerCache(Agent):
         seed, rng = jax.random.split(seed)
         # timer = kwargs.pop("timer", None)
         output_action_chunk = kwargs.pop("output_action_chunk", True)
+        use_deterministic_actions = kwargs.pop("use_deterministic_actions", False)
         # Repeat observations to sample `N` actions#
         # observations = repeat_observations(_observations, self.N, axis=0)
         observations = _observations
@@ -709,9 +720,11 @@ class ExpoPiLearnerCache(Agent):
         # )
         actions = actions.reshape(1, self.action_dim)
         r_observations = jnp.concatenate([vlm_output, actions], axis=1) # (1, pi0_hidden_dims + action_horizon * action_dim)
-        r_samples, rng =  _sample_actions(seed, self.edit_actor.apply_fn, self.edit_actor.params, r_observations) # (n_edit_samples, action_horizon * action_dim)
-        r_samples = r_samples * self.edit_action_scale + actions
-        actions = r_samples
+        r_samples, means, log_stds, rng =  _sample_actions(seed, self.edit_actor.apply_fn, self.edit_actor.params, r_observations) # (n_edit_samples, action_horizon * action_dim)
+        if use_deterministic_actions:
+            actions = means * self.edit_action_scale + actions
+        else:
+            actions = r_samples * self.edit_action_scale + actions
         final_action = actions.reshape(self.action_horizon, self.action_dim // self.action_horizon)
 
         # breakpoint()

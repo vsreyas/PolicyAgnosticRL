@@ -260,7 +260,7 @@ class ExpoPiLearner(Agent):
         actor_lr: float = 3e-4,
         critic_lr: float = 3e-4,
         temp_lr: float = 1e-3,
-        hidden_dims: Sequence[int] = (256, 256),
+        hidden_dims: Sequence[int] = (512, 512, 512, 512),
         discount: float = 0.99,
         tau: float = 0.005,
         num_qs: int = 10,

@@ -54,7 +54,7 @@ class Normal(nn.Module):
     action_dim: int
     log_std_min: Optional[float] = -20
     log_std_max: Optional[float] = 2
-    state_dependent_std: bool = True
+    state_dependent_std: bool = False
     squash_tanh: bool = False
 
     @nn.compact
@@ -80,9 +80,9 @@ class Normal(nn.Module):
         )
 
         if self.squash_tanh:
-            return TanhTransformedDistribution(distribution)
+            return TanhTransformedDistribution(distribution), means, log_stds
         else:
-            return distribution
+            return distribution, means, log_stds
 
 
 TanhNormal = functools.partial(Normal, squash_tanh=True)
