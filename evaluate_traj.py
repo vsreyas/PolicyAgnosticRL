@@ -226,6 +226,7 @@ def get_policy_fn(
     rng: jax.random.PRNGKey,
     timer: Timer | None = None,
     debug_mode: bool = False,
+    use_deterministic_actions: bool = False,
 ) -> Callable[[Data], np.ndarray]:
     def policy_fn(observations: Data, *args, **kwargs) -> np.ndarray:
         if not isinstance(observations, dict):
@@ -239,7 +240,7 @@ def get_policy_fn(
         # breakpoint()
         out_dict = jax.device_get(
             agent.sample_actions(
-                observations, *args, **kwargs, timer=timer, output_action_chunk=True, debug_mode=False
+                observations, *args, **kwargs, timer=timer, output_action_chunk=True, debug_mode=False, use_deterministic_actions=use_deterministic_actions
             )
         )
         # breakpoint()
@@ -585,6 +586,7 @@ def train_agent(_):
         agent=agent,
         rng=eval_policy_fn_key,
         timer=timer,
+        use_deterministic_actions=True
     )
     #########################################################
 
@@ -623,6 +625,7 @@ def train_agent(_):
                         rng=eval_policy_fn_key,
                         timer=timer,
                         debug_mode=False,
+                        use_deterministic_actions=True
                     )
                     trajectories, q_vs_mc_returns_vals = evaluate_with_trajectories_libero(
                     eval_policy_fn,
