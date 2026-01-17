@@ -681,12 +681,12 @@ def train_agent(_):
 
 
     # TODO: Remove hardcode and init with flags appropriately #
-    num_trajectories_to_collect = 5
+    num_trajectories_to_collect = 1
     online_env_steps = 0
     online_trajectories_added = 0
     env_recreation_frequency = 1
     env_recreation_count = 0
-    save_interval = 100
+    save_interval = 1000
 
     # breakpoint()
 
@@ -868,7 +868,7 @@ def train_agent(_):
                     use_wrist_view=FLAGS.use_wrist_view, 
                     use_language=FLAGS.use_lang, config=pi_config,
                     final_step_sparse_reward=False, # Use rewards from environment and DO NOT override with sparse 0/1 rewards at final step #
-                    filter_successful_trajectories=False, # Use success buffer #
+                    filter_successful_trajectories=True, # Use success buffer #
                     use_reverse_data_paths=False,
                     alpha=alpha,
                     scale_success_reward=scale_success_reward,
@@ -894,8 +894,9 @@ def train_agent(_):
                 print("Critic warmup...Updating only critic")
                 # batch = offline_batch
                 offline_batch = next(offline_train_iterator)
-                online_batch = next(online_train_iterator)
-                batch = concatenate_batches([offline_batch, online_batch])
+                # online_batch = next(online_train_iterator)
+                # batch = concatenate_batches([offline_batch, online_batch])
+                batch = offline_batch
                 # breakpoint()
                 # batch = set_batch_masks(
                 #     batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
@@ -907,7 +908,7 @@ def train_agent(_):
                 # RLPD style online + offline update #
                 timer.tick("batch_sampling_time")
                 offline_batch = next(offline_train_iterator)
-                online_batch = next(online_train_iterator)
+                # online_batch = next(online_train_iterator)
                 timer.tock("batch_sampling_time")
                 # except StopIteration:
                 #     # No successful trajectories in online buffer, construct full buffer #
@@ -929,10 +930,10 @@ def train_agent(_):
                 #     online_batch = next(online_train_iterator)
                 
                 # timer.tick("concatenate_batches_time")
-                batch = concatenate_batches([offline_batch, online_batch])
+                # batch = concatenate_batches([offline_batch, online_batch])
                 # timer.tock("concatenate_batches_time")
                 # batch = online_batch
-                # batch = online_batch
+                batch = offline_batch
                 # Do this as it cleanly handles termination/truncation for bootstrapping during critic update #
                 # The function effectively sets mask as 0.0 only where reward == 1.0, so for unsuccessful trajectory, it will have 'dones' as 0.0 at end #
                 # batch = set_batch_masks(
@@ -1293,23 +1294,6 @@ def train_agent(_):
                             'temp_params': agent.temp.params,
                             'step': i,
                         }, f)
-        
-        ### Offline training ###
-        # Not really expo style as of now, but keep it here in case need to do this paradigm later #
-        else:
-            # Sample an offline batch and do an update #
-            batch = next(offline_train_iterator)
-            # breakpoint()
-            # batch = shard_batch(batch, sharding)
-            batch = set_batch_masks(
-                batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
-            )
-            agent, info = agent.update(batch, utd_ratio=FLAGS.config.utd_ratio, timer=timer)
-            print(timer.get_total_times(reset=True))
-
-            
-
-        # breakpoint()
 
 if __name__ == "__main__":
     app.run(train_agent)

@@ -347,7 +347,7 @@ class ImageReplayBufferPi:
         )
         
         if self.is_train:
-            dataset = dataset.shuffle(512, seed=seed, reshuffle_each_iteration=True)
+            dataset = dataset.shuffle(2048, seed=seed, reshuffle_each_iteration=True)
             dataset = dataset.repeat()
 
         # yields raw serialized examples

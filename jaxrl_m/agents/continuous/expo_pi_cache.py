@@ -96,6 +96,8 @@ def _edit_actor_loss_and_grad(
     edit_actor_apply_fn,
     critic_apply_fn,
     temp_apply_fn,
+    mc_target,
+    qs_var,
 ):
     """Single jitted step for edit_actor: forward + loss + grad."""
 
@@ -111,13 +113,15 @@ def _edit_actor_loss_and_grad(
         )
         actions_sampled = dist.sample(seed=key)
         log_probs_orig = dist.log_prob(actions_sampled)
-        edited_actions = actions_sampled * edit_action_scale
+        # edited_actions = actions_sampled * edit_action_scale
+        edited_actions = means * edit_action_scale
         edit_actions = edited_actions.copy()
 
 
         log_probs = log_probs_orig - actions_sampled.shape[-1] * jnp.log(edit_action_scale)
 
         actions = edited_actions + batch_actions
+        actions = jnp.clip(actions, -1.0, 1.0)
 
         qs = critic_apply_fn(
             {"params": critic_params},
@@ -128,14 +132,34 @@ def _edit_actor_loss_and_grad(
         )
         q = qs.mean(axis=0)
 
-        temperature = temp_apply_fn({"params": temp_params})
-        edit_actor_loss = (entropy_scale * log_probs * temperature - q).mean()
+        qs_base = critic_apply_fn(
+            {"params": critic_params},
+            vlm_output,
+            batch_actions,
+            False,
+            rngs={"dropout": key2},
+        )
+        q_base = qs_base.mean(axis=0)
+
+        # q_wt = (jnp.exp(qs_var) > 5.0).astype(jnp.float32)
+        q_wt = jnp.maximum(jnp.exp(qs_var) - 5.0, 0.0)
+        # temperature = temp_apply_fn({"params": temp_params})
+
+        # action_chunk_variance_loss = jnp.var(edited_actions.reshape(-1, 10, 7) / edit_action_scale, axis=1).mean(axis=1)
+        action_min_loss = jnp.square(means).mean()
+        # edit_actor_loss = (entropy_scale * log_probs * temperature - (q * q_wt)).mean()
         # edit_actor_loss = -q.mean()
+        edit_actor_loss = (-q).mean() + (action_min_loss * 50.0)
 
         stds = jnp.exp(log_stds)
 
         metrics = {
-            "edit_q": q.mean(),
+            "edit_q_mean": q.mean(),
+            "edit_q_min": q.min(),
+            "edit_q_max": q.max(),
+            "base_q_mean": q_base.mean(),
+            "base_q_min": q_base.min(),
+            "base_q_max": q_base.max(),
             "edit_actor_loss": edit_actor_loss,
             "entropy": -log_probs.mean(),
             "log_probs_mean": log_probs.mean(),
@@ -150,6 +174,16 @@ def _edit_actor_loss_and_grad(
             "means_std": means.std(),
             "means_max": means.max(),
             "means_min": means.min(),
+            # "action_chunk_variance_loss_mean": action_chunk_variance_loss.mean(),
+            "action_min_loss_mean": action_min_loss,
+            "qs_var_mean": qs_var.mean(),
+            "qs_var_std": qs_var.std(),
+            "qs_var_max": qs_var.max(),
+            "qs_var_min": qs_var.min(),
+            # "q_wt_mean": q_wt.mean(),
+            # "q_wt_std": q_wt.std(),
+            # "q_wt_max": q_wt.max(),
+            # "q_wt_min": q_wt.min(),
         }
 
         edit_actions = edit_actions.reshape(-1, 10, 7)
@@ -210,8 +244,9 @@ def _critic_loss_and_grad(
     """Single jitted step for critic: forward + loss + grad."""
 
     r_observations = jnp.concatenate([next_vlm_output, next_base_actions], axis=1) # (1, pi0_hidden_dims + action_horizon * action_dim)
-    r_samples, _ =  _sample_actions(sample_key, edit_actor_apply_fn, edit_actor_params, r_observations) # (n_edit_samples, action_horizon * action_dim)
+    r_samples, means, log_stds, rng =  _sample_actions(sample_key, edit_actor_apply_fn, edit_actor_params, r_observations) # (n_edit_samples, action_horizon * action_dim)
     next_actions = r_samples * edit_action_scale + next_base_actions
+    next_actions = jnp.clip(next_actions, -1.0, 1.0)
     # next_actions = batch_next_actions
     next_qs = compute_q(target_critic_apply_fn, target_params, next_vlm_output, next_actions) # (batch_size, )
     masks = 1.0 - terminals
@@ -279,6 +314,38 @@ def _critic_loss_and_grad(
         critic.params, target_critic_params, tau
     )
     return critic, target_critic_params, grads, metrics
+
+@partial(jax.jit, static_argnames=("critic_apply_fn"))
+def q_loss(
+    critic_params,
+    vlm_output,
+    actions,
+    # target_q,
+    mc_target,
+    key,
+    critic_apply_fn,
+    # #
+    critic,
+):
+    """Single jitted step for critic: forward + loss + grad."""
+
+    def loss_fn(actions):
+        qs = critic_apply_fn(
+            {"params": critic_params},
+            vlm_output,
+            actions,
+            False,
+            rngs={"dropout": key},
+        )
+        
+        q_loss = qs.mean()
+        return q_loss, {"q_loss": q_loss}
+
+    (loss, metrics), grads = jax.value_and_grad(
+        loss_fn, has_aux=True
+    )(actions)
+    
+    return grads, metrics
 
 @partial(jax.jit, static_argnames="temp_apply_fn")
 def _temperature_loss_and_grad(temp, temp_params, entropy, target_entropy, temp_apply_fn):
@@ -357,7 +424,7 @@ class ExpoPiLearnerCache(Agent):
         rng : PRNGKey | None = None,
         actor_lr: float = 3e-4,
         critic_lr: float = 3e-4,
-        temp_lr: float = 2e-3,
+        temp_lr: float = 3e-4,
         hidden_dims: Sequence[int] = (512, 512, 512, 512),
         discount: float = 0.99,
         tau: float = 0.005,
@@ -383,7 +450,7 @@ class ExpoPiLearnerCache(Agent):
         batch_split: int = 1, 
         M: int = 0,
         n_edit_samples: int = 4, 
-        edit_action_scale: float = 0.5,
+        edit_action_scale: float = 3.0,
         actor_layer_norm: bool = True,
         clip_sampler: bool = True,
         decay_steps: Optional[int] = int(3e6),
@@ -395,7 +462,7 @@ class ExpoPiLearnerCache(Agent):
         batch_size_dict_key: str = 'actions',
         q_clip_low: Optional[float] = -10000.0,
         q_clip_high: Optional[float] = 10000.0,
-        entropy_mul_scale_factor: float = 1.0,
+        entropy_mul_scale_factor: float = 3.0,
     ):
         # Assertions
         assert N >= n_edit_samples, f"N must be greater than or equal to n_edit_samples, got N={N} and n_edit_samples={n_edit_samples}"
@@ -410,6 +477,8 @@ class ExpoPiLearnerCache(Agent):
             
             if adjust_target_entropy:
                 target_entropy = -action_dim / 2 + action_dim * jnp.log(edit_action_scale)
+            
+            target_entropy = target_entropy * entropy_mul_scale_factor
 
         # batch_size = observations[batch_size_dict_key].shape[0]
 
@@ -432,7 +501,7 @@ class ExpoPiLearnerCache(Agent):
         dummy_observations = jnp.ones((batch_size, pi0_hidden_dims + state_dim)) # Inlcude state concatenation as well
         dummy_actions = jnp.ones((batch_size, action_dim)) # For initializing the critic
         edit_actor_base_cls = partial(
-            MLP, hidden_dims=hidden_dims, dropout_rate=actor_drop, activate_final=True, use_pnorm=use_pnorm
+            MLP, hidden_dims=hidden_dims, dropout_rate=None, activate_final=True, use_pnorm=use_pnorm, use_layer_norm=True,
         )
         edit_actor_def = TanhNormal(edit_actor_base_cls, action_dim)
         edit_observations = jnp.concatenate([dummy_observations, jnp.ones((batch_size, action_dim))], axis=1)
@@ -725,6 +794,7 @@ class ExpoPiLearnerCache(Agent):
             actions = means * self.edit_action_scale + actions
         else:
             actions = r_samples * self.edit_action_scale + actions
+        actions = jnp.clip(actions, -1.0, 1.0)
         final_action = actions.reshape(self.action_horizon, self.action_dim // self.action_horizon)
 
         # breakpoint()
@@ -795,6 +865,14 @@ class ExpoPiLearnerCache(Agent):
         
         # state = observations_repeated.state[:, :8]
         # vlm_output = jnp.concatenate([vlm_output, state], axis=1) # (batch_size * N, pi0_hidden_dims + state_dim)
+
+        # TODO: Remove after debugging #
+        # Perturbation experiment #
+        # normed_actions = self.actor.norm_actions(actions)
+        # perturb_rng, rng = jax.random.split(rng)
+        # perturbed_actions = normed_actions + jax.random.uniform(perturb_rng, normed_actions.shape, minval=-1.0, maxval=1.0) * 1.0
+        # perturbed_actions = self.actor.unnorm_actions(perturbed_actions)
+        # action = perturbed_actions
         
         
         # Take mean across tokens as representation from VLM #
@@ -802,7 +880,55 @@ class ExpoPiLearnerCache(Agent):
         state = processed_obs['state'][0, :8][None, :8] # State dimension
         vlm_output = jnp.concatenate([vlm_output, state], axis=1) # (1, pi0_hidden_dims + state_dim)
 
-        action = diffusion_actions
+        # action = diffusion_actions
+
+        rng, _ = jax.random.split(rng, 2)
+        out_dict = {
+            "actions": action.squeeze(), # (action_horizon, action_dim)
+            "vlm_output": vlm_output[0], # (pi0_hidden_dims,)
+            "diffusion_actions": diffusion_actions # (N, action_horizon, action_dim)
+        }
+        
+        return out_dict
+
+    def sample_base_actions_qc(self, _observations: Data, is_target=False,*args, **kwargs):
+        '''
+        For given state/observation, samles self.N actions from base policy; For first self.n_edit_samples actions, samples from edit_actor;
+        Combine all (N + n_edit_samples) actions and compute Q-values; Return the action with the highest Q-value;
+        '''
+        out_dict = {}
+
+        seed = kwargs.pop("seed", None)
+        seed, rng = jax.random.split(seed)
+        output_action_chunk = kwargs.pop("output_action_chunk", True)
+        num_diffusion_samples = kwargs.pop("num_diffusion_samples", 1)
+        normalize_actions = kwargs.pop("normalize_actions", False)
+        # Repeat observations to sample `N` actions#
+        # observations = repeat_observations(_observations, self.N, axis=0)
+        observations = _observations
+
+        rng, rng_diffusion = jax.random.split(rng)
+        batched_obs = add_batch_dim(observations)
+        observations_repeated = repeat_observations_openpi(batched_obs, num_diffusion_samples, axis=0)
+        actions, vlm_output, processed_obs = self.actor.sample_actions_with_vlm_output(rng_diffusion, observations_repeated)
+        
+        # Take mean across tokens as representation from VLM #
+        vlm_output = jnp.mean(vlm_output[0][:, :512, :], axis=1) # (1, pi0_hidden_dims)
+        state = processed_obs['state'][0, :8][None, :8] # State dimension
+        state = jnp.repeat(state, repeats=num_diffusion_samples, axis=0)
+        vlm_output = jnp.concatenate([vlm_output, state], axis=1) # (1, pi0_hidden_dims + state_dim)
+
+        # action = diffusion_actions
+
+        # Do q chunking #
+        norm_actions = self.actor.norm_actions(actions)
+        qs = compute_q_all(self.critic.apply_fn, self.critic.params, vlm_output, norm_actions.reshape(-1, self.action_dim))
+        qs = qs.mean(axis=0)
+        qs = qs.reshape(1, num_diffusion_samples)
+        idx = jnp.argmax(qs, axis=1) # (1, )
+        action = actions[idx]
+        diffusion_actions = actions.copy()
+
 
         rng, _ = jax.random.split(rng, 2)
         out_dict = {
@@ -841,23 +967,12 @@ class ExpoPiLearnerCache(Agent):
         infer = kwargs.pop("infer", False)
         obs_key = kwargs.pop("obs_key", "observations")
 
-        # if seed is None:
-        #     rng = self.rng
-        # else:
         assert seed is not None, "seed must be provided"
         seed, rng = jax.random.split(seed)
 
         actor_update_info = self.actor.update(batch)
-        # breakpoint()
+        new_agent = self.replace(actor=self.actor, rng=rng)
 
-        # Update target actor train_state with incremental parameter update #
-        # target_score_params = optax.incremental_update(
-        #     self.actor.train_state.params, self.target_actor.train_state.params, self.actor_tau
-        # )
-        # self.target_actor.train_state = self.target_actor.train_state.replace(params=target_score_params)
-
-        new_agent = self.replace(actor=self.actor, target_actor=self.target_actor, rng=rng)
-        # new_agent = self.replace(actor=self.actor, rng=rng)
         return new_agent, actor_update_info
     
     def update_edit_actor(self, batch: Batch, *args, **kwargs) -> Tuple[Agent, Dict[str, float]]:
@@ -874,16 +989,38 @@ class ExpoPiLearnerCache(Agent):
         # dropout_key, rng = jax.random.split(rng)
 
         # batch['actions'] = batch['actions'].reshape(-1, self.action_dim)
-        base_actions = batch['diffusion_actions']
-        batch_size = base_actions.shape[0]
+        # base_actions = batch['diffusion_actions']
+        # Normalize base actions here since that is not handled in dataloader #
+        # base_actions = self.actor.norm_actions(base_actions)
+
+        # batch_size = base_actions.shape[0]
         # key, rng = jax.random.split(key)
         # action_indices = jax.random.randint(rng, shape=(batch_size,), minval=0, maxval=self.N)
         # base_actions = base_actions[jnp.arange(batch_size), action_indices, :, :]
-        base_actions = base_actions.reshape(-1, self.action_dim)
+        # base_actions = base_actions.reshape(-1, self.action_dim)
+
+        # Qvar based training #
+        batch_size = batch['actions'].shape[0]
+        base_actions = batch['actions']
+        # base_actions = self.actor.norm_actions(base_actions)
+        base_actions = base_actions.reshape(batch_size, self.action_dim)
+        num_var_actions = batch['diffusion_actions'].shape[1]
+        diffusion_actions = batch['diffusion_actions'].reshape(batch_size, -1, self.action_horizon, self.action_dim // self.action_horizon)
+        norm_diffusion_actions = self.actor.norm_actions(diffusion_actions)
+        norm_diffusion_actions = norm_diffusion_actions.reshape(batch_size * num_var_actions, self.action_dim)
+        vlm_output = batch['vlm_output']
+        vlm_dim = vlm_output.shape[-1]
+        vlm_repeated = jnp.repeat(vlm_output[:, None, :], num_var_actions, axis=1)
+        vlm_repeated = vlm_repeated.reshape(batch_size * num_var_actions, vlm_dim)
+        qs = compute_q_all(self.critic.apply_fn, self.critic.params, vlm_repeated, norm_diffusion_actions.reshape(-1, self.action_dim))
+        qs = qs.mean(axis=0)
+        qs = qs.reshape(batch_size, num_var_actions)
+        qs_var = jnp.sqrt(qs.var(axis=1))
+        # breakpoint()
         
         # Get vlm output for observations #
         # seed, rng = jax.random.split(rng)
-        vlm_output = batch['vlm_output']
+        # vlm_output = batch['vlm_output']
         dropout_rng, rng = jax.random.split(rng)
         rng1, rng = jax.random.split(rng)
         rng2, rng = jax.random.split(rng)
@@ -903,12 +1040,28 @@ class ExpoPiLearnerCache(Agent):
             self.edit_actor.apply_fn,
             self.critic.apply_fn,
             self.temp.apply_fn,
+            batch["mc_returns"],
+            qs_var,
+        )
+
+        q_loss_rng, rng = jax.random.split(rng)
+        q_loss_grads, q_loss_metrics = q_loss(
+            self.critic.params,
+            vlm_output,
+            base_actions,
+            batch["mc_returns"],
+            q_loss_rng,
+            self.critic.apply_fn,
+            self.critic,
         )
 
         actor_info["edit_actor_grad_norm"] = optax.global_norm(grads)
         # edit_actor = self.edit_actor.apply_gradients(grads=grads)
         actor_info["edit_actor_param_norm"] = optax.global_norm(edit_actor.params)
         actor_info["target_entropy"] = self.target_entropy
+
+        actor_info.update(q_loss_metrics)
+        actor_info["q_loss_grad_norm"] = optax.global_norm(q_loss_grads)
 
         return self.replace(edit_actor=edit_actor, rng=rng), actor_info
         
@@ -1075,7 +1228,7 @@ class ExpoPiLearnerCache(Agent):
         batch['next_state'] = next_state
 
         timer.tock("preprocess_time")
-        timer.tick("update_critic_time")
+        # timer.tick("update_critic_time")
 
         batch_size = state.shape[0]
         print("---")
@@ -1094,15 +1247,15 @@ class ExpoPiLearnerCache(Agent):
             mini_batch = jax.tree_util.tree_map(slice, batch)
             break
         
-        data_rng, rng = jax.random.split(rng)
-        new_agent, critic_info = new_agent.update_critic(batch, timer=timer, seed=data_rng)
+        # data_rng, rng = jax.random.split(rng)
+        # new_agent, critic_info = new_agent.update_critic(batch, timer=timer, seed=data_rng)
 
-        critic_info = append_substr_to_dict_keys(critic_info, "critic")
-        timer.tock("update_critic_time")
+        # critic_info = append_substr_to_dict_keys(critic_info, "critic")
+        # timer.tock("update_critic_time")
         # breakpoint()
         
-        if update_only_critic:
-            return new_agent, {**critic_info}
+        # if update_only_critic:
+        #     return new_agent, {**critic_info}
 
         # timer.tick("update_actor_time")
         # new_agent, actor_update_info = new_agent.update_actor(mini_batch_original_obs)
@@ -1115,7 +1268,7 @@ class ExpoPiLearnerCache(Agent):
         timer.tick("update_edit_actor_time")
         if self.n_edit_samples > 0:
             seed, rng = jax.random.split(seed)
-            new_agent, actor_info = new_agent.update_edit_actor(mini_batch, seed=rng)
+            new_agent, actor_info = new_agent.update_edit_actor(batch, seed=rng)
             entropy = actor_info["entropy"]
             actor_info = append_substr_to_dict_keys(actor_info, "edit_actor")
             # breakpoint()
@@ -1127,4 +1280,5 @@ class ExpoPiLearnerCache(Agent):
         timer.tock("total_update_time")
         print(timer.get_total_times(reset=False))
 
-        return new_agent, {**actor_info, **critic_info, **actor_update_info, **temp_info}
+        # return new_agent, {**actor_info, **critic_info, **actor_update_info, **temp_info}
+        return new_agent, {**actor_info, **actor_update_info, **temp_info}

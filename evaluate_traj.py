@@ -244,6 +244,11 @@ def get_policy_fn(
             )
         )
         # breakpoint()
+        # out_dict = jax.device_get(
+        #     agent.sample_base_actions_qc(
+        #         observations, *args, **kwargs, timer=timer, output_action_chunk=True, debug_mode=False, num_diffusion_samples=32
+        #     )
+        # )
 
         return out_dict
 
@@ -562,7 +567,12 @@ def train_agent(_):
     assert FLAGS.params_path is not None
     pkl_dict = pickle.load(open(FLAGS.params_path, 'rb'))
     critic_params = pkl_dict['critic_params']
-    edit_actor_params = pkl_dict['edit_actor_params']
+
+    if 'edit_actor_params' in pkl_dict:
+        edit_actor_params = pkl_dict['edit_actor_params']
+    else:
+        print("\n\n\nNo edit actor params found in checkpoint...\n\n\n")
+        edit_actor_params = None
     
     agent = ExpoPiLearnerCache.create(
         config=pi_config,

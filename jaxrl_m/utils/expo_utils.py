@@ -53,8 +53,8 @@ class Normal(nn.Module):
     base_cls: Type[nn.Module]
     action_dim: int
     log_std_min: Optional[float] = -20
-    log_std_max: Optional[float] = 2
-    state_dependent_std: bool = False
+    log_std_max: Optional[float] = -5
+    state_dependent_std: bool = True
     squash_tanh: bool = False
 
     @nn.compact
@@ -75,12 +75,14 @@ class Normal(nn.Module):
 
         log_stds = jnp.clip(log_stds, self.log_std_min, self.log_std_max)
 
+        means_tanh = jnp.tanh(means)
+
         distribution = tfd.MultivariateNormalDiag(
             loc=means, scale_diag=jnp.exp(log_stds)
         )
 
         if self.squash_tanh:
-            return TanhTransformedDistribution(distribution), means, log_stds
+            return TanhTransformedDistribution(distribution), means_tanh, log_stds
         else:
             return distribution, means, log_stds
 
