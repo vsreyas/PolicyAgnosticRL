@@ -123,6 +123,56 @@ class MLP(nn.Module):
             x /= jnp.linalg.norm(x, axis=-1, keepdims=True).clip(1e-10)
         return x
 
+class MLPResNetBlock(nn.Module):
+    features: int
+    act: nn.relu
+    dropout_rate: float = None
+    use_layer_norm: bool = True
+
+    @nn.compact
+    def __call__(self, x, train: bool = False):
+        residual = x
+        if self.dropout_rate is not None and self.dropout_rate > 0:
+            x = nn.Dropout(rate=self.dropout_rate)(x, deterministic=not train)
+        if self.use_layer_norm:
+            x = nn.LayerNorm()(x)
+        x = nn.Dense(self.features * 4, kernel_init=default_init())(x)
+        x = self.act(x)
+        x = nn.Dense(self.features, kernel_init=default_init())(x)
+
+        if residual.shape != x.shape:
+            residual = nn.Dense(self.features, kernel_init=default_init())(residual)
+
+        return residual + x
+
+class ResidualActor(nn.Module):
+    """
+    Encapsulated a single actor network that takes in observations and actions and outputs a final action with a correction
+    """
+    action_dim: int
+    hidden_dims: Sequence[int] = (512, 512)
+    num_residual_blocks: int = 3
+
+    @nn.compact
+    def __call__(
+        self, observations: jnp.ndarray, actions: jnp.ndarray, *args, **kwargs
+    ) -> jnp.ndarray:
+        out_obs = MLP(self.hidden_dims, activations=nn.relu, activate_final=True, use_layer_norm=True)(observations)
+        out_obs = MLP([self.action_dim], activations=nn.relu, activate_final=False, use_layer_norm=True)(out_obs)
+        gating_signal = nn.sigmoid(out_obs)
+        out_obs = out_obs * gating_signal
+
+        out_act = MLPResNetBlock(self.action_dim, act=nn.relu, use_layer_norm=True)(actions)
+
+        for _ in range(self.num_residual_blocks):
+            out_act = out_act + out_obs
+            out_act = MLPResNetBlock(self.action_dim, act=nn.relu, use_layer_norm=True)(out_act)
+        
+        out_act = nn.Dense(self.action_dim, kernel_init=default_init())(out_act)
+        out_act = nn.tanh(out_act)
+
+        return out_act
+
 
 class StateValue(nn.Module):
     base_cls: nn.Module
@@ -152,6 +202,22 @@ class StateActionValue(nn.Module):
         value = nn.Dense(1, kernel_init=default_init())(outputs)
 
         return jnp.squeeze(value, -1)
+
+class StateAndStateActionValue(nn.Module):
+    base_cls: nn.Module
+
+    @nn.compact
+    def __call__(
+        self, observations: jnp.ndarray, actions: jnp.ndarray, *args, **kwargs
+    ) -> jnp.ndarray:
+        inputs = jnp.concatenate([observations, actions], axis=-1)
+        # Shared backbone #
+        outputs = self.base_cls()(inputs, *args, **kwargs)
+
+        state_action_value = nn.Dense(1, kernel_init=default_init())(outputs)
+        state_value = nn.Dense(1, kernel_init=default_init())(outputs)
+
+        return jnp.squeeze(state_action_value, -1), jnp.squeeze(state_value, -1)
 
 
 class Ensemble(nn.Module):

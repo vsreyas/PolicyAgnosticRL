@@ -22,7 +22,7 @@ print("Imports 2")
 ### Debugging setup ###
 def inspect_tfrecords():
     # TFRECORD_PATTERN = "/data/hf_cache/datasets/LIBERO/libero_10_tf/*.tfrecord"
-    TFRECORD_PATTERN = "/home/sreyas/vla/PolicyAgnosticRL/libero_10_pi05_put_the_two_mocha_pots_on_the_stove/results_expo/image_replay_buffer/episode_0.tfrecord"
+    TFRECORD_PATTERN = "/data/user_data/skowshik/clean_skip_v1_server/results_expo/image_replay_buffer/episode_2.tfrecord"
 
     PROTO_TYPE_SPEC = {
         "observations/images0": tf.uint8,
@@ -210,6 +210,7 @@ class ImageReplayBufferPi:
         alpha: float = 1.0,  # Reward scaling factor for terminal states
         scale_success_reward: bool = False,  # Whether to scale terminal rewards by alpha/(1-gamma)
         drop_images_from_output: bool = False,
+        intermediate_reward_mul_factor: float = 1.0,
     ):
         self.goal_relabeling_strategy = goal_relabeling_strategy
         self.goal_relabeling_kwargs = goal_relabeling_kwargs
@@ -269,6 +270,7 @@ class ImageReplayBufferPi:
         self.alpha = alpha
         self.scale_success_reward = scale_success_reward
         self.drop_images_from_output = drop_images_from_output
+        self.intermediate_reward_mul_factor = intermediate_reward_mul_factor
         dataset = self._construct_tf_dataset(data_paths, seed)
 
         self.train = train
@@ -554,11 +556,43 @@ class ImageReplayBufferPi:
         # THIS SHOULD BE THE NEXT STATE FOR CHUNKING: BUG FIX #
         start_idx_ns = tf.range(ah, T + 1) # For next states/images;
 
+        terminals_tf = tf.cast(terminals_tf, tf.float32)
+        truncates_tf = tf.cast(truncates_tf, tf.float32)
+        terminals_tf_chunked = tf.map_fn(
+            lambda t: tf.reduce_max(terminals_tf[t : t + ah]),
+            start_idx,
+            fn_output_signature=tf.float32,
+        )
+        truncates_tf_chunked = tf.map_fn(
+            lambda t: tf.reduce_max(truncates_tf[t : t + ah]),
+            start_idx,
+            fn_output_signature=tf.float32,
+        )
+
         if 'rewards' in parsed_tensors:
             # Each tensor below has shape (T,); W = T - ah + 1: Maximum action chunk index #
             rewards_tf = parsed_tensors["rewards"]
             # masks_tf = parsed_tensors["masks"]
             mc_returns_tf = parsed_tensors["mc_returns"]
+
+            # Scale intermediate rewards by a factor
+            rewards_tf = rewards_tf * self.intermediate_reward_mul_factor
+
+            # Adjust for terminal reward bonus #
+            if self.scale_success_reward:
+                # Calculate the scaled reward value
+                terminal_reward_scale = self.alpha / (1.0 - self.discount)
+
+                # Find terminal timesteps (where terminals > 0.5)
+                is_terminal = tf.greater(terminals_tf, 0.5)
+
+                # Add the scaled reward to terminal timesteps
+                terminal_bonus = tf.where(
+                    is_terminal,
+                    tf.constant(terminal_reward_scale, dtype=rewards_tf.dtype),
+                    tf.zeros_like(rewards_tf)
+                )
+                rewards_tf = rewards_tf + terminal_bonus
 
             # rewards_tf = tf.gather(parsed_tensors["rewards"], start_idx)[: -1]
             # masks_tf = tf.gather(parsed_tensors["masks"], start_idx)[: -1]
@@ -715,19 +749,6 @@ class ImageReplayBufferPi:
             start_idx_next_actions,
             fn_output_signature=tf.float32,
         ) # (W=T - ah, ah)
-
-        terminals_tf = tf.cast(terminals_tf, tf.float32)
-        truncates_tf = tf.cast(truncates_tf, tf.float32)
-        terminals_tf_chunked = tf.map_fn(
-            lambda t: tf.reduce_max(terminals_tf[t : t + ah]),
-            start_idx,
-            fn_output_signature=tf.float32,
-        )
-        truncates_tf_chunked = tf.map_fn(
-            lambda t: tf.reduce_max(truncates_tf[t : t + ah]),
-            start_idx,
-            fn_output_signature=tf.float32,
-        )
 
         # Get all tensors at corresponding timesteps #
         state_tf = tf.gather(state_tf, start_idx) # (W+1=T - ah, state_dim)
@@ -1104,20 +1125,20 @@ class ImageReplayBufferPi:
             out = self._keep_only_full_chuked_windows(out, valid_timesteps_for_action_chunk_tf)
 
         # Scale rewards for terminal timesteps by alpha/(1-gamma)
-        if self.scale_success_reward and 'rewards' in out and 'terminals' in out:
-            # Calculate the scaled reward value
-            terminal_reward_scale = self.alpha / (1.0 - self.discount)
+        # if self.scale_success_reward and 'rewards' in out and 'terminals' in out:
+        #     # Calculate the scaled reward value
+        #     terminal_reward_scale = self.alpha / (1.0 - self.discount)
 
-            # Find terminal timesteps (where terminals > 0.5)
-            is_terminal = tf.greater(out['terminals'], 0.5)
+        #     # Find terminal timesteps (where terminals > 0.5)
+        #     is_terminal = tf.greater(out['terminals'], 0.5)
 
-            # Add the scaled reward to terminal timesteps
-            terminal_bonus = tf.where(
-                is_terminal,
-                tf.constant(terminal_reward_scale, dtype=out['rewards'].dtype),
-                tf.zeros_like(out['rewards'])
-            )
-            out['rewards'] = out['rewards'] + terminal_bonus
+        #     # Add the scaled reward to terminal timesteps
+        #     terminal_bonus = tf.where(
+        #         is_terminal,
+        #         tf.constant(terminal_reward_scale, dtype=out['rewards'].dtype),
+        #         tf.zeros_like(out['rewards'])
+        #     )
+        #     out['rewards'] = out['rewards'] + terminal_bonus
 
         if self.drop_images_from_output:
             out['observations'].pop('image')

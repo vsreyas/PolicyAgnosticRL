@@ -103,8 +103,9 @@ def main(_):
                 config=pi_config,
                 final_step_sparse_reward=False,
                 filter_successful_trajectories=False,
-                alpha=0.05,
+                alpha=2.0,
                 scale_success_reward=True,
+                intermediate_reward_mul_factor=10.0,
                 **FLAGS.config.image_replay_buffer_kwargs,
             )
             dataset_iterator = replay_buffer.iterator(
@@ -141,7 +142,7 @@ def main(_):
     rng, construct_rng = jax.random.split(rng)
 
     example_batch = next(dataset_iterator)
-    breakpoint()
+    # breakpoint()
     
     agent = ExpoPiLearner.create(
         config=pi_config,

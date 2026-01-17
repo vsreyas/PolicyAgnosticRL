@@ -28,6 +28,8 @@ import time
 from jaxrl_m.utils.expo_utils import (
     TanhNormal,
     StateActionValue,
+    StateAndStateActionValue,
+    ResidualActor,
     Ensemble,
     subsample_ensemble,
     Agent,
@@ -428,8 +430,8 @@ class ExpoPiLearnerCache(Agent):
         hidden_dims: Sequence[int] = (512, 512, 512, 512),
         discount: float = 0.99,
         tau: float = 0.005,
-        num_qs: int = 10,
-        num_min_qs: Optional[int] = 2,
+        num_qs: int = 2,
+        num_min_qs: Optional[int] = None,
         critic_dropout_rate: Optional[float] = None,
         critic_weight_decay: Optional[float] = None,
         critic_layer_norm: bool = True,
@@ -500,10 +502,11 @@ class ExpoPiLearnerCache(Agent):
         # dummy_observations = jnp.ones((batch_size, pi0_hidden_dims)) # For initializing the edit actor
         dummy_observations = jnp.ones((batch_size, pi0_hidden_dims + state_dim)) # Inlcude state concatenation as well
         dummy_actions = jnp.ones((batch_size, action_dim)) # For initializing the critic
-        edit_actor_base_cls = partial(
-            MLP, hidden_dims=hidden_dims, dropout_rate=None, activate_final=True, use_pnorm=use_pnorm, use_layer_norm=True,
-        )
-        edit_actor_def = TanhNormal(edit_actor_base_cls, action_dim)
+        # edit_actor_base_cls = partial(
+        #     ResidualActor, hidden_dims=hidden_dims, dropout_rate=None, activate_final=True, use_pnorm=use_pnorm, use_layer_norm=True,
+        # )
+        # edit_actor_def = TanhNormal(edit_actor_base_cls, action_dim)
+        edit_actor_def = ResidualActor(action_dim, hidden_dims=hidden_dims, num_residual_blocks=3)
         edit_observations = jnp.concatenate([dummy_observations, jnp.ones((batch_size, action_dim))], axis=1)
 
         if edit_actor_params is None:
@@ -533,6 +536,7 @@ class ExpoPiLearnerCache(Agent):
             # activations=nn.swish,
             activations=nn.relu,
         )
+        # critic_cls = partial(StateAndStateActionValue, base_cls=critic_base_cls)
         critic_cls = partial(StateActionValue, base_cls=critic_base_cls)
         critic_def = Ensemble(critic_cls, num=num_qs)
 
@@ -1179,6 +1183,197 @@ class ExpoPiLearnerCache(Agent):
         info["critic_param_norm"] = optax.global_norm(critic.params)
         info["target_critic_param_norm"] = optax.global_norm(target_critic.params)
 
+        return self.replace(critic=critic, target_critic=target_critic, rng=rng), info
+    
+    def update_critic_ws(self, batch, *args, **kwargs) -> Tuple[TrainState, Dict[str, float]]:
+        """
+        Update critic using pre-computed VLM actions from warm-start cache.
+        
+        This function skips the expensive VLM forward pass by using pre-computed
+        actions and VLM outputs from a cached .pkl file. For each state, we have
+        N sampled actions and we randomly sample one to create diversity.
+        
+        Args:
+            batch: Dictionary containing:
+                - current_vlm_outputs: (batch_size, N, vlm_dim) - N VLM outputs for current state
+                - next_vlm_outputs: (batch_size, N, vlm_dim) - N VLM outputs for next state
+                - current_actions: (batch_size, N, action_horizon, action_dim) - N actions for current state
+                - next_actions: (batch_size, N, action_horizon, action_dim) - N actions for next state
+                - current_states: (batch_size, 8) - Current state (8D)
+                - next_states: (batch_size, 8) - Next state (8D)
+                - rewards: (batch_size,) - Rewards
+                - masks: (batch_size,) - Masks for bootstrapping (1 - done)
+                - actions: (batch_size, action_horizon, action_dim) - Ground truth actions (not used)
+        
+        Returns:
+            Updated agent and info dict with training metrics
+        """
+        seed = kwargs.pop("seed", None)
+        timer = kwargs.pop("timer", None)
+        
+        if seed is None:
+            rng = self.rng
+        else:
+            seed, rng = jax.random.split(seed)
+        
+        # Extract batch data
+        # current_vlm_outputs: (batch_size, N, vlm_dim)
+        # next_vlm_outputs: (batch_size, N, vlm_dim)
+        # current_actions: (batch_size, N, action_horizon, action_dim)
+        # next_actions: (batch_size, N, action_horizon, action_dim)
+        current_vlm_outputs_all = batch['current_vlm_outputs']  # (batch_size, N, vlm_dim)
+        next_vlm_outputs_all = batch['next_vlm_outputs']  # (batch_size, N, vlm_dim)
+        # current_actions_all = batch['current_actions']  # (batch_size, N, action_horizon, action_dim)
+        # next_actions_all = batch['next_actions_sampled']  # (batch_size, N, action_horizon, action_dim)
+        current_states = batch['current_states']  # (batch_size, 8)
+        next_states = batch['next_states']  # (batch_size, 8)
+        rewards = batch['rewards']  # (batch_size,)
+        # masks = batch['masks']  # (batch_size,)
+        # masks = 1.0 - jnp.logical_or(batch['terminals'], batch['truncates']).astype(jnp.float32)
+        masks = 1.0 - batch['terminals']
+
+        # if bool(masks.sum() != len(masks)):
+        #     breakpoint()
+        
+        batch_size = current_states.shape[0]
+        # N = next_actions_all.shape[1]  # Number of sampled actions
+        
+        # Randomly sample one action from N sampled actions for each batch element
+        # This creates diversity while using pre-computed VLM outputs
+        timer.tick("sample_action_indices")
+        key, rng = jax.random.split(rng)
+        # Sample indices: (batch_size,) with values in [0, N)
+        # action_indices = jax.random.randint(key, shape=(batch_size,), minval=0, maxval=N)
+        # breakpoint()
+        timer.tock("sample_action_indices")
+        
+        # Gather the selected actions and VLM outputs
+        # Use jnp.take_along_axis or advanced indexing
+        timer.tick("gather_selected_actions")
+        # Create batch indices: [0, 1, 2, ..., batch_size-1]
+        batch_indices = jnp.arange(batch_size)
+        
+        # Select current VLM outputs: (batch_size, vlm_dim)
+        current_vlm_outputs = current_vlm_outputs_all[batch_indices, :]
+        
+        # Select next VLM outputs: (batch_size, vlm_dim)
+        next_vlm_outputs = next_vlm_outputs_all[batch_indices, :]
+        
+        # Select next actions: (batch_size, action_horizon, action_dim)
+        # next_actions_sampled = next_actions_all[batch_indices, action_indices, :, :].reshape(batch_size, self.action_dim)
+        batch_ns = batch['next_actions'].reshape(batch_size, self.action_dim)
+        mask = jnp.all(jnp.isclose(batch_ns, 0.0), axis=1)
+
+        # breakpoint()
+
+        # next_actions = jnp.where(mask[:, None], next_actions_sampled, batch_ns)  # (N, action_dim)
+        next_actions = batch_ns
+        next_actions = next_actions.reshape(batch_size, self.action_horizon, self.action_dim // self.action_horizon)
+        
+        # TODO: Remove after debugging #
+        # masks = masks * (1.0 - mask)
+
+
+        # Select current actions: (batch_size, action_horizon, action_dim)
+        # current_actions = current_actions_all[batch_indices, 0, :, :]
+        current_actions = batch['actions'][batch_indices, :, :]
+        timer.tock("gather_selected_actions")
+        
+        # Append states to VLM outputs (similar to update_critic)
+        timer.tick("concatenate_states")
+        # current_vlm_outputs: (batch_size, vlm_dim + 8)
+        # current_vlm_outputs_with_state = jnp.concatenate([current_vlm_outputs, current_states], axis=1)
+        current_vlm_outputs_with_state = current_vlm_outputs
+        # next_vlm_outputs: (batch_size, vlm_dim + 8)
+        # next_vlm_outputs_with_state = jnp.concatenate([next_vlm_outputs, next_states], axis=1)
+        next_vlm_outputs_with_state = next_vlm_outputs
+        timer.tock("concatenate_states")
+        
+        # Reshape actions to match critic input format
+        # From (batch_size, action_horizon, action_dim) to (batch_size, action_horizon * action_dim)
+        timer.tick("reshape_actions")
+        current_actions_flat = current_actions.reshape(batch_size, -1)  # (batch_size, action_horizon * action_dim)
+        next_actions_flat = next_actions.reshape(batch_size, -1)  # (batch_size, action_horizon * action_dim)
+        timer.tock("reshape_actions")
+        
+        # Compute target Q values using next VLM outputs and next actions
+        timer.tick("compute_target_q")
+        key, rng = jax.random.split(rng)
+        target_params = subsample_ensemble(
+            key, self.target_critic.params, self.num_min_qs, self.num_qs
+        )
+        # target_params = self.target_critic.params
+
+        next_qs_all = compute_q_all(self.target_critic.apply_fn, target_params, next_vlm_outputs_with_state, next_actions_flat)
+        # breakpoint()
+        
+        # next_qs: (batch_size,)
+        # next_qs = compute_q(self.target_critic.apply_fn, target_params, next_vlm_outputs_with_state, next_actions_flat)
+        # next_qs = next_qs_all.min(axis=0)
+        next_qs = next_qs_all.mean(axis=0)
+        # next_qs = next_qs_all[0]
+        
+        # target_q: (batch_size,)
+        target_q = rewards + self.discount * masks * next_qs
+
+        # breakpoint()
+        mc_target = batch['mc_returns']
+
+        target_q = target_q.reshape(1, -1)
+        mc_target = mc_target.reshape(1, -1)
+        # target_q = batch["mc_returns"]
+        timer.tock("compute_target_q")
+        
+        # Update critic using current VLM outputs and current actions
+        timer.tick("critic_loss_and_grad_time")
+        key, rng = jax.random.split(rng)
+        grads, info = _critic_loss_and_grad(
+            self.critic.params,
+            current_vlm_outputs_with_state,  # (batch_size, vlm_dim + 8)
+            current_actions_flat,  # (batch_size, action_horizon * action_dim)
+            target_q,  # (batch_size,)
+            mc_target,
+            key,
+            self.critic.apply_fn,
+            self.q_clip_low,
+            self.q_clip_high,
+        )
+
+        # ---- norms ----
+        # grads_clipped, _ = self.critic.tx.update(grads, self.critic.opt_state, self.critic.params)
+        info["critic_grad_norm"] = optax.global_norm(grads)
+        
+        # Add additional metrics
+        info.update({"next_qs_mean": next_qs.mean()})
+        info.update({"next_qs_std": next_qs.std()})
+        info.update({"next_qs_max": next_qs.max()})
+        info.update({"next_qs_min": next_qs.min()})
+        
+        # Apply gradients
+        critic = self.critic.apply_gradients(grads=grads)
+        timer.tock("critic_loss_and_grad_time")
+        
+        # Update target critic with exponential moving average
+        timer.tick("update_target_critic")
+        target_critic_params = optax.incremental_update(
+            critic.params, self.target_critic.params, self.tau
+        )
+        target_critic = self.target_critic.replace(params=target_critic_params)
+        timer.tock("update_target_critic")
+
+        # log param norms AFTER update (common choice)
+        info["critic_param_norm"]        = optax.global_norm(critic.params)
+        info["target_critic_param_norm"] = optax.global_norm(target_critic.params)
+        info["next_actions_mask_mean"] = mask.mean()
+        info["next_actions_mask_max"] = mask.max()
+        info["next_actions_mask_min"] = mask.min()
+
+        # ---- per-head next-Q logging ----
+        # (works even if num_min_qs != 2)
+        for i in range(next_qs_all.shape[0]):
+            info[f"next_q{i+1}_mean"] = next_qs_all[i].mean()
+            info[f"next_q{i+1}_std"]  = next_qs_all[i].std()
+        
         return self.replace(critic=critic, target_critic=target_critic, rng=rng), info
 
     def preproess_batch(self, batch: Batch, *args, **kwargs) -> Batch:

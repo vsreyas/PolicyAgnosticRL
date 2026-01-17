@@ -169,7 +169,8 @@ def _critic_loss_and_grad(
 
         # critic_loss = (critic_loss_td + 0.2 * critic_loss_mc)
         # critic_loss = critic_loss_td
-        critic_loss_td = ((qs - target_q) ** 2).mean()
+        # critic_loss_td = ((qs - target_q) ** 2).mean()
+        critic_loss_td = optax.losses.huber_loss(qs, target_q).mean()
         critic_loss_mc = ((qs - mc_target) ** 2).mean()
         critic_loss = critic_loss_td # + 0.2 * critic_loss_mc
 
@@ -263,8 +264,8 @@ class ExpoPiLearner(Agent):
         hidden_dims: Sequence[int] = (512, 512, 512, 512),
         discount: float = 0.99,
         tau: float = 0.005,
-        num_qs: int = 10,
-        num_min_qs: Optional[int] = 2,
+        num_qs: int = 2,
+        num_min_qs: Optional[int] = None,
         critic_dropout_rate: Optional[float] = None,
         critic_weight_decay: Optional[float] = None,
         critic_layer_norm: bool = True,

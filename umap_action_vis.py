@@ -5,7 +5,6 @@ import glob
 import pickle
 from typing import Dict, List
 
-from critic_ws_pg import critic_params
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -258,7 +257,7 @@ def plot_q_trajectory(
     fig.savefig(out_path, dpi=200)
     plt.close(fig)
 
-def process_batch(batch):
+def process_batch(batch, critic_params_path):
     diffusion_actions = batch['diffusion_actions']
     vlm_outputs = batch['vlm_output']
     timesteps = batch['episode_timestep']
@@ -274,13 +273,13 @@ def process_batch(batch):
     diffusion_actions_flat_reduced = reducer.fit_transform(diffusion_actions_flat)
     diffusion_actions_reduced = diffusion_actions_flat_reduced.reshape(diffusion_actions.shape[0], diffusion_actions.shape[1], -1)
     
-    chkpt = pickle.load(open('/home/skowshik/vla/codebase/PolicyAgnosticRL/results_expo_debug-td-clean_v10-scale5_actnorm/seed_0/checkpoint_4500.pkl', 'rb'))
+    chkpt = pickle.load(open(critic_params_path, 'rb'))
     critic_params = chkpt['critic_params']
 
     # Create critic #
     critic_base_cls = partial(
         MLP,
-        hidden_dims=(256, 256),
+        hidden_dims=(512, 512, 512, 512),
         activate_final=True,
         dropout_rate=None,
         use_layer_norm=True,
@@ -288,7 +287,7 @@ def process_batch(batch):
         activations=nn.relu,
     )
     critic_cls = partial(StateActionValue, base_cls=critic_base_cls)
-    critic_def = Ensemble(critic_cls, num=10)
+    critic_def = Ensemble(critic_cls, num=2)
     # critic_params = critic_def.init(critic_key, dummy_observations, dummy_actions)["params"]
     critic = TrainState.create(
         apply_fn=critic_def.apply,
@@ -505,7 +504,7 @@ def main(_):
     with tqdm(desc="Processing batches") as pbar:
         batch = next(dataset_iterator)
         # breakpoint()
-        q_vals, diffusion_actions_reduced, timesteps, q_vals_sampled_action = process_batch(batch)
+        q_vals, diffusion_actions_reduced, timesteps, q_vals_sampled_action = process_batch(batch, FLAGS.critic_params_path)
         q_vals0 = q_vals[0]
         # breakpoint()
         os.makedirs(FLAGS.output_path, exist_ok=True)
