@@ -195,9 +195,9 @@ flags.DEFINE_bool(
     "Use Wrist view camera."
 )
 flags.DEFINE_string(
-    "critic_params_path",
+    "params_path",
     None,
-    "Path to the critic parameters to load.",
+    "Path to the parameters to load.",
 )
 flags.DEFINE_bool(
     "filter_successful_trajectories",
@@ -567,8 +567,9 @@ def train_agent(_):
             # filter_successful_trajectories=False,
             filter_successful_trajectories=True,
             use_reverse_data_paths=False,
-            alpha=alpha,
-            scale_success_reward=scale_success_reward,
+            alpha=2.0,
+            scale_success_reward=True,
+            intermediate_reward_mul_factor=10.0,
             drop_images_from_output=True, # Do not need it as we are caching things are trajectory generation time #
         )
         # breakpoint()
@@ -647,10 +648,21 @@ def train_agent(_):
     # LOG: sharded batch is used to calibrate batch size in `create` method of `ExpoPiLearner` class #
     rng, construct_rng = jax.random.split(rng)
     
-    if FLAGS.critic_params_path is not None:
-        critic_params = pickle.load(open(FLAGS.critic_params_path, 'rb'))['critic_params']
-    else:
-        critic_params = None
+    # if FLAGS.params_path is not None:
+        # critic_params = pickle.load(open(FLAGS.critic_params_path, 'rb'))['critic_params']
+    # else:
+        # critic_params = None
+    
+    critic_params = None
+    edit_actor_params = None
+    if FLAGS.params_path is not None:
+        params = pickle.load(open(FLAGS.params_path, 'rb'))
+        if 'critic_params' in params:
+            critic_params = params['critic_params']
+        if 'edit_actor_params' in params:
+            edit_actor_params = params['edit_actor_params']
+    
+    # breakpoint()
     
     agent = ExpoPiLearnerCache.create(
         config=pi_config,
@@ -661,6 +673,7 @@ def train_agent(_):
         N=FLAGS.num_actions_to_sample,
         n_edit_samples=FLAGS.num_edit_samples,
         critic_params=critic_params,
+        edit_actor_params=edit_actor_params,
     )
     # breakpoint()
 
@@ -681,7 +694,7 @@ def train_agent(_):
 
 
     # TODO: Remove hardcode and init with flags appropriately #
-    num_trajectories_to_collect = 1
+    num_trajectories_to_collect = 5
     online_env_steps = 0
     online_trajectories_added = 0
     env_recreation_frequency = 1
@@ -868,10 +881,13 @@ def train_agent(_):
                     use_wrist_view=FLAGS.use_wrist_view, 
                     use_language=FLAGS.use_lang, config=pi_config,
                     final_step_sparse_reward=False, # Use rewards from environment and DO NOT override with sparse 0/1 rewards at final step #
-                    filter_successful_trajectories=True, # Use success buffer #
+                    filter_successful_trajectories=False, # Whether to use success buffer #
                     use_reverse_data_paths=False,
-                    alpha=alpha,
-                    scale_success_reward=scale_success_reward,
+                    # alpha=alpha,
+                    # scale_success_reward=scale_success_reward,
+                    alpha=2.0,
+                    scale_success_reward=True,
+                    intermediate_reward_mul_factor=10.0,
                     drop_images_from_output=True,
                     **FLAGS.config.image_replay_buffer_kwargs,
                 )
@@ -893,10 +909,11 @@ def train_agent(_):
             if i < FLAGS.critic_warmup_steps:
                 print("Critic warmup...Updating only critic")
                 # batch = offline_batch
-                offline_batch = next(offline_train_iterator)
-                # online_batch = next(online_train_iterator)
+                # offline_batch = next(offline_train_iterator)
+                online_batch = next(online_train_iterator)
                 # batch = concatenate_batches([offline_batch, online_batch])
-                batch = offline_batch
+                # batch = offline_batch
+                batch = online_batch
                 # breakpoint()
                 # batch = set_batch_masks(
                 #     batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
@@ -908,7 +925,7 @@ def train_agent(_):
                 # RLPD style online + offline update #
                 timer.tick("batch_sampling_time")
                 offline_batch = next(offline_train_iterator)
-                # online_batch = next(online_train_iterator)
+                online_batch = next(online_train_iterator)
                 timer.tock("batch_sampling_time")
                 # except StopIteration:
                 #     # No successful trajectories in online buffer, construct full buffer #
@@ -929,11 +946,12 @@ def train_agent(_):
                 #     )
                 #     online_batch = next(online_train_iterator)
                 
-                # timer.tick("concatenate_batches_time")
-                # batch = concatenate_batches([offline_batch, online_batch])
-                # timer.tock("concatenate_batches_time")
+                timer.tick("concatenate_batches_time")
+                batch = concatenate_batches([offline_batch, online_batch])
+                timer.tock("concatenate_batches_time")
                 # batch = online_batch
-                batch = offline_batch
+                # batch = offline_batch
+                # batch = online_batch
                 # Do this as it cleanly handles termination/truncation for bootstrapping during critic update #
                 # The function effectively sets mask as 0.0 only where reward == 1.0, so for unsuccessful trajectory, it will have 'dones' as 0.0 at end #
                 # batch = set_batch_masks(

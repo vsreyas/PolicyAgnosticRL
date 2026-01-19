@@ -152,26 +152,31 @@ class ResidualActor(nn.Module):
     action_dim: int
     hidden_dims: Sequence[int] = (512, 512)
     num_residual_blocks: int = 3
+    activation: Callable[[jnp.ndarray], jnp.ndarray] = nn.swish
 
     @nn.compact
     def __call__(
         self, observations: jnp.ndarray, actions: jnp.ndarray, *args, **kwargs
     ) -> jnp.ndarray:
-        out_obs = MLP(self.hidden_dims, activations=nn.relu, activate_final=True, use_layer_norm=True)(observations)
-        out_obs = MLP([self.action_dim], activations=nn.relu, activate_final=False, use_layer_norm=True)(out_obs)
-        gating_signal = nn.sigmoid(out_obs)
-        out_obs = out_obs * gating_signal
+        out_obs = MLP(self.hidden_dims, activations=self.activation, activate_final=True, use_layer_norm=True)(observations)
+        out_obs = MLP([self.action_dim], activations=self.activation, activate_final=False, use_layer_norm=True)(out_obs)
+        # gating_signal = nn.sigmoid(out_obs)
+        # out_obs = out_obs * gating_signal
 
-        out_act = MLPResNetBlock(self.action_dim, act=nn.relu, use_layer_norm=True)(actions)
+        # out_act = MLPResNetBlock(self.action_dim, act=self.activation, use_layer_norm=True)(actions)
+        input_act = actions.copy()
+        for idx in range(self.num_residual_blocks):
+            # out_act = out_act + out_obs
+            actions = MLPResNetBlock(self.action_dim, act=self.activation, use_layer_norm=True)(actions)
 
-        for _ in range(self.num_residual_blocks):
-            out_act = out_act + out_obs
-            out_act = MLPResNetBlock(self.action_dim, act=nn.relu, use_layer_norm=True)(out_act)
+            if idx < self.num_residual_blocks - 1:
+                actions = actions + out_obs
         
-        out_act = nn.Dense(self.action_dim, kernel_init=default_init())(out_act)
-        out_act = nn.tanh(out_act)
-
-        return out_act
+        gating_out = nn.Dense(self.action_dim, kernel_init=default_init())(actions)
+        gating_signal = nn.sigmoid(gating_out)
+        tanh_actions = nn.tanh(actions)
+        out_actions = (tanh_actions * gating_signal) + (input_act * (1.0 - gating_signal))
+        return out_actions
 
 
 class StateValue(nn.Module):

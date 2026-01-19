@@ -191,6 +191,11 @@ flags.DEFINE_bool(
     False,
     "Filter successful trajectories.",
 )
+flags.DEFINE_bool(
+    "use_base_action_only",
+    False,
+    "Use base action only.",
+)
 
 # 2: 07 2 13
 BASE_POLICY_TYPE_TO_CLASS = {
@@ -227,6 +232,7 @@ def get_policy_fn(
     timer: Timer | None = None,
     debug_mode: bool = False,
     use_deterministic_actions: bool = False,
+    use_base_action_only: bool = False,
 ) -> Callable[[Data], np.ndarray]:
     def policy_fn(observations: Data, *args, **kwargs) -> np.ndarray:
         if not isinstance(observations, dict):
@@ -238,11 +244,19 @@ def get_policy_fn(
             obs_ndim = observations["proprio"].ndim
         
         # breakpoint()
-        out_dict = jax.device_get(
-            agent.sample_actions(
-                observations, *args, **kwargs, timer=timer, output_action_chunk=True, debug_mode=False, use_deterministic_actions=use_deterministic_actions
+
+        if use_base_action_only:
+            out_dict = jax.device_get(
+                agent.sample_base_actions(
+                    observations, *args, **kwargs, timer=timer, output_action_chunk=True, debug_mode=False,
+                )
             )
-        )
+        else:
+            out_dict = jax.device_get(
+                agent.sample_actions(
+                    observations, *args, **kwargs, timer=timer, output_action_chunk=True, debug_mode=False, use_deterministic_actions=use_deterministic_actions
+                )
+            )
         # breakpoint()
         # out_dict = jax.device_get(
         #     agent.sample_base_actions_qc(
@@ -596,7 +610,8 @@ def train_agent(_):
         agent=agent,
         rng=eval_policy_fn_key,
         timer=timer,
-        use_deterministic_actions=True
+        use_deterministic_actions=True,
+        use_base_action_only=FLAGS.use_base_action_only,
     )
     #########################################################
 
@@ -635,7 +650,8 @@ def train_agent(_):
                         rng=eval_policy_fn_key,
                         timer=timer,
                         debug_mode=False,
-                        use_deterministic_actions=True
+                        use_deterministic_actions=True,
+                        use_base_action_only=FLAGS.use_base_action_only,
                     )
                     trajectories, q_vs_mc_returns_vals = evaluate_with_trajectories_libero(
                     eval_policy_fn,

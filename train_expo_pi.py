@@ -437,6 +437,9 @@ def train_agent(_):
             task_name=FLAGS.task_name, 
             final_step_sparse_reward=FLAGS.final_step_sparse_reward,
             filter_successful_trajectories=FLAGS.filter_successful_trajectories,
+            alpha=2.0,
+            scale_success_reward=True,
+            intermediate_reward_mul_factor=10.0,
         )
         # breakpoint()
         libero_config = get_libero_config()

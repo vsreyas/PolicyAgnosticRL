@@ -99,30 +99,33 @@ def _edit_actor_loss_and_grad(
     critic_apply_fn,
     temp_apply_fn,
     mc_target,
-    qs_var,
+    # qs_var,
 ):
     """Single jitted step for edit_actor: forward + loss + grad."""
 
     def loss_fn(actor_params):
         # [B, D_vlm + D_action]
-        edit_observations = jnp.concatenate([vlm_output, batch_actions], axis=1)
+        # edit_observations = jnp.concatenate([vlm_output, batch_actions], axis=1)
 
-        dist, means, log_stds = edit_actor_apply_fn(
-            {"params": actor_params},
-            edit_observations,
-            training=False,
-            rngs={"dropout": dropout_key},
-        )
-        actions_sampled = dist.sample(seed=key)
-        log_probs_orig = dist.log_prob(actions_sampled)
-        # edited_actions = actions_sampled * edit_action_scale
-        edited_actions = means * edit_action_scale
-        edit_actions = edited_actions.copy()
+        # dist, means, log_stds = edit_actor_apply_fn(
+        #     {"params": actor_params},
+        #     edit_observations,
+        #     training=False,
+        #     rngs={"dropout": dropout_key},
+        # )
+        # actions_sampled = dist.sample(seed=key)
+        # log_probs_orig = dist.log_prob(actions_sampled)
+        # # edited_actions = actions_sampled * edit_action_scale
+        # edited_actions = means * edit_action_scale
+        # edit_actions = edited_actions.copy()
 
+        actions = edit_actor_apply_fn({"params": actor_params}, vlm_output, batch_actions)
+        edit_actions = actions.copy()
 
-        log_probs = log_probs_orig - actions_sampled.shape[-1] * jnp.log(edit_action_scale)
+        # log_probs = log_probs_orig - actions_sampled.shape[-1] * jnp.log(edit_action_scale)
 
-        actions = edited_actions + batch_actions
+        # actions = edited_actions + batch_actions
+
         actions = jnp.clip(actions, -1.0, 1.0)
 
         qs = critic_apply_fn(
@@ -144,16 +147,21 @@ def _edit_actor_loss_and_grad(
         q_base = qs_base.mean(axis=0)
 
         # q_wt = (jnp.exp(qs_var) > 5.0).astype(jnp.float32)
-        q_wt = jnp.maximum(jnp.exp(qs_var) - 5.0, 0.0)
+        # q_wt = jnp.maximum(jnp.exp(qs_var) - 5.0, 0.0)
         # temperature = temp_apply_fn({"params": temp_params})
 
         # action_chunk_variance_loss = jnp.var(edited_actions.reshape(-1, 10, 7) / edit_action_scale, axis=1).mean(axis=1)
-        action_min_loss = jnp.square(means).mean()
+        # action_min_loss = jnp.square(means).mean()
         # edit_actor_loss = (entropy_scale * log_probs * temperature - (q * q_wt)).mean()
         # edit_actor_loss = -q.mean()
-        edit_actor_loss = (-q).mean() + (action_min_loss * 50.0)
+        # edit_actor_loss = (-q).mean() + (action_min_loss * 50.0)
 
-        stds = jnp.exp(log_stds)
+        # stds = jnp.exp(log_stds)
+
+        # bc_loss = optax.losses.huber_loss(batch_actions, actions).mean()
+        bc_loss = jnp.square(batch_actions - actions).mean()
+        q_loss = -q.mean()
+        edit_actor_loss = bc_loss * 1000.0 + q_loss
 
         metrics = {
             "edit_q_mean": q.mean(),
@@ -163,29 +171,32 @@ def _edit_actor_loss_and_grad(
             "base_q_min": q_base.min(),
             "base_q_max": q_base.max(),
             "edit_actor_loss": edit_actor_loss,
-            "entropy": -log_probs.mean(),
-            "log_probs_mean": log_probs.mean(),
-            "log_probs_std": log_probs.std(),
-            "log_probs_max": log_probs.max(),
-            "log_probs_min": log_probs.min(),
-            "stds_mean": stds.mean(),
-            "stds_std": stds.std(),
-            "stds_max": stds.max(),
-            "stds_min": stds.min(),
-            "means_mean": means.mean(),
-            "means_std": means.std(),
-            "means_max": means.max(),
-            "means_min": means.min(),
-            # "action_chunk_variance_loss_mean": action_chunk_variance_loss.mean(),
-            "action_min_loss_mean": action_min_loss,
-            "qs_var_mean": qs_var.mean(),
-            "qs_var_std": qs_var.std(),
-            "qs_var_max": qs_var.max(),
-            "qs_var_min": qs_var.min(),
+            "bc_loss": bc_loss,
+            "q_loss": q_loss,
+            # "entropy": -log_probs.mean(),
+            # "log_probs_mean": log_probs.mean(),
+            # "log_probs_std": log_probs.std(),
+            # "log_probs_max": log_probs.max(),
+            # "log_probs_min": log_probs.min(),
+            # "stds_mean": stds.mean(),
+            # "stds_std": stds.std(),
+            # "stds_max": stds.max(),
+            # "stds_min": stds.min(),
+            # "means_mean": means.mean(),
+            # "means_std": means.std(),
+            # "means_max": means.max(),
+            # "means_min": means.min(),
+            # # "action_chunk_variance_loss_mean": action_chunk_variance_loss.mean(),
+            # "action_min_loss_mean": action_min_loss,
+            # "qs_var_mean": qs_var.mean(),
+            # "qs_var_std": qs_var.std(),
+            # "qs_var_max": qs_var.max(),
+            # "qs_var_min": qs_var.min(),
             # "q_wt_mean": q_wt.mean(),
             # "q_wt_std": q_wt.std(),
             # "q_wt_max": q_wt.max(),
             # "q_wt_min": q_wt.min(),
+            "entropy": 0.0,
         }
 
         edit_actions = edit_actions.reshape(-1, 10, 7)
@@ -245,9 +256,12 @@ def _critic_loss_and_grad(
 ):
     """Single jitted step for critic: forward + loss + grad."""
 
-    r_observations = jnp.concatenate([next_vlm_output, next_base_actions], axis=1) # (1, pi0_hidden_dims + action_horizon * action_dim)
-    r_samples, means, log_stds, rng =  _sample_actions(sample_key, edit_actor_apply_fn, edit_actor_params, r_observations) # (n_edit_samples, action_horizon * action_dim)
-    next_actions = r_samples * edit_action_scale + next_base_actions
+    # r_observations = jnp.concatenate([next_vlm_output, next_base_actions], axis=1) # (1, pi0_hidden_dims + action_horizon * action_dim)
+    # r_samples, means, log_stds, rng =  _sample_actions(sample_key, edit_actor_apply_fn, edit_actor_params, r_observations) # (n_edit_samples, action_horizon * action_dim)
+
+    r_samples = _sample_deterministic_actions(edit_actor_apply_fn, edit_actor_params, next_vlm_output, next_base_actions)
+    # next_actions = r_samples * edit_action_scale + next_base_actions
+    next_actions = r_samples
     next_actions = jnp.clip(next_actions, -1.0, 1.0)
     # next_actions = batch_next_actions
     next_qs = compute_q(target_critic_apply_fn, target_params, next_vlm_output, next_actions) # (batch_size, )
@@ -376,6 +390,10 @@ def _sample_actions(rng, apply_fn, params, observations: np.ndarray) -> np.ndarr
     dist, means, log_stds = apply_fn({"params": params}, observations)
     return dist.sample(seed=key), means, log_stds, rng
 
+@partial(jax.jit, static_argnames="apply_fn")
+def _sample_deterministic_actions(apply_fn, params, observations: np.ndarray, base_actions: np.ndarray) -> np.ndarray:
+    means = apply_fn({"params": params}, observations, base_actions)
+    return means
 
 class ExpoPiLearnerCache(Agent):
     """
@@ -411,7 +429,8 @@ class ExpoPiLearnerCache(Agent):
     q_clip_low: float
     q_clip_high: float
     pi0_hidden_dims: int
-
+    exploration_epsilon: float
+    
     @classmethod
     def create(
         cls,
@@ -465,6 +484,7 @@ class ExpoPiLearnerCache(Agent):
         q_clip_low: Optional[float] = -10000.0,
         q_clip_high: Optional[float] = 10000.0,
         entropy_mul_scale_factor: float = 3.0,
+        exploration_epsilon: float = 0.05,
     ):
         # Assertions
         assert N >= n_edit_samples, f"N must be greater than or equal to n_edit_samples, got N={N} and n_edit_samples={n_edit_samples}"
@@ -511,9 +531,11 @@ class ExpoPiLearnerCache(Agent):
 
         if edit_actor_params is None:
             print("\n\n\nInitializing edit actor parameters from scratch...\n\n\n")
-            edit_actor_params = edit_actor_def.init(actor_key, edit_observations)["params"]
+            edit_actor_params = edit_actor_def.init(actor_key, dummy_observations, dummy_actions)["params"]
         else:
             print("\n\n\nInitializing edit actor parameters loaded from checkpoint...\n\n\n")
+        
+        # breakpoint()
 
         edit_actor = TrainState.create(
             apply_fn=edit_actor_def.apply, 
@@ -534,14 +556,14 @@ class ExpoPiLearnerCache(Agent):
             use_layer_norm=critic_layer_norm,
             use_pnorm=use_pnorm,
             # activations=nn.swish,
-            activations=nn.relu,
+            activations=nn.swish,
         )
         # critic_cls = partial(StateAndStateActionValue, base_cls=critic_base_cls)
         critic_cls = partial(StateActionValue, base_cls=critic_base_cls)
         critic_def = Ensemble(critic_cls, num=num_qs)
 
         if critic_params is None:
-            print("\n\n\nInitializing critic parameters loaded from checkpoint...\n\n\n")
+            print("\n\n\nInitializing critic parameters from scratch...\n\n\n")
             critic_params = critic_def.init(critic_key, dummy_observations, dummy_actions)["params"]
         
         if critic_weight_decay is not None:
@@ -613,6 +635,7 @@ class ExpoPiLearnerCache(Agent):
             q_clip_low=q_clip_low,
             q_clip_high=q_clip_high,
             pi0_hidden_dims=pi0_hidden_dims,
+            exploration_epsilon=exploration_epsilon,
         )
 
     def sample_batch_actions(self, obs, is_target=False, *args, **kwargs):
@@ -792,12 +815,25 @@ class ExpoPiLearnerCache(Agent):
         #     key, self.target_critic.params, self.num_min_qs, self.num_qs
         # )
         actions = actions.reshape(1, self.action_dim)
-        r_observations = jnp.concatenate([vlm_output, actions], axis=1) # (1, pi0_hidden_dims + action_horizon * action_dim)
-        r_samples, means, log_stds, rng =  _sample_actions(seed, self.edit_actor.apply_fn, self.edit_actor.params, r_observations) # (n_edit_samples, action_horizon * action_dim)
-        if use_deterministic_actions:
-            actions = means * self.edit_action_scale + actions
-        else:
-            actions = r_samples * self.edit_action_scale + actions
+        # r_observations = jnp.concatenate([vlm_output, actions], axis=1) # (1, pi0_hidden_dims + action_horizon * action_dim)
+        r_observations = vlm_output
+        # r_samples, means, log_stds, rng =  _sample_actions(seed, self.edit_actor.apply_fn, self.edit_actor.params, r_observations) # (n_edit_samples, action_horizon * action_dim)
+        actions = _sample_deterministic_actions(self.edit_actor.apply_fn, self.edit_actor.params, r_observations, actions)
+        # if use_deterministic_actions:
+        #     actions = means * self.edit_action_scale + actions
+        # else:
+        #     actions = r_samples * self.edit_action_scale + actions
+
+        # if use_deterministic_actions:
+        #     actions = means * self.edit_action_scale + actions
+        # else:
+
+        if not use_deterministic_actions:
+            rng, rng_exploration = jax.random.split(rng)
+            exploration_noise = jax.random.normal(rng_exploration, actions.shape) * self.exploration_epsilon
+            exploration_noise = jnp.clip(exploration_noise, -1.0, 1.0)
+            actions = actions + exploration_noise
+        
         actions = jnp.clip(actions, -1.0, 1.0)
         final_action = actions.reshape(self.action_horizon, self.action_dim // self.action_horizon)
 
@@ -885,6 +921,8 @@ class ExpoPiLearnerCache(Agent):
         vlm_output = jnp.concatenate([vlm_output, state], axis=1) # (1, pi0_hidden_dims + state_dim)
 
         # action = diffusion_actions
+        if num_diffusion_samples == 1:
+            action = diffusion_actions
 
         rng, _ = jax.random.split(rng, 2)
         out_dict = {
@@ -996,6 +1034,10 @@ class ExpoPiLearnerCache(Agent):
         # base_actions = batch['diffusion_actions']
         # Normalize base actions here since that is not handled in dataloader #
         # base_actions = self.actor.norm_actions(base_actions)
+        base_actions = batch['diffusion_actions']
+        base_actions = self.actor.norm_actions(base_actions)
+        vlm_output = batch['vlm_output']
+        base_actions = base_actions.reshape(-1, self.action_dim)
 
         # batch_size = base_actions.shape[0]
         # key, rng = jax.random.split(key)
@@ -1003,23 +1045,23 @@ class ExpoPiLearnerCache(Agent):
         # base_actions = base_actions[jnp.arange(batch_size), action_indices, :, :]
         # base_actions = base_actions.reshape(-1, self.action_dim)
 
-        # Qvar based training #
-        batch_size = batch['actions'].shape[0]
-        base_actions = batch['actions']
-        # base_actions = self.actor.norm_actions(base_actions)
-        base_actions = base_actions.reshape(batch_size, self.action_dim)
-        num_var_actions = batch['diffusion_actions'].shape[1]
-        diffusion_actions = batch['diffusion_actions'].reshape(batch_size, -1, self.action_horizon, self.action_dim // self.action_horizon)
-        norm_diffusion_actions = self.actor.norm_actions(diffusion_actions)
-        norm_diffusion_actions = norm_diffusion_actions.reshape(batch_size * num_var_actions, self.action_dim)
-        vlm_output = batch['vlm_output']
-        vlm_dim = vlm_output.shape[-1]
-        vlm_repeated = jnp.repeat(vlm_output[:, None, :], num_var_actions, axis=1)
-        vlm_repeated = vlm_repeated.reshape(batch_size * num_var_actions, vlm_dim)
-        qs = compute_q_all(self.critic.apply_fn, self.critic.params, vlm_repeated, norm_diffusion_actions.reshape(-1, self.action_dim))
-        qs = qs.mean(axis=0)
-        qs = qs.reshape(batch_size, num_var_actions)
-        qs_var = jnp.sqrt(qs.var(axis=1))
+        # # Qvar based training #
+        # batch_size = batch['actions'].shape[0]
+        # base_actions = batch['actions']
+        # # base_actions = self.actor.norm_actions(base_actions)
+        # base_actions = base_actions.reshape(batch_size, self.action_dim)
+        # num_var_actions = batch['diffusion_actions'].shape[1]
+        # diffusion_actions = batch['diffusion_actions'].reshape(batch_size, -1, self.action_horizon, self.action_dim // self.action_horizon)
+        # norm_diffusion_actions = self.actor.norm_actions(diffusion_actions)
+        # norm_diffusion_actions = norm_diffusion_actions.reshape(batch_size * num_var_actions, self.action_dim)
+        # vlm_output = batch['vlm_output']
+        # vlm_dim = vlm_output.shape[-1]
+        # vlm_repeated = jnp.repeat(vlm_output[:, None, :], num_var_actions, axis=1)
+        # vlm_repeated = vlm_repeated.reshape(batch_size * num_var_actions, vlm_dim)
+        # qs = compute_q_all(self.critic.apply_fn, self.critic.params, vlm_repeated, norm_diffusion_actions.reshape(-1, self.action_dim))
+        # qs = qs.mean(axis=0)
+        # qs = qs.reshape(batch_size, num_var_actions)
+        # qs_var = jnp.sqrt(qs.var(axis=1))
         # breakpoint()
         
         # Get vlm output for observations #
@@ -1045,7 +1087,7 @@ class ExpoPiLearnerCache(Agent):
             self.critic.apply_fn,
             self.temp.apply_fn,
             batch["mc_returns"],
-            qs_var,
+            # qs_var,
         )
 
         q_loss_rng, rng = jax.random.split(rng)
@@ -1097,6 +1139,7 @@ class ExpoPiLearnerCache(Agent):
 
         # Sample next_actions by sampling from current edit policy #
         next_base_actions = batch['next_diffusion_actions']
+        next_base_actions = self.actor.norm_actions(next_base_actions)
         next_vlm_output = batch['next_vlm_output'] # (batch_size, pi0_hidden_dims)
         # next_base_actions = next_base_actions.reshape(-1, self.action_dim)
         # r_observations = jnp.concatenate([next_vlm_output, next_base_actions], axis=1) # (1, pi0_hidden_dims + action_horizon * action_dim)
@@ -1433,17 +1476,25 @@ class ExpoPiLearnerCache(Agent):
         assert seed is not None, "Seed must be provided"
         rng = seed
 
-        for i in range(utd_ratio):
-            def slice(x):
-                assert x.shape[0] % utd_ratio == 0
-                batch_size = x.shape[0] // utd_ratio
-                return x[batch_size * i : batch_size * (i + 1)]
+        # for i in range(utd_ratio):
+        #     def slice(x):
+        #         assert x.shape[0] % utd_ratio == 0
+        #         batch_size = x.shape[0] // utd_ratio
+        #         return x[batch_size * i : batch_size * (i + 1)]
 
-            mini_batch = jax.tree_util.tree_map(slice, batch)
-            break
+        #     mini_batch = jax.tree_util.tree_map(slice, batch)
+        #     break
         
-        # data_rng, rng = jax.random.split(rng)
-        # new_agent, critic_info = new_agent.update_critic(batch, timer=timer, seed=data_rng)
+        critic_info = {}
+        actor_update_info = {}
+        temp_info = {}
+        actor_info = {}
+
+        data_rng, rng = jax.random.split(rng)
+
+        for _ in range(utd_ratio):
+            data_rng, rng = jax.random.split(rng)
+            new_agent, critic_info = new_agent.update_critic(batch, timer=timer, seed=data_rng)
 
         # critic_info = append_substr_to_dict_keys(critic_info, "critic")
         # timer.tock("update_critic_time")
@@ -1456,8 +1507,6 @@ class ExpoPiLearnerCache(Agent):
         # new_agent, actor_update_info = new_agent.update_actor(mini_batch_original_obs)
         # timer.tock("update_actor_time")
         # actor_update_info = append_substr_to_dict_keys(actor_update_info, "actor")
-        actor_update_info = {}
-        temp_info = {}
         # # breakpoint()
 
         timer.tick("update_edit_actor_time")
@@ -1475,5 +1524,4 @@ class ExpoPiLearnerCache(Agent):
         timer.tock("total_update_time")
         print(timer.get_total_times(reset=False))
 
-        # return new_agent, {**actor_info, **critic_info, **actor_update_info, **temp_info}
-        return new_agent, {**actor_info, **actor_update_info, **temp_info}
+        return new_agent, {**actor_info, **critic_info, **actor_update_info, **temp_info}
