@@ -63,8 +63,8 @@ from jaxrl_m.utils.timer_utils import Timer
 from jaxrl_m.utils.train_utils import concatenate_batches, load_recorded_video
 from jaxrl_m.vision import encoders
 from jaxrl_m.utils.train_utils import preprocess_action, repack_action
-from jaxrl_m.agents.continuous.expo_pi import ExpoPiLearner, compute_q, compute_q_all
-from jaxrl_m.agents.continuous.expo_pi_cache import ExpoPiLearnerCache
+# from jaxrl_m.agents.continuous.expo_pi_cache import ExpoPiLearnerCache
+from jaxrl_m.agents.continuous.pi_vlm_cached.residual_td3 import PiResidualTD3Cache
 from jaxrl_m.utils.expo_utils import calc_mc_return_fn
 
 try:
@@ -210,6 +210,11 @@ flags.DEFINE_integer(
     200,
     "Number of trajectories to collect from environment.",
 )
+flags.DEFINE_string(
+    "pi_config_name",
+    "pi05_libero_custom_low_mem",
+    "Name of the PI config to use.",
+)
 
 # 2: 07 2 13
 BASE_POLICY_TYPE_TO_CLASS = {
@@ -241,7 +246,7 @@ def sanitize_obs(obs):
 
 
 def get_policy_fn(
-    agent: ExpoPiLearner,
+    agent: PiResidualTD3Cache,
     rng: jax.random.PRNGKey,
     timer: Timer | None = None,
     debug_mode: bool = False,
@@ -260,7 +265,7 @@ def get_policy_fn(
         # breakpoint()
         out_dict = jax.device_get(
             agent.sample_base_actions(
-                observations, *args, **kwargs, timer=timer, output_action_chunk=True, debug_mode=debug_mode, num_diffusion_samples=num_diffusion_samples, normalize_diffusion_actions=normalize_diffusion_actions,
+                observations, *args, **kwargs, timer=timer, output_action_chunk=True, num_diffusion_samples=num_diffusion_samples, normalize_diffusion_actions=normalize_diffusion_actions,
             )
         )
         # breakpoint()
@@ -272,7 +277,7 @@ def get_policy_fn(
     return policy_fn
 
 def get_vlm_output_fn(
-    agent: ExpoPiLearner,
+    agent: PiResidualTD3Cache,
     rng: jax.random.PRNGKey,
     timer: Timer | None = None,
     debug_mode: bool = False,
@@ -300,102 +305,20 @@ def get_vlm_output_fn(
 
     return policy_fn
 
-
-def set_batch_masks(
-    batch: Batch, environment_name: str, reward_bias: float, reward_scale: float
-) -> Batch:
-    """Environment-specific mask setting."""
-    if "maze" in environment_name or environment_name == "real_robot" or "libero" in environment_name:
-        # Assumes sparse rewards, mask should be 0 only at success
-        success_reward = 1.0 * reward_scale + reward_bias
-    elif "kitchen" in environment_name or "calvin" in environment_name:
-        # Assumes 0-4 rewards, mask should be 0 only at 4
-        success_reward = 4.0 * reward_scale + reward_bias
-    else:
-        raise NotImplementedError
-    batch["masks"] = (batch["rewards"] != success_reward).astype(np.float32)
-    return batch
-
-
-@jax.jit
-def resize_images_to_100x100(images):
-    batch_size = images.shape[0]
-    return jax.image.resize(images, (batch_size, 100, 100, 3), method="cubic")
-
-def plot_q_values_over_trajectory_time_step(
-    trajectories: List[Dict[str, List[Union[np.ndarray, Dict[str, np.ndarray]]]]],
-    critic_agent,
-    sharding: jax.sharding.Sharding,
-):
-    trajectories = [trajectories[0]]  # only plot the first trajectory
-    if isinstance(trajectories[0]["observation"][0], dict):
-        trajectories[0]['observation'][0] = sanitize_obs(trajectories[0]['observation'][0])
-        observations = [
-            {
-                key: np.array([obs[key] for obs in trajectory["observation"]])
-                for key in trajectory["observation"][0].keys()
-            }
-            for trajectory in trajectories
-        ]
-    else:
-        observations = [
-            shard_batch(jnp.array(trajectory["observation"]), sharding)
-            for trajectory in trajectories
-        ]
-
-    actions = [
-        shard_batch(jnp.array(trajectory["action"]), sharding)
-        for trajectory in trajectories
-    ]
-
-    q_values = []
-    for trajectory_index in range(len(trajectories)):
-        q_values.append(
-            critic_agent.forward_critic(
-                observations[trajectory_index],
-                actions[trajectory_index],
-                jax.random.PRNGKey(0),
-            ).mean(axis=0)
-        )
-    q_values = jnp.stack(q_values, axis=0).mean(axis=0)
-    assert q_values.shape == (len(trajectories[0]["observation"]),)
-
-    # Plot the q-values over the trajectory time step using seaborn, make it look nice
-    sns.set(style="whitegrid")
-    plt.figure(figsize=(10, 6))
-    plot = sns.lineplot(
-        x=np.arange(len(q_values)),
-        y=q_values,
-        color="blue",
-        linewidth=2.5,
-    )
-    plot.set_title("Q-values over trajectory time step")
-    plot.set_xlabel("Time step")
-    plot.set_ylabel("Q-value")
-
-    return plot
-
-
 def train_agent(_):
-    # breakpoint()
-    
+
     if FLAGS.debug:
         breakpoint()
-        # Disabling jit might be useful for debugging
-        # jax.config.update("jax_disable_jit", True)
 
     # prevent tensorflow from using GPUs
     tf.config.set_visible_devices([], "GPU")
 
-    os.environ["WANDB__SERVICE_WAIT"] = "300"
-    os.environ["WANDB_INIT_TIMEOUT"] = "120"
-    wandb.require("core")
     devices = jax.local_devices()
     num_devices = len(devices)
     assert FLAGS.config.batch_size % num_devices == 0
 
     # Get PI config #
-    pi_config = get_config("pi05_libero_custom_low_mem_ep5_v2")
+    pi_config = get_config(FLAGS.pi_config_name)
     # breakpoint()
     pi_config.fsdp_devices = 1 # Try out with model parallel
     pi_config.exp_name = FLAGS.wandb_experiment_name
@@ -421,35 +344,9 @@ def train_agent(_):
             get_libero_env,
             get_libero_tfrecord_dataset,
         )
-
-        # LOG: Data stored in hf_cache on babel, can access on common path; Loads for example, 'libero_10' path as tf_records #
-        # LOG: `dataset` will store the offline dataset to train on #
-        # Iterates over to yield a dict with bunch of keys which can include observations, actions, rewards, masks, next_observations, etc. #
-        # dataset = get_libero_tfrecord_dataset(
-        #     tfrecord_regexp=FLAGS.config.libero_tfrecord_regexp, use_wrist_view=FLAGS.use_wrist_view, 
-        #     use_language=FLAGS.use_lang, config=pi_config, is_pi=True, **FLAGS.config.dataset_kwargs,
-        #     task_name=FLAGS.task_name, 
-        #     final_step_sparse_reward=FLAGS.final_step_sparse_reward,
-        #     filter_successful_trajectories=FLAGS.filter_successful_trajectories,
-        # )
-        # breakpoint()
         libero_config = get_libero_config()
 
         train_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
-        # if FLAGS.num_parallel_envs > 1:
-        #     num_parallel_envs = FLAGS.num_parallel_envs
-        #     task_name = FLAGS.task_name
-        #     eval_env = gym.vector.AsyncVectorEnv(
-        #         [
-        #             lambda: get_libero_env(
-        #                 cfg=libero_config, task_id = ind*num_parallel_envs, task_name=task_name, is_pi=True,
-        #             )
-        #             for ind in range(num_parallel_envs)
-        #         ],
-        #         context="forkserver", shared_memory=False, # the default "fork" is incompatible with JAX
-        #     )
-        # else:
-        #     eval_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
     else:
        raise NotImplementedError
 
@@ -466,24 +363,7 @@ def train_agent(_):
         state_replay_buffer = None
 
     rng = jax.random.PRNGKey(FLAGS.seed)
-    # we shard the leading dimension (batch dimension) accross all devices evenly
-    # sharding = jax.sharding.PositionalSharding(devices)
-    sharding = jax.sharding.PositionalSharding(devices)
-    # Create data iterators
-    # LOG: Offline dataset #
-    # offline_train_iterator = dataset.iterator(
-    #     batch_size=FLAGS.config.agent_kwargs.batch_size
-    # )
-    # Online dataset/buffer #
-    # Online iterators will be set when switching to online training.
-    online_train_iterator = None
     #########################################################
-    # Dataset created now in `dataset` and environment created now in `train_env` #
-    # breakpoint()
-
-    ### Sharding Data ###
-    # example_batch = next(offline_train_iterator)
-    # example_batch = shard_batch(example_batch, sharding) # DO NOT shard here, will be handled in the expo agent forward passes
     
     ### Create trajectory sampler ###
     data_collection_trajectory_sampler = TrajSampler(
@@ -493,7 +373,6 @@ def train_agent(_):
         reward_bias=FLAGS.reward_bias,
         max_traj_length=FLAGS.config.get("max_episode_steps", 1000),
         action_horizon=pi_config.model.action_horizon,
-        # action_horizon=1,
     )
 
     ### Create EXPO agent #
@@ -505,7 +384,7 @@ def train_agent(_):
     else:
         critic_params = None
     
-    agent = ExpoPiLearnerCache.create(
+    agent = PiResidualTD3Cache.create(
         config=pi_config,
         seed=FLAGS.seed,
         # observations=example_batch,
@@ -600,29 +479,6 @@ def train_agent(_):
                     )
                 online_trajectories_added += 1
                 online_env_steps_this_epoch += len(traj["rewards"])
-                
-                # breakpoint()
-            
-            # Get trajectory statistics
-            # LOG: Log some statistics for the collected trajectories #
-            mean_trajectory_return = np.mean(
-                [np.sum(t["rewards"]) for t in trajectories]
-            )
-            mean_trajectory_length = np.mean([len(t["rewards"]) for t in trajectories])
-            mean_max_reward = np.mean([np.max(t["rewards"]) for t in trajectories])
-            if wandb_logger is not None:
-                wandb_logger.log(
-                    {
-                        "train_env": {
-                            "mean_trajectory_return": mean_trajectory_return,
-                            "mean_trajectory_length": mean_trajectory_length,
-                            "mean_max_reward": mean_max_reward,
-                        },
-                        "online_env_steps": online_env_steps,
-                        "online_trajectories_added": online_trajectories_added,
-                    },
-                    step=i,
-                )
 
 if __name__ == "__main__":
     app.run(train_agent)

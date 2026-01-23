@@ -10,6 +10,7 @@ from .continuous.diffusion_q_learning import DiffusionQLearningAgent
 from .continuous.auto_regressive_transformer import AutoRegressiveTransformerAgent
 from .continuous.pi_0 import PiPolicy
 from .continuous.expo_pi import ExpoPiLearner
+from .continuous.pi_vlm_cached.residual_td3 import PiResidualTD3Cache
 
 agents = {
     "ddpm_bc": DDPMBCAgent,
@@ -24,4 +25,7 @@ agents = {
     "auto_regressive_transformer": AutoRegressiveTransformerAgent,
     "pi-0": PiPolicy,
     "expo": ExpoPiLearner,
+    # Residual Agents working with VLM output of Pi0.5 #
+    "pi_residual_td3": PiResidualTD3Cache,
+    ####################################################
 }

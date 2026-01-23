@@ -376,36 +376,13 @@ def q_loss(
     return grads, metrics
 
 
-@partial(jax.jit, static_argnames="temp_apply_fn")
-def _temperature_loss_and_grad(temp, temp_params, entropy, target_entropy, temp_apply_fn):
-    def loss_fn(temp_params):
-        temperature = temp_apply_fn({"params": temp_params})
-        log_temp = jnp.log(temperature)
-        temp_loss = temperature * \
-            jax.lax.stop_gradient((entropy - target_entropy).mean())
-        return temp_loss, {"temp_loss": temp_loss, "log_temp": log_temp, "temperature": temperature}
-
-    (loss, metrics), grads = jax.value_and_grad(
-        loss_fn, has_aux=True)(temp_params)
-    temp = temp.apply_gradients(grads=grads)
-
-    return temp, grads, metrics
-
-
-@partial(jax.jit, static_argnames="apply_fn")
-def _sample_actions(rng, apply_fn, params, observations: np.ndarray) -> np.ndarray:
-    key, rng = jax.random.split(rng)
-    dist, means, log_stds = apply_fn({"params": params}, observations)
-    return dist.sample(seed=key), means, log_stds, rng
-
-
 @partial(jax.jit, static_argnames="apply_fn")
 def _sample_deterministic_actions(apply_fn, params, observations: np.ndarray, base_actions: np.ndarray) -> np.ndarray:
     means = apply_fn({"params": params}, observations, base_actions)
     return means
 
 
-class PiResidualSACCache(Agent):
+class PiResidualTD3Cache(Agent):
     """
     Update temperature based computation based on SB3: https://stable-baselines3.readthedocs.io/en/v1.0/_modules/stable_baselines3/sac/sac.html?utm_source=chatgpt.com
     Original implementation seems to be buggy
@@ -659,6 +636,8 @@ class PiResidualSACCache(Agent):
         # timer = kwargs.pop("timer", None)
         use_deterministic_actions = kwargs.pop(
             "use_deterministic_actions", False)
+        num_action_samples = kwargs.pop("num_action_samples", 1)
+        
         # Repeat observations to sample `N` actions#
         # observations = repeat_observations(_observations, self.N, axis=0)
         observations = _observations
@@ -728,7 +707,7 @@ class PiResidualSACCache(Agent):
         seed = kwargs.pop("seed", None)
         seed, rng = jax.random.split(seed)
 
-        num_diffusion_samples = kwargs.pop("num_base_action_samples", 1)
+        num_action_samples = kwargs.pop("num_action_samples", 1)
 
         # Repeat observations to sample `N` actions#
         # observations = repeat_observations(_observations, self.N, axis=0)
@@ -738,7 +717,7 @@ class PiResidualSACCache(Agent):
         actions, vlm_output, processed_obs = self.actor.sample_actions_with_vlm_output(
             rng_actions, observations)
 
-        if num_diffusion_samples == 1:
+        if num_action_samples == 1:
             diffusion_actions = actions.copy()  # (1, action_horizon, action_dim)
         else:
             diffusion_actions = actions.copy()
@@ -746,7 +725,7 @@ class PiResidualSACCache(Agent):
             rng, rng_diffusion_samples = jax.random.split(rng)
             batched_obs = add_batch_dim(observations)
             observations_repeated = repeat_observations_openpi(
-                batched_obs, num_diffusion_samples, axis=0)
+                batched_obs, num_action_samples, axis=0)
             diffusion_samples, _, _ = self.actor.sample_actions_with_vlm_output(
                 rng_diffusion_samples, observations_repeated)
             diffusion_samples = self.actor.norm_actions(diffusion_samples)
@@ -759,7 +738,7 @@ class PiResidualSACCache(Agent):
         vlm_output = jnp.concatenate([vlm_output, state], axis=1)
 
         # action = diffusion_actions
-        if num_diffusion_samples == 1:
+        if num_action_samples == 1:
             action = diffusion_actions
 
         rng, _ = jax.random.split(rng, 2)
@@ -769,8 +748,8 @@ class PiResidualSACCache(Agent):
             "diffusion_actions": diffusion_actions,
         }
 
-        if num_diffusion_samples > 1:
-            out_dict["diffusion_samples"] = diffusion_samples
+        if num_action_samples > 1:
+            out_dict["action_samples"] = diffusion_samples
 
         return out_dict
 
@@ -857,17 +836,6 @@ class PiResidualSACCache(Agent):
         actor_info["q_loss_grad_norm"] = optax.global_norm(q_loss_grads)
 
         return self.replace(edit_actor=edit_actor, rng=rng), actor_info
-
-    def update_temperature(self, entropy: float) -> Tuple[Agent, Dict[str, float]]:
-        # temp, grads, temp_info = temperature_loss_fn(self.temp.params, entropy, self.target_entropy, self.temp.apply_fn)
-        temp, grads, temp_info = _temperature_loss_and_grad(
-            self.temp, self.temp.params, entropy, self.target_entropy, self.temp.apply_fn)
-        # temp = self.temp.apply_gradients(grads=grads)
-
-        temp_info['temp_grad_norm'] = optax.global_norm(grads)
-        temp_info['temp_param_norm'] = optax.global_norm(temp.params)
-
-        return self.replace(temp=temp), temp_info
 
     def update_critic(self, batch, *args, **kwargs) -> Tuple[TrainState, Dict[str, float]]:
         seed = kwargs.pop("seed", None)
@@ -975,7 +943,6 @@ class PiResidualSACCache(Agent):
                 utd_ratio: int, 
                 update_critic: bool = True, 
                 update_edit_actor: bool = True, 
-                update_temperature: bool = True, 
                 critic_warmup: bool = False,
                 edit_actor_warmup: bool = False,
                 *args, **kwargs
@@ -1013,7 +980,6 @@ class PiResidualSACCache(Agent):
 
         critic_info = {}
         actor_update_info = {}
-        temp_info = {}
         actor_info = {}
 
         if update_critic:        
@@ -1029,11 +995,7 @@ class PiResidualSACCache(Agent):
             entropy = actor_info["entropy"]
             actor_info = append_substr_to_dict_keys(actor_info, "edit_actor")
         
-        if update_temperature:
-            new_agent, temp_info = new_agent.update_temperature(entropy)
-            temp_info = append_substr_to_dict_keys(temp_info, "temp")
-
         timer.tock("total_update_time")
         print(timer.get_total_times(reset=False))
 
-        return new_agent, {**actor_info, **critic_info, **actor_update_info, **temp_info}
+        return new_agent, {**actor_info, **critic_info, **actor_update_info}

@@ -157,8 +157,9 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false env -u PYOPENGL_PLATFORM python -m pdb ./tra
 ```
 
 # Clean Training Setup
-## Q-Warmup
+## Sample Base Trajectories for warmup and future use
 ```
+CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./sample_base_traj.py --config=configs/libero_config.py:pi_residual_td3 --seed=0 --environment_name=libero --reward_scale=1.0 --reward_bias=-0.1 --filter_successful_trajectories=False --config.save_dir="./debug_pi_res_td3" --num_trajectories_to_collect=10 --pi_config_name="pi05_libero_custom_low_mem"
 
 ```
 
