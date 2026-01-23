@@ -1135,22 +1135,6 @@ class ImageReplayBufferPi:
         if self.keep_only_full_chuked_windows:
             out = self._keep_only_full_chuked_windows(out, valid_timesteps_for_action_chunk_tf)
 
-        # Scale rewards for terminal timesteps by alpha/(1-gamma)
-        # if self.scale_success_reward and 'rewards' in out and 'terminals' in out:
-        #     # Calculate the scaled reward value
-        #     terminal_reward_scale = self.alpha / (1.0 - self.discount)
-
-        #     # Find terminal timesteps (where terminals > 0.5)
-        #     is_terminal = tf.greater(out['terminals'], 0.5)
-
-        #     # Add the scaled reward to terminal timesteps
-        #     terminal_bonus = tf.where(
-        #         is_terminal,
-        #         tf.constant(terminal_reward_scale, dtype=out['rewards'].dtype),
-        #         tf.zeros_like(out['rewards'])
-        #     )
-        #     out['rewards'] = out['rewards'] + terminal_bonus
-
         if self.drop_images_from_output:
             out['observations'].pop('image')
             out['observations'].pop('wrist_image')

@@ -343,52 +343,22 @@ BASE_POLICY_TYPE_TO_CLASS = {
 }
 
 devices = jax.local_devices()
-# def shard_batch(batch, sharding):
-#     return jax.tree_map(lambda x: jax.device_put(x, sharding), batch)
-def shard_batch(batch, base_sharding):
-    def shard_array(x):
-        # Build a sharding spec matching the array's rank
-        sharding_shape = (len(devices),) + (1,) * (x.ndim - 1)
-        sharding = base_sharding.reshape(sharding_shape)
-        return jax.device_put(x, sharding)
-
-    return jax.tree_map(shard_array, batch)
-
-def sanitize_obs(obs):
-    out = {}
-    for k, v in obs.items():
-        if isinstance(v, (np.ndarray, jnp.ndarray)):
-            out[k] = v
-        # skip strings, lists, python objects
-    return out
-
 
 def get_policy_fn(
     agent: ExpoPiLearnerCache,
     rng: jax.random.PRNGKey,
     timer: Timer | None = None,
-    debug_mode: bool = False,
     deterministic_actions: bool = False,
 ) -> Callable[[Data], np.ndarray]:
     def policy_fn(observations: Data, *args, **kwargs) -> np.ndarray:
         if not isinstance(observations, dict):
             observations = {"state": observations}
-        if "state" in observations:
-            obs_ndim = observations["state"].ndim
-        else:
-            assert "proprio" in observations
-            obs_ndim = observations["proprio"].ndim
         
-        # breakpoint()
         out_dict = jax.device_get(
             agent.sample_actions(
-                observations, *args, **kwargs, timer=timer, output_action_chunk=True, debug_mode=debug_mode, use_deterministic_actions=deterministic_actions
+                observations, *args, **kwargs, timer=timer, output_action_chunk=True, use_deterministic_actions=deterministic_actions
             )
         )
-        # breakpoint()
-        # print(timer.get_total_times(reset=False))
-        
-        # breakpoint()
 
         return out_dict
 
@@ -424,81 +394,6 @@ def get_vlm_output_fn(
     policy_fn = supply_rng(policy_fn, rng=rng)
 
     return policy_fn
-
-
-def set_batch_masks(
-    batch: Batch, environment_name: str, reward_bias: float, reward_scale: float
-) -> Batch:
-    """Environment-specific mask setting."""
-    if "maze" in environment_name or environment_name == "real_robot" or "libero" in environment_name:
-        # Assumes sparse rewards, mask should be 0 only at success
-        success_reward = 1.0 * reward_scale + reward_bias
-    elif "kitchen" in environment_name or "calvin" in environment_name:
-        # Assumes 0-4 rewards, mask should be 0 only at 4
-        success_reward = 4.0 * reward_scale + reward_bias
-    else:
-        raise NotImplementedError
-    batch["masks"] = (batch["rewards"] != success_reward).astype(np.float32)
-    return batch
-
-
-@jax.jit
-def resize_images_to_100x100(images):
-    batch_size = images.shape[0]
-    return jax.image.resize(images, (batch_size, 100, 100, 3), method="cubic")
-
-def plot_q_values_over_trajectory_time_step(
-    trajectories: List[Dict[str, List[Union[np.ndarray, Dict[str, np.ndarray]]]]],
-    critic_agent,
-    sharding: jax.sharding.Sharding,
-):
-    trajectories = [trajectories[0]]  # only plot the first trajectory
-    if isinstance(trajectories[0]["observation"][0], dict):
-        trajectories[0]['observation'][0] = sanitize_obs(trajectories[0]['observation'][0])
-        observations = [
-            {
-                key: np.array([obs[key] for obs in trajectory["observation"]])
-                for key in trajectory["observation"][0].keys()
-            }
-            for trajectory in trajectories
-        ]
-    else:
-        observations = [
-            shard_batch(jnp.array(trajectory["observation"]), sharding)
-            for trajectory in trajectories
-        ]
-
-    actions = [
-        shard_batch(jnp.array(trajectory["action"]), sharding)
-        for trajectory in trajectories
-    ]
-
-    q_values = []
-    for trajectory_index in range(len(trajectories)):
-        q_values.append(
-            critic_agent.forward_critic(
-                observations[trajectory_index],
-                actions[trajectory_index],
-                jax.random.PRNGKey(0),
-            ).mean(axis=0)
-        )
-    q_values = jnp.stack(q_values, axis=0).mean(axis=0)
-    assert q_values.shape == (len(trajectories[0]["observation"]),)
-
-    # Plot the q-values over the trajectory time step using seaborn, make it look nice
-    sns.set(style="whitegrid")
-    plt.figure(figsize=(10, 6))
-    plot = sns.lineplot(
-        x=np.arange(len(q_values)),
-        y=q_values,
-        color="blue",
-        linewidth=2.5,
-    )
-    plot.set_title("Q-values over trajectory time step")
-    plot.set_xlabel("Time step")
-    plot.set_ylabel("Q-value")
-
-    return plot
 
 
 def train_agent(_):
@@ -602,53 +497,16 @@ def train_agent(_):
             intermediate_reward_mul_factor=10.0,
             drop_images_from_output=True, # Do not need it as we are caching things are trajectory generation time #
         )
-        # breakpoint()
-        # libero_config = get_libero_config()
 
-        # train_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
-        # train_env = make_env()
         train_env = SubprocEnv(make_env_fn=functools.partial(make_env, task_name=FLAGS.task_name))
-        # if FLAGS.num_parallel_envs > 1:
-        #     num_parallel_envs = FLAGS.num_parallel_envs
-        #     task_name = FLAGS.task_name
-        #     eval_env = gym.vector.AsyncVectorEnv(
-        #         [
-        #             lambda: get_libero_env(
-        #                 cfg=libero_config, task_id = ind*num_parallel_envs, task_name=task_name, is_pi=True,
-        #             )
-        #             for ind in range(num_parallel_envs)
-        #         ],
-        #         context="forkserver", shared_memory=False, # the default "fork" is incompatible with JAX
-        #     )
-        # else:
-        #     eval_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
-        # eval_env = train_env
         eval_env = SubprocEnv(make_env_fn=functools.partial(make_env, task_name=FLAGS.task_name))
-
-        # breakpoint()
     else:
        raise NotImplementedError
-
-    # if action_space is None:
-    #     action_space = train_env.action_space
-    # assert action_space.high.ndim == 1, action_space.shape
-
-    # Create replay buffer
-    # LOG: Libero comes under this for now #
     if FLAGS.config.image_observations:
-        # tf.io.gfile.makedirs(tf.io.gfile.join(save_dir, "image_replay_buffer"))
-        # assert not tf.io.gfile.exists(
-        #     tf.io.gfile.join(save_dir, "image_replay_buffer", "episode_0.tfrecord")
-        # ), f"Image replay buffer already exists! ({tf.io.gfile.join(save_dir, 'image_replay_buffer', 'episode_0.tfrecord')})"
         image_replay_buffer = None  # Will be created when switching to online training.
         state_replay_buffer = None
 
     rng = jax.random.PRNGKey(FLAGS.seed)
-    # we shard the leading dimension (batch dimension) accross all devices evenly
-    # sharding = jax.sharding.PositionalSharding(devices)
-    sharding = jax.sharding.PositionalSharding(devices)
-    # Create data iterators
-    # LOG: Offline dataset #
     offline_train_iterator = dataset.iterator(
         batch_size=FLAGS.config.agent_kwargs.batch_size
     )
@@ -656,12 +514,6 @@ def train_agent(_):
     # Online iterators will be set when switching to online training.
     online_train_iterator = None
     #########################################################
-    # Dataset created now in `dataset` and environment created now in `train_env` #
-    # breakpoint()
-
-    ### Sharding Data ###
-    # example_batch = next(offline_train_iterator)
-    # example_batch = shard_batch(example_batch, sharding) # DO NOT shard here, will be handled in the expo agent forward passes
     
     ### Create trajectory sampler ###
     data_collection_trajectory_sampler = TrajSampler(
@@ -753,7 +605,6 @@ def train_agent(_):
                     agent=agent,
                     rng=data_collection_rng_key,
                     timer=timer,
-                    # debug_mode=debug_mode,
                     debug_mode=False,
                 )
                 vlm_output_fn = get_vlm_output_fn(
@@ -762,24 +613,6 @@ def train_agent(_):
                     timer=timer,
                 )
 
-                # if env_recreation_count % env_recreation_frequency == 0:
-                #     train_env.env.close()
-                #     print("Recreating environment...")
-                #     train_env = None
-                #     import gc; gc.collect()
-                #     # train_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
-                #     train_env = make_env()
-                #     data_collection_trajectory_sampler = TrajSampler(
-                #         train_env,
-                #         clip_action=FLAGS.clip_action,
-                #         reward_scale=FLAGS.reward_scale,
-                #         reward_bias=FLAGS.reward_bias,
-                #         max_traj_length=FLAGS.config.get("max_episode_steps", 1000),
-                #         action_horizon=pi_config.model.action_horizon,
-                #         # action_horizon=1,
-                #     )
-                #     env_recreation_count = 0
-
                 trajectories = []
                 q_vs_mc_returns_vals = []
                 for traj_index in range(num_trajectories_to_collect):
@@ -787,13 +620,6 @@ def train_agent(_):
 
                     sampled_trajectories_successfully = False
                     while not sampled_trajectories_successfully:
-                        # try:
-                        #     with time_limit(STEP_TIME_LIMIT):
-                        #         obs, reward, done, info = self.env.step(action)# may STILL not interrupt if stuck in native code
-                        # except StepTimeout:
-                        #     raise StepTimeout("env.step() timed out")
-                        # try:
-
                         try:
                             with time_limit(STEP_TIME_LIMIT):
                                 trajs, _q_vs_mc_returns_vals = data_collection_trajectory_sampler.sample(
@@ -810,18 +636,6 @@ def train_agent(_):
                         # except:
                         except (StepTimeout, TimeoutError, EOFError, BrokenPipeError) as e:
                             print(f"Trajectory sampling failed/timed out: {type(e).__name__}: {e}")
-                            # del train_env
-                            # import gc; gc.collect()
-                            # train_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
-                            # data_collection_trajectory_sampler = TrajSampler(
-                            #     train_env,
-                            #     clip_action=FLAGS.clip_action,
-                            #     reward_scale=FLAGS.reward_scale,
-                            #     reward_bias=FLAGS.reward_bias,
-                            #     max_traj_length=FLAGS.config.get("max_episode_steps", 1000),
-                            #     action_horizon=pi_config.model.action_horizon,
-                            #     # action_horizon=1,
-                            # )
                             train_env._restart()
                             data_collection_trajectory_sampler = TrajSampler(
                                 train_env,
@@ -830,7 +644,6 @@ def train_agent(_):
                                 reward_bias=FLAGS.reward_bias,
                                 max_traj_length=FLAGS.config.get("max_episode_steps", 1000),
                                 action_horizon=pi_config.model.action_horizon,
-                                # action_horizon=1,
                             )
 
 
