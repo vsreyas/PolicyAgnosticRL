@@ -262,6 +262,123 @@ def test_local_optimization_steps():
     )
     assert local_optimization_results.num_gradient_steps_taken == num_steps
 
+@make_dict_kwargs_hashable_decorator
+@partial(
+    jax.jit,
+    static_argnames=(
+        "critic_agent",
+        "num_base_policy_actions",
+    ),
+)
+def q_chunking_best_of_n(
+    observations: jnp.ndarray,
+    critic_agent: flax.struct.PyTreeNode,
+    critic_state: flax.struct.PyTreeNode,
+    num_base_policy_actions: int,
+    rng: jax.random.PRNGKey,
+    dataset_actions_to_consider: Optional[jnp.ndarray] = None,
+):
+    # ------------------------------------------------------------
+    # Observation handling (unchanged logic)
+    # ------------------------------------------------------------
+    if type(observations) is tuple and len(observations) == 2:
+        observations, goals = observations
+    else:
+        goals = None
+
+    assert "base_policy_actions" in observations
+    base_policy_actions = observations["base_policy_actions"]
+
+    if base_policy_actions.ndim == 1:
+        base_policy_actions = base_policy_actions[None]
+
+    batch_size, num_actions, action_dim = base_policy_actions.shape
+
+    if "encoding" in observations:
+        raise AssertionError(
+            "encoding should not be calculated here, "
+            "because critic and base policy use different encodings"
+        )
+
+    elif "image" in observations:
+        assert "proprio" in observations
+        if observations["image"].ndim == 3:
+            observations["image"] = observations["image"][None]
+            observations["proprio"] = observations["proprio"][None]
+            if goals is not None and goals["image"].ndim == 3:
+                goals["image"] = goals["image"][None]
+
+        proprio = observations["proprio"]
+        if goals is not None:
+            observations = (observations, goals)
+
+        observations = {
+            "encoding": critic_state.apply_fn(
+                {"params": critic_state.params},
+                observations,
+                train=False,
+                name="critic_encoder",
+            ),
+            "proprio": proprio,
+        }
+
+    else:
+        assert "state" in observations
+        if observations["state"].ndim == 1:
+            observations["state"] = observations["state"][None]
+
+    # ------------------------------------------------------------
+    # Repeat observations to match action candidates
+    # ------------------------------------------------------------
+    repeated_obs = jax.tree_map(
+        lambda x: x[:, None]
+        .repeat(num_base_policy_actions, axis=1)
+        .reshape(batch_size * num_base_policy_actions, *x.shape[1:]),
+        observations,
+    )
+
+    actions = base_policy_actions.reshape(
+        batch_size * num_base_policy_actions, action_dim
+    )
+
+    # ------------------------------------------------------------
+    # Critic evaluation (global scoring only)
+    # ------------------------------------------------------------
+    rng, key = jax.random.split(rng)
+    q_values = critic_agent.forward_critic(
+        repeated_obs,
+        actions,
+        rng=key,
+        grad_params=critic_state.params,
+        train=False,
+    ).mean(axis=0)
+
+    q_values = q_values.reshape(batch_size, num_base_policy_actions)
+
+    actions = base_policy_actions
+
+    # ------------------------------------------------------------
+    # Optional dataset action injection
+    # ------------------------------------------------------------
+    if dataset_actions_to_consider is not None:
+        chex.assert_shape(
+            dataset_actions_to_consider, (batch_size, action_dim)
+        )
+        actions = jnp.concatenate(
+            [
+                actions[:, 1:, :],  # drop worst
+                dataset_actions_to_consider[:, None, :],
+            ],
+            axis=1,
+        )
+
+    best_idx = jnp.argmax(q_values, axis=-1)
+    best_actions = jnp.take_along_axis(
+        actions, best_idx[..., None, None], axis=1
+    ).squeeze(axis=1)
+
+    return best_actions
+
 
 @make_dict_kwargs_hashable_decorator
 @partial(
@@ -295,6 +412,20 @@ def action_optimization_sample_actions(
     dataset_actions_to_consider: Optional[jnp.ndarray] = None,
 ) -> Tuple[distrax.Distribution, Dict[str, jnp.ndarray]]:
     info_metrics = {}
+    if "next_on_policy_actions" in observations:
+        # print("SARSA action optimization called")
+        info_metrics[" SARSA next_on_policy_actions_done"] = 1.0
+        next_on_policy_actions = observations["next_on_policy_actions"]
+        if len(next_on_policy_actions.shape) == 1:
+            next_on_policy_actions = next_on_policy_actions[None]
+        # Return Deterministic next on-policy action for SARSA
+        return (
+            distrax.Independent(
+                distrax.Deterministic(loc=next_on_policy_actions),
+                reinterpreted_batch_ndims=1,
+            ),
+            info_metrics,
+        )
     if type(observations) is tuple and len(observations) == 2:
         # It's goal conditioned
         observations, goals = observations

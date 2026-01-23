@@ -365,6 +365,7 @@ class ContinuousCQLAgent(SACAgent):
             td_loss, td_loss_info = 0.0, {}
 
         cql_q_diff, cql_intermediate_results = self._get_cql_q_diff(batch, rng, params)
+        # cql_q_diff, cql_intermediate_results = jnp.array(0.0), {"cql_q_diff_commented_out": True}
 
         """auto tune cql alpha"""
         if self.config["cql_autotune_alpha"]:
@@ -716,6 +717,7 @@ def get_default_config(updates=None):
     )
 
     config.early_goal_concat = False
+    config.regress_q_to_mc_returns = False
 
     if updates is not None:
         config.update(ConfigDict(updates).copy_and_resolve_references())

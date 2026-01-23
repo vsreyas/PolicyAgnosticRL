@@ -16,10 +16,10 @@ from configs.base_config import (
     BASE_GAUSSIAN_CALQL_CONFIG,
     BASE_PARL_CALQL_CONFIG,
     BASE_PI_CONFIG,
-    BASE_PARL_CALQL_CONFIG_Pi0
-)
+    BASE_PARL_CALQL_CONFIG_Pi0,
+    )
 
-SAVE_DIR_PREFIX = os.environ.get("SAVE_DIR_PREFIX", "./")
+SAVE_DIR_PREFIX = os.environ.get("SAVE_DIR_PREFIX", "/data/user_data/sreyasv/q_chunking_pi_no_-1_10_SARSA_update/libero_10_pi05_put_the_two_mocha_pots_on_the_stove/")
 
 
 def get_config(config_string):
@@ -72,6 +72,11 @@ def get_config(config_string):
     parl_calql_config_pi0["dataset_kwargs"] = dict(
         cache=False,
         tfrecords_include_next_observations=False,
+        use_8D=False,
+        final_step_sparse_reward=True, # Keeps only the last step of the trajectory for reward computation
+        discount=0.99,
+        traj_sampling=False,
+        final_step_reward=200.0, # Reward given at the final step
     )
     parl_calql_config_pi0["agent_kwargs"]["cql_alpha"] = 0.01
     parl_calql_config_pi0["agent_kwargs"]["distributional_critic"] = False
@@ -91,7 +96,15 @@ def get_config(config_string):
     parl_calql_config_pi0["base_policy_agent_kwargs"]["image_observations"] = True
     parl_calql_config_pi0["base_policy_agent_kwargs"]["drq_padding"] = 4
     parl_calql_config_pi0["distill_argmax"] = True
-    parl_calql_config_pi0["image_replay_buffer_kwargs"] = dict()
+    parl_calql_config_pi0["image_replay_buffer_kwargs"] = dict(
+        cache=False,
+        tfrecords_include_next_observations=False,
+        use_8D=False,
+        final_step_sparse_reward=False, # Keeps only the last step of the trajectory for reward computation
+        discount=0.99,
+        final_step_reward=200.0, # Reward given at the final step
+    )
+    
 
     ddpm_config = deepcopy(BASE_DDPM_CONFIG)
     ddpm_config["save_video"] = True
@@ -183,10 +196,23 @@ def get_config(config_string):
     pi_config["dataset_kwargs"] = dict(
         cache=False,
         tfrecords_include_next_observations=False,
+        final_step_sparse_reward=True, # Keeps only the last step of the trajectory for reward computation
+        discount=0.99,
+        traj_sampling=False,
+        final_step_reward=200.0, # Reward given at the final step
+        num_of_traj=5,
     )
     pi_config["agent_kwargs"]["image_observations"] = True
     pi_config["agent_kwargs"]["use_proprio"] = True
-
+    
+    pi_config["image_replay_buffer_kwargs"] = dict(
+        cache=False,
+        tfrecords_include_next_observations=False,
+        use_8D=False,
+        final_step_sparse_reward=False, # Keeps only the last step of the trajectory for reward computation
+        discount=0.99,
+        final_step_reward=200.0, # Reward given at the final step,
+    )
 
     possible_structures = {
         "parl_calql": ml_collections.ConfigDict(parl_calql_config),

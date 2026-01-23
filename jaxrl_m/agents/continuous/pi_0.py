@@ -73,11 +73,12 @@ class PiPolicy(BasePolicy):
         self.data_sharding: Optional[jax.sharding.Sharding] = None
 
         checkpoint_manager, resuming = _checkpoints.initialize_checkpoint_dir(
-            self.config.checkpoint_dir,
+            self.config.checkpoint_base_dir,
             keep_period=self.config.keep_period,
-            overwrite=self.config.overwrite,
-            resume=self.config.resume,
+            overwrite=False,
+            resume=True,
         )
+        
 
         # Initialize model + sharding
         self.train_state, self.train_state_sharding = init_train_state(
@@ -86,6 +87,9 @@ class PiPolicy(BasePolicy):
 
         # If actually resuming, load checkpoint
         if resuming:
+            print("Resuming from checkpoint base dir and not from config.weight_loader.")
+            print(f"Restoring from checkpoint: {checkpoint_manager.latest_checkpoint()}")
+            print("Checkpoint manager info:", checkpoint_manager.info())
             self.train_state = _checkpoints.restore_state(
                 checkpoint_manager, self.train_state, None
             )
@@ -241,7 +245,7 @@ class PiPolicy(BasePolicy):
     # ------------------------------------------------------------------------------------
     # CHECKPOINTING — directly use OpenPI
     # ------------------------------------------------------------------------------------
-    def restore_checkpoint(self, path: str, sharding: jax.sharding.Sharding):
+    def restore_checkpoint(self, path: str, sharding: jax.sharding.Sharding = None):
         """
         Restore Pi0.5 train_state from a checkpoint directory.
         Must use initialize_checkpoint_dir() not CheckpointManager().
@@ -253,18 +257,17 @@ class PiPolicy(BasePolicy):
             resume=True,        # Look for existing checkpoint
         )
 
-        if not resuming:
-            raise FileNotFoundError(f"No checkpoint found in {path}")
 
         self.checkpoint_manager = ckpt_mgr
 
         # Restore state using OpenPI's official function
-        self.train_state = _checkpoints.restore_state(
-            ckpt_mgr,
-            self.train_state,
-            None,   # no data_loader required for restore
-        )
-        return self
+        if resuming:
+            self.train_state = _checkpoints.restore_state(
+                ckpt_mgr,
+                self.train_state,
+                None,   # no data_loader required for restore
+            )
+        return self, ckpt_mgr.latest_step()
 
     def save_checkpoint(self, save_dir: str, step: int, keep: int = 10, overwrite=True):
         """
@@ -274,7 +277,7 @@ class PiPolicy(BasePolicy):
         """
 
         save_dir = Path(save_dir)
-        cfg_dir = Path(self.config.checkpoint_dir)
+        cfg_dir = Path(self.config.checkpoint_base_dir)
 
         # Save to the actual Pi0.5 directory → reuse manager
         if save_dir == cfg_dir:

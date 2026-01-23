@@ -10,7 +10,7 @@ from jaxrl_m.agents.continuous.diffusion_q_learning import (
     get_default_config as get_diffusion_q_learning_config,
 )
 
-SAVE_DIR_PREFIX = os.environ.get("SAVE_DIR_PREFIX", "libero_10_pi05_put_the_two_mocha_pots_on_the_stove")
+SAVE_DIR_PREFIX = os.environ.get("SAVE_DIR_PREFIX","/data/user_data/sreyasv/q_chunking_pi_no_-1_10_SARSA_update/libero_10_pi05_put_the_two_mocha_pots_on_the_stove/" ) #"libero_10_pi05_put_the_two_mocha_pots_on_the_stove"
 DEFAULT_PARL_CONFIG = dict(
     num_base_policy_actions=16,
     num_actions_to_keep=10,
@@ -18,6 +18,7 @@ DEFAULT_PARL_CONFIG = dict(
     step_size=3e-4,
     optimize_critic_ensemble_min=False,
     use_target_critic=False,
+    q_chunking=True,
 )
 
 # Used to pre-train a Diffusion Policy base policy.
@@ -82,7 +83,7 @@ BASE_PARL_CALQL_CONFIG = dict(
     image_observations=False,
     goal_conditioned=False,
     improve_base_policy_actions_with_global_search=True,
-    base_policy_path="",
+    base_policy_path="pi0",
     mixing_ratio=0.5,
     distill_argmax=False,
     agent_kwargs=get_continuous_cql_config(
@@ -330,20 +331,24 @@ BASE_GAUSSIAN_CALQL_CONFIG = dict(
 
 BASE_PI_CONFIG = dict(
     agent="pi-0",
-    batch_size=16,
+    batch_size=128,
     save_dir=tf.io.gfile.join(SAVE_DIR_PREFIX, "results"),
     eval_interval=10,
     save_interval=5,
     log_interval=1,
     deterministic_eval=True,
-    num_eval_episodes=4,
+    num_eval_episodes=0,
     num_episodes_per_video=2,
     num_episodes_per_row=1,
     save_video=True,
     image_observations=False,
     goal_conditioned=False,
+    mixing_ratio=0.25,
+    distill_argmax=False,
+    data_collection_particle_choosing_strategy="max_q_value",
+    evaluation_particle_choosing_strategy="max_q_value",
     agent_kwargs=dict(
-        batch_size=16,
+        batch_size=128,
         score_network_kwargs=dict(
             time_dim=128,
             num_blocks=3,
@@ -372,13 +377,13 @@ pi0_base_policy_agent_kwargs_for_parl.update(
 )
 BASE_PARL_CALQL_CONFIG_Pi0 = dict(
     agent="parl_calql",
-    batch_size=16,
+    batch_size=8,
     save_dir=tf.io.gfile.join(SAVE_DIR_PREFIX, "results"),
-    eval_interval=10,
+    eval_interval=5,
     save_interval=5,
     log_interval=1,
     deterministic_eval=True,
-    num_eval_episodes=4,
+    num_eval_episodes=2,
     num_episodes_per_video=2,
     num_episodes_per_row=1,
     save_video=True,
@@ -387,14 +392,14 @@ BASE_PARL_CALQL_CONFIG_Pi0 = dict(
     evaluation_particle_choosing_strategy="max_q_value",
     image_observations=False,
     goal_conditioned=False,
-    improve_base_policy_actions_with_global_search=True,
+    improve_base_policy_actions_with_global_search=False,
     base_policy_path="",
     mixing_ratio=0.5,
     distill_argmax=False,
     agent_kwargs=get_continuous_cql_config(
         updates=dict(
             discount=0.99,
-            batch_size=16,
+            batch_size=8,
             distributional_critic=True,
             distributional_critic_kwargs=dict(
                 q_min=-100.0,
@@ -432,7 +437,7 @@ BASE_PARL_CALQL_CONFIG_Pi0 = dict(
             drq_padding=0,
             cql_alpha=0.005,
             only_use_next_actions_for_cql=False,
-            use_wrist_view=True,
+            use_wrist_view=False,
             use_proprio=True
         ),
     ),

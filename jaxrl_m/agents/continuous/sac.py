@@ -309,6 +309,8 @@ class SACAgent(flax.struct.PyTreeNode):
             "critic_loss": critic_loss,
             "predicted_qs": jnp.mean(predicted_qs),
             "target_qs": jnp.mean(target_q),
+            "rewards": jnp.mean(batch["rewards"]),
+            "target_next_min_qs": jnp.mean(target_next_min_q),
         }
         if self.config.get("min_q_target", None) is not None:
             info["min_q_target"] = self.config["min_q_target"]
@@ -727,6 +729,7 @@ class SACAgent(flax.struct.PyTreeNode):
 
         else:
             if not use_lang and not use_wrist_view:
+                print("intialising single-view-encoder")
                 encoder_def = EncodingWrapper(
                     encoder_def,
                     use_proprio=use_proprio,

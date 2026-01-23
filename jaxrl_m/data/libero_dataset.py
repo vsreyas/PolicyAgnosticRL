@@ -24,11 +24,21 @@ def _bytes_feature(value: bytes) -> tf.train.Feature:
 
 def _load_primary_rgb(dataset_path: str, episode_id: str, step_id: str, primary_mode: str) -> np.ndarray:
     path = f"{dataset_path}/episodes/{episode_id}/steps/{step_id}/{primary_mode}.jpg"
-    return np.array(Image.open(path).convert("RGB"), dtype=np.uint8)
+    img0 = np.array(Image.open(path).convert("RGB"), dtype=np.uint8)
+    if img0.ndim == 4:   # [T,H,W,C]
+        img0 = img0[:, ::-1, ::-1, :]
+    else:                # [H,W,C]
+        img0 = img0[::-1, ::-1, :]
+    return img0
 
 def _load_wrist_rgb(dataset_path: str, episode_id: str, step_id: str) -> np.ndarray:
     path = f"{dataset_path}/episodes/{episode_id}/steps/{step_id}/image_wrist.jpg"
-    return np.array(Image.open(path).convert("RGB"), dtype=np.uint8)
+    img0 = np.array(Image.open(path).convert("RGB"), dtype=np.uint8)
+    if img0.ndim == 4:   # [T,H,W,C]
+        img0 = img0[:, ::-1, ::-1, :]
+    else:                # [H,W,C]
+        img0 = img0[::-1, ::-1, :]
+    return img0
 
 def _load_language(other_file, filetype: str, key="language_instruction") -> str:
     if filetype == "h5":
@@ -40,6 +50,29 @@ def _load_language(other_file, filetype: str, key="language_instruction") -> str
 
 def _load_action(other_file, filetype: str) -> np.ndarray:
     return other_file["action"][()] if filetype == "h5" else other_file["action"]
+
+def _load_robot_obs_8D(other_file, filetype: str) -> np.ndarray:
+    """
+    Load robot observation in 8D format: [eef_pos(3), axis_angle(3), gripper_qpos(2)].
+    
+    Returns:
+        robot_obs: shape (8,) containing [position, axis-angle, gripper_position]
+    """
+    if filetype == "h5":
+        # tcp_pose = other_file["observation"]["tcp_pose"][()]  # [x, y, z, qx, qy, qz, qw]
+        gripper_position = other_file["observation"]["gripper_position"][()]  # (2,)
+        eef_pos = other_file["observation"]["ee_pos"][()]  # (3,)
+        ee_ori = other_file["observation"]["ee_ori"][()]  # (3,)
+    else:
+        # tcp_pose = other_file["observation_tcp_pose"]
+        gripper_position = other_file["observation_gripper_position"]
+        eef_pos = other_file["observation_ee_pos"]
+        ee_ori = other_file["observation_ee_ori"]
+    # eef_pos = tcp_pose[:3]
+    # eef_euler = tcp_pose[3:6]
+    
+    robot_obs = np.concatenate([eef_pos, ee_ori, gripper_position])
+    return robot_obs.astype(np.float32)
 
 def _load_robot_obs(other_file, filetype: str, gripper_width: bool) -> np.ndarray:
     robot_obs = np.zeros(15 + (2 if gripper_width else 0), dtype=np.float32)
@@ -75,34 +108,38 @@ def _resize(img: np.ndarray, size: int) -> np.ndarray:
 def calculate_synthetic_rewards_for_libero_episode(
     num_steps: int,
     discount_factor: float = 0.99,
-    mode: str = "exponential",
+    mode: str = "sparse",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Synthetic reward function for Libero dataset without subtasks.
-    Gives a single terminal reward of 1, optionally decayed over time.
+    Supports sparse rewards, exponential decay, or linear increase.
 
     Args:
         num_steps (int): number of timesteps in the episode
         discount_factor (float): decay rate for exponential mode
-        mode (str): "exponential" or "linear"
+        mode (str): "exponential", "linear", or "sparse"
 
     Returns:
         rewards (np.ndarray): shape [num_steps-1]
         masks (np.ndarray): shape [num_steps-1]
         mc_returns (np.ndarray): shape [num_steps-1]
     """
-    # --- create decaying rewards ---
+    # --- create rewards ---
     if mode == "exponential":
         # Exponentially increasing toward final step (simulate discounted terminal reward)
         rewards_full = np.array([discount_factor ** (num_steps - 1 - t) for t in range(num_steps)], dtype=np.float32)
+        rewards_full /= rewards_full[-1]  # Normalize so final reward = 1
     elif mode == "linear":
         # Linearly increasing reward from 0 to 1
         rewards_full = np.linspace(0.0, 1.0, num_steps, dtype=np.float32)
+        rewards_full /= rewards_full[-1]  # Normalize so final reward = 1
+    elif mode == "sparse":
+        # Sparse reward: -1 for all steps except the final step, which gets 0
+        rewards_full = np.full(num_steps, -1.0, dtype=np.float32)
+        rewards_full[-1] = 0.0
+        rewards_full[-2] = 0.0
     else:
-        raise ValueError("mode must be 'exponential' or 'linear'")
-
-    # Normalize so final reward = 1
-    rewards_full /= rewards_full[-1]
+        raise ValueError("mode must be 'exponential', 'linear', or 'sparse'")
 
     # Use first T-1 rewards as transition rewards
     rewards = rewards_full[:-1]
@@ -130,9 +167,9 @@ def convert_libero_episode_to_tfrecord(
     primary_mode: str = "image_primary",
     include_next_observations: bool = False,
     filetype: str = "h5",
-    gripper_width: bool = False,
+    gripper_width: bool = False, #Not used
     include_rewards: bool = False,
-    reward_bias: float = 0.0,
+    reward_bias: float = 0.0, #Not Used
 ) -> None:
     tf.config.set_visible_devices([], "GPU")
     T = num_steps
@@ -158,7 +195,8 @@ def convert_libero_episode_to_tfrecord(
         images0[step] = _resize(img0, image_size)
         images1[step] = _resize(img1, image_size)
 
-        robot = _load_robot_obs(other, filetype, gripper_width)
+        # robot = _load_robot_obs(other, filetype, gripper_width)
+        robot = _load_robot_obs_8D(other, filetype)
         # scene = _load_scene_obs()
         # s = np.concatenate([robot, scene], 0)
         s = robot
@@ -225,9 +263,9 @@ def _convert_one(args): convert_libero_episode_to_tfrecord(*args)
 @click.option("--image_size", type=int, default=224)
 @click.option("--include_next_observations", is_flag=True, default=False)
 @click.option("--filetype", type=click.Choice(["h5", "npz"]), default="h5")
-@click.option("--gripper_width", is_flag=True, default=False)
+@click.option("--gripper_width", is_flag=True, default=True)
 @click.option("--include_rewards", is_flag=True, default=True)
-@click.option("--reward_bias", type=float, default=0.0)
+@click.option("--reward_bias", type=float, default=1.0) #Not used
 @click.option("--num_workers", type=int, default=max(1, cpu_count() // 2))
 def convert_libero_dataset_to_tfrecord(
     dataset_path: str,

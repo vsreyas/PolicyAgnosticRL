@@ -158,6 +158,8 @@ def get_libero_env(
     # --- Config setup ---
     if cfg is None:
         cfg = get_libero_config()
+        # cfg.screen_size[0] = 1024
+        # cfg.screen_size[1] = 1024
 
     # --- Load benchmark suite and task ---
     benchmark_dict = benchmark.get_benchmark_dict()
@@ -487,7 +489,12 @@ class LiberoEnvWrapper(gym.Wrapper):
         self.__step += 1
         if self.env.check_success():
             done = True
+            # reward = 0.0
             reward = 1.0
+        else:
+            done = False
+            # reward = -1.0
+            reward = 0.0 
         if not done and self.__step > self.max_steps:
             done = True
         
@@ -662,7 +669,7 @@ def main():
     import time
 
     print("Initializing LIBERO environment...")
-    env = get_libero_env(goal_conditioned=False, is_pi=True,task_name="put the yellow and white mug in the microwave and close it" ) #task_name="put the yellow and white mug in the microwave and close it"
+    env = get_libero_env(goal_conditioned=False, is_pi=True, task_name="put both moka pots on the stove" ) #task_name="put the yellow and white mug in the microwave and close it"
 
     print("Resetting environment...")
     obs = env.reset()
@@ -674,6 +681,7 @@ def main():
     print(f"\nRunning {num_steps} random steps...")
     done = False
     step = 0
+    # print("Action space: -- ", env.action_space)
     while not done:
         action = env.action_space.sample()
         next_obs, reward, done, info = env.step(action)
@@ -686,7 +694,7 @@ def main():
             print("Proprio shape:", np.array(next_obs['proprio']).shape)
             print("Language: ", next_obs["prompt"])
             print("Language type: ", type(next_obs["prompt"]))
-            # save_image_tensor_as_png(np.array(next_obs['image']), "sim_base_img_1.png")
+            # save_image_tensor_as_png(np.array(next_obs['image']), "put both moka pots on the stove_img_1.png")
             # exit()
             break
 
@@ -696,6 +704,7 @@ def main():
         time.sleep(0.1)
     env.reset()
     while not done:
+        
         action = env.action_space.sample()
         next_obs, reward, done, info = env.step(action)
         print(f"Step {step+1}: reward={reward:.3f}, done={done}")

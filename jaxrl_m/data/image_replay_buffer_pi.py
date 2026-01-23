@@ -88,7 +88,14 @@ class ImageReplayBufferPi:
         use_wrist_view: bool = True,
         config=None,
         task_name: Optional[str] = None,
-        use_8D=True,
+        use_8D=False,
+        final_step_sparse_reward: bool = True, #Assume the trajectory is successful by default
+        discount: float = 0.99,
+        traj_sampling: bool = False,
+        final_step_reward: int = 10,
+        anti_sparse: bool = True, # If true, gives negative reward for every step other than final step
+        filter_success: bool = False,
+        num_of_traj: int = None,
     ):
         self.goal_relabeling_strategy = goal_relabeling_strategy
         self.goal_relabeling_kwargs = goal_relabeling_kwargs
@@ -118,6 +125,19 @@ class ImageReplayBufferPi:
         self.data_transforms = _transforms.compose(self.data_transforms)
         self.task_name = task_name
         self.use_8D = use_8D
+        
+        self.final_step_sparse_reward = final_step_sparse_reward
+        if self.final_step_sparse_reward:
+            logging.info("Using final step sparse reward setting. By defualt the trajectory is assumed to be successful.")
+        self.final_step_reward = final_step_reward
+        self.anti_sparse = anti_sparse
+
+        self.discount = discount
+        self.is_train = train
+        self.traj_sampling = traj_sampling
+        self.filter_success = filter_success
+     
+        self.num_trajectories = num_of_traj
 
         dataset = self._construct_tf_dataset(data_paths, seed)
 
@@ -157,8 +177,11 @@ class ImageReplayBufferPi:
         dataset = tf.data.TFRecordDataset(dataset, num_parallel_reads=tf.data.AUTOTUNE)
         
         # Filter to get single task dataset
-        if self.task_name is not None:
+        if (self.task_name is not None) or (self.filter_success):
             dataset = dataset.filter(self._proto_filter)
+        
+        if self.num_trajectories is not None:
+            dataset = dataset.take(self.num_trajectories)
 
         # yields trajectories
         dataset = dataset.map(self._decode_example, num_parallel_calls=tf.data.AUTOTUNE)
@@ -183,26 +206,46 @@ class ImageReplayBufferPi:
             )
 
         # unbatch to yield individual transitions
-        dataset = dataset.unbatch()
+        if not self.traj_sampling:
+            dataset = dataset.unbatch()
 
         return dataset
     
     def _proto_filter(self, example_proto):
-        if self.task_name is None:
-            return tf.constant(True)
-
-        # Define a lightweight features dict (ONLY language, nothing else)
+        # Parse only what we need
         features = {
             "language": tf.io.FixedLenFeature([], tf.string),
+            "rewards": tf.io.FixedLenFeature([], tf.string),
         }
 
         parsed = tf.io.parse_single_example(example_proto, features)
-        txt = parsed["language"]
-        # print(parsed.keys())
 
-        # Case-insensitive substring match
-        task = tf.strings.lower(self.task_name)
-        return tf.strings.regex_full_match(tf.strings.lower(txt), ".*" + task + ".*")
+        # ------------------
+        # Language filter
+        # ------------------
+        if self.task_name is None:
+            language_ok = tf.constant(True)
+        else:
+            txt = parsed["language"]
+            task = tf.strings.lower(self.task_name)
+            language_ok = tf.strings.regex_full_match(
+                tf.strings.lower(txt),
+                ".*" + task + ".*"
+            )
+
+        # ------------------
+        # Success filter
+        # ------------------
+        if not self.filter_success:
+            return language_ok
+
+        rewards = tf.io.parse_tensor(parsed["rewards"], tf.float32)
+        final_env_reward = rewards[-1]
+
+        # success if final reward == 1.0
+        success = tf.equal(final_env_reward, 1.0)
+
+        return tf.logical_and(language_ok, success)
 
 
     # the expected type spec for the serialized examples
@@ -249,9 +292,11 @@ class ImageReplayBufferPi:
         #     tf.print("KEY:", k, "SHAPE:", tf.shape(v))
         
         state_tf = parsed_tensors["observations/state"][:-1] #drop the last state to align dimensions
+        state_tf_ns = parsed_tensors["observations/state"]
         # tf.print("state tf shape: ", tf.shape(state_tf))
         actions_tf = parsed_tensors["actions"]
         image_tf = [parsed_tensors["observations/images0"][:-1], parsed_tensors['observations/images1'][:-1]]
+        image_tf_ns = [parsed_tensors["observations/images0"], parsed_tensors['observations/images1']]
         
         
         ah = self.config.model.action_horizon
@@ -259,13 +304,74 @@ class ImageReplayBufferPi:
 
         # number of valid windows = T - (ah - 1)
         W = T - ah + 1
-        start_idx = tf.range(W)  
-        if 'rewards' in parsed_tensors:
-            rewards_tf = tf.gather(parsed_tensors["rewards"], start_idx)[: -1]
-            masks_tf = tf.gather(parsed_tensors["masks"], start_idx)[: -1]
-            mc_returns_tf = tf.gather(parsed_tensors["mc_returns"], start_idx)[: -1]
+        start_idx = tf.range(W)
+        start_idx_rewards = tf.range(W)
+        start_idx_ns = start_idx + ah
+        if self.anti_sparse:
+            rewards_raw = -tf.ones([T], dtype=tf.float32)
+        else:
+            rewards_raw = tf.zeros([T], dtype=tf.float32)
+        dones_raw   = tf.zeros([T], dtype=tf.float32)
 
-      
+        if self.final_step_sparse_reward:
+            success = tf.constant(True)
+        else:
+            final_env_reward = parsed_tensors["rewards"][-1]
+            # (your logic) success if final reward == 0.0
+            # success = tf.equal(final_env_reward, 0.0)
+            success = tf.equal(final_env_reward, 1.0)
+
+        def success_case_raw():
+            r = tf.tensor_scatter_nd_update(
+                rewards_raw, indices=tf.reshape(T - 1, [1, 1]), updates=tf.constant([self.final_step_reward], tf.float32)
+            )
+            d = tf.tensor_scatter_nd_update(
+                dones_raw, indices=tf.reshape(T - 1, [1, 1]), updates=tf.constant([1.0], tf.float32)
+            )
+            return r, d
+
+        rewards_raw, dones_raw = tf.cond(success, success_case_raw, lambda: (rewards_raw, dones_raw))
+        masks_raw = 1.0 - dones_raw
+
+        gamma = tf.constant(self.discount, dtype=tf.float32)
+        gamma_vec = tf.pow(gamma, tf.range(ah, dtype=tf.float32))
+        # Window/chunk them: length W
+        rewards_chunked = tf.map_fn(
+            lambda t: tf.reduce_sum(
+                rewards_raw[t : t + ah] * gamma_vec
+            ),
+            start_idx_rewards,
+            fn_output_signature=tf.float32,
+        )
+
+        masks_chunked = tf.map_fn(
+            lambda t: tf.reduce_min(masks_raw[t : t + ah]),
+            start_idx_rewards,
+            fn_output_signature=tf.float32,
+        )
+
+        # Monte-Carlo returns over per-transition rewards (length L)
+        rev_rewards = tf.reverse(rewards_raw, axis=[0])
+        rev_returns = tf.scan(lambda acc, r: r + gamma * acc, rev_rewards)
+        mc_returns  = tf.reverse(rev_returns, axis=[0])
+        mc_returns = tf.gather(mc_returns, start_idx_rewards) #[:-1]  # align to L
+
+        out["rewards"] = rewards_chunked
+        out["masks"] = masks_chunked
+        out["mc_returns"] = mc_returns
+
+        base_actions_tf = actions_tf
+        start_idx_next_actions = tf.range(ah, T+1)
+        action_dim = tf.shape(base_actions_tf)[-1]
+        pad = tf.zeros([ah, action_dim], dtype=base_actions_tf.dtype)
+        padded_actions_tf = tf.concat([base_actions_tf, pad], axis=0)
+
+        next_actions_tf = tf.map_fn(
+            lambda t: padded_actions_tf[t : t + ah],
+            start_idx_next_actions,
+            fn_output_signature=tf.float32,
+        ) # (W=T - ah, ah)
+
 
         actions_tf = tf.map_fn(
             lambda t: actions_tf[t : t + ah],
@@ -276,6 +382,11 @@ class ImageReplayBufferPi:
         state_tf = tf.gather(state_tf, start_idx)
         image_tf[0] = tf.gather(image_tf[0], start_idx)
         image_tf[1] = tf.gather(image_tf[1], start_idx)
+
+        state_tf_ns = tf.gather(state_tf_ns, start_idx_ns) # (W=T - ah, state_dim)
+        image_tf_ns[0] = tf.gather(image_tf_ns[0], start_idx_ns) # (W=T - ah, H, W, C)
+        image_tf_ns[1] = tf.gather(image_tf_ns[1], start_idx_ns) # (W=T - ah, H, W, C)
+
         length = tf.shape(state_tf)[0]
         prompt_tf = tf.repeat(parsed_tensors["language"][None], repeats=length)  # shape: (length,)
         # tf.print(prompt_tf)
@@ -308,12 +419,12 @@ class ImageReplayBufferPi:
             if hasattr(prompt, "numpy"):
                 prompt = prompt.numpy()
 
-            if img0.ndim == 4:   # [T,H,W,C]
-                img0 = img0[:, ::-1, ::-1, :]
-                img1 = img1[:, ::-1, ::-1, :]
-            else:                # [H,W,C]
-                img0 = img0[::-1, ::-1, :]
-                img1 = img1[::-1, ::-1, :]
+            # if img0.ndim == 4:   # [T,H,W,C]
+            #     img0 = img0[:, ::-1, ::-1, :]
+            #     img1 = img1[:, ::-1, ::-1, :]
+            # else:                # [H,W,C]
+            #     img0 = img0[::-1, ::-1, :]
+            #     img1 = img1[::-1, ::-1, :]
 
             if self.use_8D and state.shape[-1] != 8:
                 state = convert_state_15_to_8(state)
@@ -333,7 +444,7 @@ class ImageReplayBufferPi:
                 out["token_ar_mask"] = np.zeros_like(out["tokenized_prompt_mask"], dtype=np.int32)
 
             if "token_loss_mask" not in out:
-                out["token_loss_mask"] = np.ones_like(out["tokenized_prompt_mask"], dtype=np.int32)
+                out["token_loss_mask"] = np.ones_like(out["tokenized_prompt_mask"], dtype=np.bool_)
             
             
 
@@ -342,9 +453,9 @@ class ImageReplayBufferPi:
                 out["state"],                          # 0
                 out["actions"],                        # 1
 
-                out["image"]["base_0_rgb"],            # 2
-                out["image"]["left_wrist_0_rgb"],      # 3
-                out["image"]["right_wrist_0_rgb"],     # 4
+                out["image"]["base_0_rgb"].astype(np.uint8),            # 2
+                out["image"]["left_wrist_0_rgb"].astype(np.uint8),      # 3
+                out["image"]["right_wrist_0_rgb"].astype(np.uint8),     # 4
 
                 out["image_mask"]["base_0_rgb"],       # 5
                 out["image_mask"]["left_wrist_0_rgb"], # 6
@@ -369,9 +480,37 @@ class ImageReplayBufferPi:
                 tf.float32,  # state
                 tf.float32,  # actions
 
-                tf.float32,  # base_0_rgb
-                tf.float32,  # left_wrist_0_rgb
-                tf.float32,  # right_wrist_0_rgb
+                tf.uint8 ,  #tf.float32,  # base_0_rgb
+                tf.uint8 ,  #tf.float32,  # left_wrist_0_rgb
+                tf.uint8 ,  #tf.float32,  # right_wrist_0_rgb
+
+                tf.bool,     # mask base
+                tf.bool,     # mask left
+                tf.bool,     # mask right
+
+                tf.int32,    # tokenized_prompt
+                tf.bool,     # tokenized_prompt_mask
+                tf.int32,     # token_ar_mask
+                tf.bool,     # token_loss_mask
+            ]
+        )
+
+        outputs_ns = tf.py_function(
+            func=_apply_data_transforms_numpy,
+            inp=[
+                state_tf_ns,
+                next_actions_tf,
+                image_tf_ns[0],
+                image_tf_ns[1],
+                prompt_tf,
+            ],
+            Tout=[
+                tf.float32,  # state
+                tf.float32,  # actions
+
+                tf.uint8 ,  # base_0_rgb
+                tf.uint8 ,  # left_wrist_0_rgb
+                tf.uint8 ,  # right_wrist_0_rgb
 
                 tf.bool,     # mask base
                 tf.bool,     # mask left
@@ -389,7 +528,7 @@ class ImageReplayBufferPi:
         out['observations'] = {}
         out['observations']["proprio"] = outputs[idx]; idx += 1
         # tf.print("state: ", tf.shape(out['state']))
-        out["actions"] = outputs[idx][:-1]; idx += 1 #drop the last action to align dimensions
+        out["actions"] = outputs[idx]; idx += 1 #drop the last action to align dimensions
         # tf.print("actions: ", tf.shape(out['actions']))
 
         
@@ -409,15 +548,28 @@ class ImageReplayBufferPi:
         out["observations_image_mask"]["image_3"] = outputs[idx]; idx += 1
         # tf.print(tf.shape(out["image_mask"]["right_wrist_0_rgb"]))
 
-        out["tokenized_prompt"] = outputs[idx][:-1]; idx += 1
-        out["tokenized_prompt_mask"]= outputs[idx][:-1]; idx += 1
-        out["token_ar_mask"] = outputs[idx][:-1]; idx += 1
-        out["token_loss_mask"] = outputs[idx][:-1]; idx += 1
+        out["tokenized_prompt"] = outputs[idx]; idx += 1
+        out["tokenized_prompt_mask"]= outputs[idx]; idx += 1
+        out["token_ar_mask"] = outputs[idx]; idx += 1
+        out["token_loss_mask"] = outputs[idx]; idx += 1
         
-        out['prompt'] = out['prompt'][:-1]
-
+        # out['prompt'] = out['prompt']
+        idx = 0
         out['next_observations'] = {}
-        out['next_observations_image_mask'] = {}
+        out['next_observations']["proprio"] = outputs_ns[idx]; idx += 1
+        out['next_observations']['next_on_policy_actions'] = outputs_ns[idx]; idx += 1
+        out['next_observations']["image"] = outputs_ns[idx]; idx += 1
+        out['next_observations']["wrist_image"] = outputs_ns[idx]; idx += 1
+        out['next_observations']["image_3"] = outputs_ns[idx]; idx += 1
+
+        out["next_observations_image_mask"] = {}
+        out["next_observations_image_mask"]["image"] = outputs_ns[idx]; idx += 1
+        out["next_observations_image_mask"]["wrist_image"] = outputs_ns[idx]; idx += 1
+        out["next_observations_image_mask"]["image_3"] = outputs_ns[idx]; idx += 1
+
+
+        # out['next_observations'] = {}
+        # out['next_observations_image_mask'] = {}
         # tf.print("========== TRANSFORM OUTPUT SHAPES ==========\n",
 
         #     # ---- STATE ----
@@ -446,43 +598,39 @@ class ImageReplayBufferPi:
         #     # Footer
         #     "============================================"
         # )
-        if 'rewards' in parsed_tensors:
-            out["rewards"] = rewards_tf
-            out["masks"] = masks_tf
-            out["mc_returns"] = mc_returns_tf
+        # if 'rewards' in parsed_tensors:
+        #     out["rewards"] = rewards_tf
+        #     out["masks"] = masks_tf
+        #     out["mc_returns"] = mc_returns_tf
 
-        states = out['observations']["proprio"]
-        out['observations']["proprio"] = states[:-1]
+        # states = out['observations']["proprio"]
+        # out['observations']["proprio"] = states[:-1]
         
-        out['next_observations']["proprio"] = states[1:]
-        # if self.states_only:
-        #     parsed_tensors["observations/images0"] = None
-        #     parsed_tensors["next_observations/images0"] = None
-        # else:
-        if not self.states_only:
-            # images = out["image"]
-            # parsed_tensors["observations/images0"] = images[:-1]
-            # parsed_tensors["next_observations/images0"] = images[1:]
-            # if self.use_wrist_view:
-            #     wrist_images = parsed_tensors["observations/images1"]
-            #     parsed_tensors["observations/images1"] = wrist_images[:-1]
-            #     parsed_tensors["next_observations/images1"] = wrist_images[1:]
-            for cam in out["observations_image_mask"].keys():
-                img = out['observations'][cam]
+        # out['next_observations']["proprio"] = states[1:]
+        # # if self.states_only:
+        # #     parsed_tensors["observations/images0"] = None
+        # #     parsed_tensors["next_observations/images0"] = None
+        # # else:
+        # if not self.states_only:
+        #     # images = out["image"]
+        #     # parsed_tensors["observations/images0"] = images[:-1]
+        #     # parsed_tensors["next_observations/images0"] = images[1:]
+        #     # if self.use_wrist_view:
+        #     #     wrist_images = parsed_tensors["observations/images1"]
+        #     #     parsed_tensors["observations/images1"] = wrist_images[:-1]
+        #     #     parsed_tensors["next_observations/images1"] = wrist_images[1:]
+        #     for cam in out["observations_image_mask"].keys():
+        #         img = out['observations'][cam]
                 
-                out['observations'][cam] = img[:-1]
-                out['next_observations'][cam] = img[1:]
+        #         out['observations'][cam] = img[:-1]
+        #         out['next_observations'][cam] = img[1:]
                 
 
-                mask = out["observations_image_mask"][cam]
-                out["observations_image_mask"][cam] = mask[:-1]
-                out['next_observations_image_mask'][cam] = mask[1:]
-                # tf.print("here 2")
+        #         mask = out["observations_image_mask"][cam]
+        #         out["observations_image_mask"][cam] = mask[:-1]
+        #         out['next_observations_image_mask'][cam] = mask[1:]
+        #         # tf.print("here 2")
 
-        out['terminals'] = tf.zeros([W-1], dtype=tf.bool)
-        # # terminals[-1] = True
-        out['truncates'] = tf.zeros([W-1], dtype=tf.bool)
-        # truncates[-1] = True
         def _encode_clip(text_tensor):
             """Run CLIP text encoder and return a 512-D embedding (or) use a cached embedding dict."""
             # Convert TF string to Python str
@@ -505,6 +653,18 @@ class ImageReplayBufferPi:
         out['observations']["language"] = clip_emb
         out.pop("prompt")
         # print_tensor_tree("OUT", out)
+        # tf.print(
+        #     "\n===== DEBUG BATCH SHAPES =====",
+        #     "\nproprio:", tf.shape(out["observations"]["proprio"]),
+        #     "\nactions:", tf.shape(out["actions"]),
+        #     "\nrewards:", tf.shape(out.get("rewards", tf.constant([-1]))),
+        #     "\nmasks:", tf.shape(out.get("masks", tf.constant([-1]))),
+        #     "\nmc_returns:", tf.shape(out.get("mc_returns", tf.constant([-1]))),
+        #     "\nimage:", tf.shape(out["observations"]["image"]),
+        #     "\nprompt:", tf.shape(out["tokenized_prompt"]),
+        #     "\n==============================",
+        #     summarize=-1,
+        # )
         return out
     # {
     #     'image': obs_images,
@@ -695,13 +855,13 @@ def save_trajectory_as_tfrecord(trajectory: Dict[str, np.ndarray], path: str):
                     **(
                         {
                             "rewards": tensor_feature(
-                                np.array(trajectory["rewards"][:-1], dtype=np.float32)
+                                np.array(trajectory["rewards"], dtype=np.float32)
                             ),
                             "masks": tensor_feature(
-                                np.array(trajectory["masks"][:-1], dtype=np.float32)
+                                np.array(trajectory["masks"], dtype=np.float32)
                             ),
                             "mc_returns": tensor_feature(
-                                np.array(trajectory["mc_returns"][:-1], dtype=np.float32)
+                                np.array(trajectory["mc_returns"], dtype=np.float32)
                             ),
                         }
                         if "rewards" in trajectory
@@ -783,6 +943,151 @@ def print_tensor_tree(prefix, obj):
     # Case 4: anything else (scalar, None, etc.) -> just print type
     tf.print(prefix, "NON-TENSOR LEAF OF TYPE:", str(type(obj)))
 
+import os
+import json
+import numpy as np
+import imageio
+from PIL import Image
+
+def _to_numpy(x):
+    """Convert torch or numpy to numpy."""
+    try:
+        import torch
+        if isinstance(x, torch.Tensor):
+            return x.detach().cpu().numpy()
+    except ImportError:
+        pass
+    return np.asarray(x)
+
+
+def _to_uint8_frames(frames):
+    """
+    frames: (T,H,W,3) as float or uint8
+    Robustly convert to uint8 without blowing everything to white.
+    """
+    frames = np.asarray(frames)
+    if frames.dtype == np.uint8:
+        return frames
+
+    fmin = frames.min()
+    fmax = frames.max()
+    eps = 1e-6
+
+    # Case 1: looks like [0, 1]
+    if fmax <= 1.0 + 1e-3 and fmin >= -1e-3:
+        frames_uint8 = np.clip(frames, 0.0, 1.0) * 255.0
+        return frames_uint8.astype(np.uint8)
+
+    # Case 2: looks like [0, 255] already (float32)
+    if fmax <= 255.0 + 1.0 and fmin >= -1.0:
+        frames_uint8 = np.clip(frames, 0.0, 255.0)
+        return frames_uint8.astype(np.uint8)
+
+    # Fallback: normalize by global max
+    frames_norm = (frames - fmin) / (fmax - fmin + eps)
+    frames_uint8 = np.clip(frames_norm * 255.0, 0.0, 255.0)
+    return frames_uint8.astype(np.uint8)
+
+
+def export_batch_to_json(
+    output,
+    task,
+    texts,
+    episode_id="1",
+    out_dir="export",
+    video_name="rgb.mp4",
+    json_name="episode.json",
+    max_timesteps=32,
+    fps=10,
+):
+    """
+    Export a batch into:
+      - JSON (task, texts, videos, action, state, continuous_gripper_state)
+      - MP4 video
+      - First-frame PNG
+
+    Conventions you specified:
+      - actions: shape (1, T, 10, 32) → use [0, i, 0, :7] for i in [0, 31]
+      - state:   output['observations']['proprio'] with shape (1, T, D)
+                 → use [0, i, :8]
+      - continuous_gripper_state[i] = state[i][-1]
+      - images:  output['observations']['image'] with shape (1, T, H, W, 3)
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    # -----------------------
+    # Extract tensors and convert to numpy
+    # -----------------------
+    actions_tensor = _to_numpy(output["actions"])                  # (1, T, 10, 32)
+    proprio_tensor = _to_numpy(output["observations"]["proprio"])  # (1, T, D)
+    images_tensor  = _to_numpy(output["observations"]["image"])    # (1, T, H, W, 3)
+
+    T = min(max_timesteps, actions_tensor.shape[1])
+
+    actions_list = []
+    state_list = []
+    gripper_list = []
+
+    for i in range(T):
+        # ----- Action: [0, i, 0, :7]
+        a = actions_tensor[0, i, 0, :7].tolist()
+        actions_list.append(a)
+
+        # ----- State: [0, i, :8]
+        s = proprio_tensor[0, i, :8].tolist()
+        state_list.append(s)
+
+        # ----- Gripper = last element of that state vector
+        gripper_list.append(float(s[-1]))
+
+    # -----------------------
+    # Prepare frames for saving
+    # -----------------------
+    frames = images_tensor[0, :T]  # (T, H, W, 3)
+    frames_uint8 = _to_uint8_frames(frames)
+
+    # -----------------------
+    # Save MP4 video
+    # -----------------------
+    video_path = os.path.join(out_dir, video_name)
+    writer = imageio.get_writer(video_path, fps=fps)
+    for frame in frames_uint8:
+        writer.append_data(frame)
+    writer.close()
+
+    # -----------------------
+    # Save first frame PNG
+    # -----------------------
+    first_image_path = os.path.join(out_dir, "frame_0000.png")
+    Image.fromarray(frames_uint8[0]).save(first_image_path)
+
+    # -----------------------
+    # Build JSON object
+    # -----------------------
+    json_dict = {
+        "task": task,
+        "texts": texts,  # list of strings
+        "videos": [
+            {"video_path": video_path}
+        ],
+        "latent_videos": [],
+        "action": actions_list,
+        "state": state_list,
+        "continuous_gripper_state": gripper_list,
+        "episode_id": str(episode_id),
+    }
+
+    json_path = os.path.join(out_dir, json_name)
+    with open(json_path, "w") as f:
+        json.dump(json_dict, f, indent=4)
+
+    print(f"[✓] Saved JSON → {json_path}")
+    print(f"[✓] Saved MP4  → {video_path}")
+    print(f"[✓] Saved first frame → {first_image_path}")
+
+    return json_dict, json_path, video_path, first_image_path
+
+
 if __name__ == "__main__":
     import os
     import glob
@@ -821,11 +1126,11 @@ if __name__ == "__main__":
         cache=False,
         tfrecords_include_next_observations=False,
         config=config,
-        # task_name= "put both moka pots on the stove" #"put the yellow and white mug in the microwave and close it",
-    )
+        task_name="put both moka pots on the stove", #"put both moka pots on the stove" #"put the yellow and white mug in the microwave and close it",
+        traj_sampling=True,
+        final_step_reward=200.0  )
 
-    iterator = buffer.iterator(batch_size=64)
-
+    iterator = buffer.iterator(batch_size=1)
     print("[INFO] Fetching one batch...\n")
 
     # -------------------------------
@@ -833,10 +1138,11 @@ if __name__ == "__main__":
     #   (Observation, actions)
     # -------------------------------
     output = next(iterator)
-
+    # export_batch_to_json(output=output, task="robot_trajectory_prediction", texts="put both moka pots on the stove",)
+    # exit()
     print("\n========== BATCH STRUCTURE ==========\n")
     print("output keys: ", output.keys())
-    print("prompt: ", output['prompt'])
+    # print("prompt: ", output['prompt'])
 
     # -------------------------
     # Actions
@@ -856,9 +1162,10 @@ if __name__ == "__main__":
     #     print(f"[{cam}] image shape:", img.shape)
     #     print(f"First pixel: {img[0,0,0]}")
     #     break
-    # # first_img = output["image"]["base_0_rgb"][0]    # [224,224,3]
+    first_img = output['observations']['image'][0]    # [224,224,3]
 
-    # # save_image_tensor_as_png(first_img, "first_base_rgb.png")
+    save_image_tensor_as_png(first_img, "first_base_rgb.png")
+    # exit()
     # # -------------------------
     # # State
     # # -------------------------
@@ -903,15 +1210,103 @@ if __name__ == "__main__":
 
     import time
 
-    num_batches = 20
-    start = time.time()
+    # num_batches = 20
+    # start = time.time()
 
-    for _ in range(num_batches):
-        batch = next(iterator)
+    # for _ in range(num_batches):
+    #     batch = next(iterator)
 
-    end = time.time()
+    # end = time.time()
 
-    avg = (end - start) / num_batches
+    # avg = (end - start) / num_batches
 
-    print(f"\n⏱ Average time per batch over {num_batches} batches: {avg:.4f} seconds")
-    print(f"Total time: {end - start:.4f} seconds\n")
+    # print(f"\n⏱ Average time per batch over {num_batches} batches: {avg:.4f} seconds")
+    # print(f"Total time: {end - start:.4f} seconds\n")
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    def to_numpy(x):
+        if x is None:
+            return None
+        if hasattr(x, "numpy"):
+            return x.numpy()
+        return np.asarray(x)
+
+
+    def select_trajectory(x, idx=0):
+        if x is None:
+            return None
+        x = to_numpy(x)
+        if x.ndim == 2:   # (B, T)
+            return x[idx]
+        elif x.ndim == 1: # (T,)
+            return x
+        else:
+            raise ValueError(f"Unexpected shape: {x.shape}")
+
+    rewards = select_trajectory(output.get("rewards", None))
+    mc_returns = select_trajectory(output.get("mc_returns", None))
+    masks = select_trajectory(output.get("masks", None))
+
+
+    print("\n------- REWARD SIGNALS -------")
+    print("\n--MC Return of LAST timestep-- ", None if mc_returns is None else mc_returns[-1])
+    print("\n--Mask of LAST timestep-- ", None if masks is None else masks[-1])
+    print("\n--Reward of LAST timestep-- ", None if rewards is None else rewards[-1])
+
+    if rewards is None:
+        print("No rewards found in output.")
+    else:
+        print("rewards shape:", rewards.shape)
+        print("mc_returns shape:", None if mc_returns is None else mc_returns.shape)
+        print("masks shape:", None if masks is None else masks.shape)
+
+        T = rewards.shape[0]
+        t = np.arange(T)
+
+        fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+
+        # ---- Rewards ----
+        axes[0].plot(t, rewards, label="reward", linewidth=2)
+        axes[0].set_ylabel("Reward")
+        axes[0].set_title("Rewards vs Timestep")
+        axes[0].grid(True)
+
+        # ---- MC Returns ----
+        if mc_returns is not None:
+            axes[1].plot(t, mc_returns, label="mc_return", color="orange", linewidth=2)
+            axes[1].set_ylabel("MC Return")
+            axes[1].set_title("Monte-Carlo Returns vs Timestep")
+            axes[1].grid(True)
+        else:
+            axes[1].set_visible(False)
+
+        # ---- Masks ----
+        if masks is not None:
+            axes[2].step(t, masks, where="post", label="mask", linewidth=2)
+            axes[2].set_ylabel("Mask")
+            axes[2].set_ylim(-0.05, 1.05)
+            axes[2].set_title("Masks vs Timestep")
+            axes[2].grid(True)
+        else:
+            axes[2].set_visible(False)
+
+        axes[-1].set_xlabel("Timestep")
+
+        import os
+        import time
+
+        # Directory to save plots
+        plot_dir = "debug_plots"
+        os.makedirs(plot_dir, exist_ok=True)
+
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        plot_path = os.path.join(plot_dir, f"-1_200_trajectory_rewards_{timestamp}.png")
+
+        plt.tight_layout()
+        plt.savefig(plot_path, dpi=150)
+        plt.close()
+
+        print(f"📈 Saved reward/return/mask plot to: {plot_path}")
+
+
