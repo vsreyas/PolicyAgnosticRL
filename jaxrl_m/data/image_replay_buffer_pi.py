@@ -1116,6 +1116,17 @@ class ImageReplayBufferPi:
             out['diffusion_actions'] = _diffusion_actions_tf
             out['next_vlm_output'] = next_state_vlm_output_tf
             out['next_diffusion_actions'] = next_state_diffusion_actions_tf
+        
+        # If 'terminals' sum is > 0, then add a new key to out called 'success' and set it to 1, otherwise set it to 0 #
+        # Make this the same size as 'terminals' #
+        out['success'] = tf.fill(
+            tf.shape(out['terminals']), 
+            tf.cond(
+                tf.reduce_sum(out['terminals']) > 0,
+                lambda: tf.constant(1, dtype=tf.float32),
+                lambda: tf.constant(0, dtype=tf.float32)
+            )
+        )
 
         # Filter out last `ah` timesteps in all data and keep only `terminal` timestep if it is present #
         if self.filter_last_ah_timesteps:

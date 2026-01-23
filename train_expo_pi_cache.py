@@ -209,7 +209,36 @@ flags.DEFINE_float(
     0.05,
     "Alpha for the reward scaling factor.",
 )
-
+flags.DEFINE_float(
+    "exploration_epsilon",
+    0.05,
+    "Exploration epsilon.",
+)
+flags.DEFINE_bool(
+    "update_critic_flag",
+    True,
+    "Update critic flag.",
+)
+flags.DEFINE_bool(
+    "update_edit_actor_flag",
+    True,
+    "Update edit actor flag.",
+)
+flags.DEFINE_bool(
+    "update_temperature_flag",
+    True,
+    "Update temperature flag.",
+)
+flags.DEFINE_bool(
+    "update_actor_flag",
+    True,
+    "Update actor flag.",
+)
+flags.DEFINE_float(
+    "edit_actor_warmup_flag",
+    1.0,
+    "Edit actor warmup flag.",
+)
 ### Try subprocenv ###
 import multiprocessing as mp
 from multiprocessing.connection import wait
@@ -491,7 +520,8 @@ def train_agent(_):
     assert FLAGS.config.batch_size % num_devices == 0
 
     # Get PI config #
-    pi_config = get_config("pi05_libero_custom_low_mem")
+    # pi_config = get_config("pi05_libero_custom_low_mem")
+    pi_config = get_config("pi05_libero_custom_low_mem_ep5_v2")
     # breakpoint()
     pi_config.fsdp_devices = 1 # Try out with model parallel
     pi_config.exp_name = FLAGS.wandb_experiment_name
@@ -674,6 +704,7 @@ def train_agent(_):
         n_edit_samples=FLAGS.num_edit_samples,
         critic_params=critic_params,
         edit_actor_params=edit_actor_params,
+        exploration_epsilon=FLAGS.exploration_epsilon,
     )
     # breakpoint()
 
@@ -694,7 +725,7 @@ def train_agent(_):
 
 
     # TODO: Remove hardcode and init with flags appropriately #
-    num_trajectories_to_collect = 5
+    num_trajectories_to_collect = 10
     online_env_steps = 0
     online_trajectories_added = 0
     env_recreation_frequency = 1
@@ -909,16 +940,25 @@ def train_agent(_):
             if i < FLAGS.critic_warmup_steps:
                 print("Critic warmup...Updating only critic")
                 # batch = offline_batch
-                # offline_batch = next(offline_train_iterator)
+                offline_batch = next(offline_train_iterator)
                 online_batch = next(online_train_iterator)
-                # batch = concatenate_batches([offline_batch, online_batch])
+                batch = concatenate_batches([offline_batch, online_batch])
                 # batch = offline_batch
-                batch = online_batch
+                # batch = online_batch
                 # breakpoint()
                 # batch = set_batch_masks(
                 #     batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
                 # )
-                agent, info = agent.update(batch, utd_ratio=FLAGS.config.utd_ratio, timer=timer, seed=rng_update, update_only_critic=True)
+                agent, info = agent.update(batch, 
+                    utd_ratio=FLAGS.config.utd_ratio, 
+                    timer=timer, 
+                    seed=rng_update,
+                    update_critic_flag=FLAGS.update_critic_flag,
+                    update_edit_actor_flag=FLAGS.update_edit_actor_flag,
+                    update_temperature_flag=FLAGS.update_temperature_flag,
+                    update_actor_flag=FLAGS.update_actor_flag,
+                    edit_actor_warmup_flag=FLAGS.edit_actor_warmup_flag,
+                )
             else:
                 # try:
                 # Sample a batch from online and do update #
@@ -970,6 +1010,9 @@ def train_agent(_):
                 "batch_stats/rewards_max": np.max(batch["rewards"]),
                 "batch_stats/terminals_mean": np.mean(batch["terminals"]),
                 "batch_stats/truncations_mean": np.mean(batch["truncates"]),
+                "batch_stats/success_mean": np.mean(batch["success"]),
+                "batch_stats/success_min": np.min(batch["success"]),
+                "batch_stats/success_max": np.max(batch["success"]),
             }
             if wandb_logger is not None:
                 wandb_logger.log(batch_stats, step=i)

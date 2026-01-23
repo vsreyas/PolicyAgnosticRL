@@ -73,6 +73,7 @@ flags.DEFINE_string(
 )
 flags.DEFINE_float("reward_scale", 1.0, "Reward scale.")
 flags.DEFINE_float("reward_bias", 0.0, "Reward bias.")
+flags.DEFINE_bool("balance_cache", False, "Balance the cache to include equal number of successful and unsuccessful trajectories.")
 # flags.DEFINE_string(
 #     "save_dir",
 #     None,
@@ -285,8 +286,51 @@ def filter_cache(cache: Dict) -> Dict:
     
     return cache
 
+def _balance_cache(cache: Dict, key: jax.random.PRNGKey) -> Dict:
+    """Balance the cache to include equal number of successful and unsuccessful trajectories.
+        Successful trajectories are those with terminals.sum() == 1 and unsuccessful trajectories are those with terminals.sum() == 0.
+        
+        Args:
+            cache: Dictionary containing the VLM cache
+            
+        Returns:
+            Dictionary containing the balanced VLM cache
+    """
+    df = pd.DataFrame({
+        'episode_id': cache['episode_ids'],
+        'terminals': cache['terminals'],
+    })
+    successful_traj_idx = df[df['terminals'] == True].index.to_list()
+    successful_episode_ids = list(df.iloc[successful_traj_idx]['episode_id'].unique())
+    all_episode_ids = df['episode_id'].unique()
+    failed_episode_ids = list(set(all_episode_ids) - set(successful_episode_ids))
 
-def load_vlm_cache(cache_path: str) -> Dict:
+    if len(successful_episode_ids) < len(failed_episode_ids):
+        failed_episode_ids = jax.random.choice(key, jnp.array(failed_episode_ids), shape=(len(successful_episode_ids),), replace=False)
+        failed_episode_ids = (failed_episode_ids).tolist()
+    elif len(successful_episode_ids) > len(failed_episode_ids):
+        successful_episode_ids = jax.random.choice(key, jnp.array(successful_episode_ids), shape=(len(failed_episode_ids),), replace=False)
+        successful_episode_ids = (successful_episode_ids).tolist()
+    
+    success_indexes_to_keep = df[df['episode_id'].isin(successful_episode_ids)].index.to_list()
+    failed_indexes_to_keep = df[df['episode_id'].isin(failed_episode_ids)].index.to_list()
+    indexes_to_keep = success_indexes_to_keep + failed_indexes_to_keep
+    indexes_to_keep = np.array(indexes_to_keep)
+    
+    # Filter the cache
+    for key in cache.keys():
+        if key == "metadata":
+            continue
+        if type(cache[key]) == dict:
+            for subkey in cache[key].keys():
+                cache[key][subkey] = cache[key][subkey][indexes_to_keep]
+        else:
+            cache[key] = cache[key][indexes_to_keep]
+
+    return cache
+
+
+def load_vlm_cache(cache_path: str, balance_cache: bool, key: jax.random.PRNGKey) -> Dict:
     """Load the VLM action cache from disk.
     
     Args:
@@ -312,6 +356,11 @@ def load_vlm_cache(cache_path: str) -> Dict:
         cache = pickle.load(f)
     
     # cache = filter_cache(cache)
+    # breakpoint()
+
+    if balance_cache:
+        cache = _balance_cache(cache, key)
+    
     # breakpoint()
     
     # Normalize inputs #
@@ -450,7 +499,8 @@ def train_critic(_):
     
     # Load VLM cache
     assert FLAGS.vlm_cache_path is not None, "Must provide --vlm_cache_path"
-    cache, mean_vlm_outputs, std_vlm_outputs = load_vlm_cache(FLAGS.vlm_cache_path)
+    rng, load_vlm_cache_key = jax.random.split(rng)
+    cache, mean_vlm_outputs, std_vlm_outputs = load_vlm_cache(FLAGS.vlm_cache_path, balance_cache=FLAGS.balance_cache, key=load_vlm_cache_key)
     # Each key is (num_data_points, ...) based on corresponding array shapes
     # breakpoint()
     

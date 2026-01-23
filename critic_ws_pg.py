@@ -18,7 +18,7 @@ from jaxrl_m.utils.expo_utils import (
 )
 from jaxrl_m.agents.continuous.expo_pi import compute_q_all
 
-chkpt = pickle.load(open('/home/skowshik/vla/codebase/PolicyAgnosticRL/results_expo_debug-td-clean_v13-scale10_200_actnorm/seed_0/checkpoint_100.pkl', 'rb'))
+chkpt = pickle.load(open('/home/skowshik/vla/codebase/PolicyAgnosticRL/results_expo_debug-td-clean_v13-scale10_200_actnorm/seed_0/checkpoint_4500.pkl', 'rb'))
 critic_params = chkpt['critic_params']
 # breakpoint()
 vlm_cache = pickle.load(open('/home/skowshik/vla/codebase/PolicyAgnosticRL/clean_skip_v1_server_scale10_200_actnorm.pkl', 'rb'))

@@ -395,7 +395,7 @@ def train_agent(_):
     assert FLAGS.config.batch_size % num_devices == 0
 
     # Get PI config #
-    pi_config = get_config("pi05_libero_custom_low_mem")
+    pi_config = get_config("pi05_libero_custom_low_mem_ep5_v2")
     # breakpoint()
     pi_config.fsdp_devices = 1 # Try out with model parallel
     pi_config.exp_name = FLAGS.wandb_experiment_name

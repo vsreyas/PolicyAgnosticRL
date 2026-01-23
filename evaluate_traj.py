@@ -196,6 +196,11 @@ flags.DEFINE_bool(
     False,
     "Use base action only.",
 )
+flags.DEFINE_string(
+    "pi_config_name",
+    "pi05_libero_custom_low_mem_ep5",
+    "Name of the PI config to use.",
+)
 
 # 2: 07 2 13
 BASE_POLICY_TYPE_TO_CLASS = {
@@ -472,7 +477,7 @@ def train_agent(_):
     assert FLAGS.config.batch_size % num_devices == 0
 
     # Get PI config #
-    pi_config = get_config("pi05_libero_custom_low_mem")
+    pi_config = get_config(FLAGS.pi_config_name)
     # breakpoint()
     pi_config.fsdp_devices = 1 # Try out with model parallel
     pi_config.exp_name = FLAGS.wandb_experiment_name
