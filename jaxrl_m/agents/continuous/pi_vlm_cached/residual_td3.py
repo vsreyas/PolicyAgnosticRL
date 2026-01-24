@@ -148,6 +148,7 @@ def _edit_actor_loss_and_grad(
             "bc_loss": bc_loss,
             "q_loss": q_loss,
             "entropy": 0.0,
+            "bc_warmup": bc_warmup,
         }
 
         edit_actions = edit_actions.reshape(-1, 10, 7)
@@ -306,9 +307,9 @@ def _sarsa_loss_and_grad(
         critic_loss = critic_loss_td
 
         metrics = {
-            "critic_loss": critic_loss,
-            "critic_loss_td": critic_loss_td,
-            "critic_loss_mc": critic_loss_mc,
+            "sarsa_critic_loss": critic_loss,
+            "sarsa_critic_loss_td": critic_loss_td,
+            "sarsa_critic_loss_mc": critic_loss_mc,
             "q_mean": qs.mean(),
             "q_std": qs.std(),
             "q_max": qs.max(),
@@ -811,7 +812,7 @@ class PiResidualTD3Cache(Agent):
             self.critic.apply_fn,
             self.temp.apply_fn,
             batch["mc_returns"],
-            batch["success"],
+            batch["success"][:, None],
             bc_warmup,
         )
 

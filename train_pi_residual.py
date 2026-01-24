@@ -69,7 +69,7 @@ from jaxrl_m.utils.timer_utils import Timer
 from jaxrl_m.utils.train_utils import concatenate_batches, load_recorded_video
 from jaxrl_m.vision import encoders
 from jaxrl_m.utils.train_utils import preprocess_action, repack_action
-from jaxrl_m.agents.continuous.expo_pi_cache import ExpoPiLearnerCache, compute_q, compute_q_all
+from jaxrl_m.agents.continuous.pi_vlm_cached.residual_td3 import PiResidualTD3Cache
 from jaxrl_m.utils.expo_utils import calc_mc_return_fn
 from jaxrl_m.envs.libero import StepTimeout, time_limit, STEP_TIME_LIMIT
 
@@ -104,13 +104,6 @@ config_flags.DEFINE_config_file(
     lock_config=False,
 )
 flags.DEFINE_integer("seed", 0, "Random seed.")
-flags.DEFINE_integer("num_offline_epochs", 100, "Number of epochs for pre-training.")
-flags.DEFINE_integer(
-    "num_online_epochs", 500, "Number of epochs for online fine-tuning."
-)
-flags.DEFINE_integer(
-    "num_train_steps_per_offline_epoch", 50, "Number of training steps per epoch."
-)
 flags.DEFINE_float("reward_scale", 1.0, "Reward scale.")
 flags.DEFINE_float("reward_bias", 0.0, "Reward bias.")
 flags.DEFINE_float("clip_action", 200.0, "Clip action.")
@@ -118,14 +111,6 @@ flags.DEFINE_integer("num_parallel_envs", 1, "Number of parallel environments.")
 flags.DEFINE_bool("debug", False, "Debug config")
 flags.DEFINE_string("resume_path", None, "Resume training from checkpoint.")
 flags.DEFINE_integer("max_episode_steps", 1000, "Maximum episode steps.")
-flags.DEFINE_string(
-    "replay_buffer_path", "", "Path to replay buffer to load (Optional)."
-)
-flags.DEFINE_string(
-    "train_on_separate_computer_mode",
-    "single_computer",  # "env_steps_only", "agent_training_only"
-    "Training on separate computer mode.",
-)
 
 # Q-diffusion pre-processing flags
 flags.DEFINE_integer(
@@ -206,7 +191,7 @@ flags.DEFINE_bool(
 )
 flags.DEFINE_float(
     "scale_success_alpha",
-    0.05,
+    -1,
     "Alpha for the reward scaling factor.",
 )
 flags.DEFINE_float(
@@ -224,7 +209,11 @@ flags.DEFINE_integer(
     1000000,
     "Number of training steps.",
 )
-
+flags.DEFINE_float(
+    "intermediate_reward_mul_factor",
+    1.0,
+    "Multiplier for the intermediate reward.",
+)
 
 
 ### Try subprocenv ###
@@ -333,7 +322,7 @@ BASE_POLICY_TYPE_TO_CLASS = {
 devices = jax.local_devices()
 
 def get_policy_fn(
-    agent: ExpoPiLearnerCache,
+    agent: PiResidualTD3Cache,
     rng: jax.random.PRNGKey,
     timer: Timer | None = None,
     deterministic_actions: bool = False,
@@ -355,7 +344,7 @@ def get_policy_fn(
     return policy_fn
 
 def get_vlm_output_fn(
-    agent: ExpoPiLearnerCache,
+    agent: PiResidualTD3Cache,
     rng: jax.random.PRNGKey,
     timer: Timer | None = None,
     debug_mode: bool = False,
@@ -442,48 +431,26 @@ def train_agent(_):
             os.path.abspath(FLAGS.config.save_dir),
         )
         FLAGS.config.wandb_enabled = False
-
-    # breakpoint()
-
-    # Create environment and dataset
-    action_space = None
-    offline_dataset_size = None
-
-    # breakpoint()
-    if FLAGS.scale_success_alpha > 0:
-        alpha = FLAGS.scale_success_alpha
-        scale_success_reward = True
-    else:
-        alpha = 1.0
-        scale_success_reward = False
     
     ####### Dataset and evironment setup ###########
     if FLAGS.environment_name=="libero":
         assert FLAGS.config.image_observations
         from jaxrl_m.envs.libero import (
-            get_libero_config,
-            get_libero_env,
             get_libero_tfrecord_dataset,
         )
 
-        # LOG: Data stored in hf_cache on babel, can access on common path; Loads for example, 'libero_10' path as tf_records #
-        # LOG: `dataset` will store the offline dataset to train on #
-        # Iterates over to yield a dict with bunch of keys which can include observations, actions, rewards, masks, next_observations, etc. #
-        
         if len(FLAGS.config.libero_tfrecord_regexp) > 0:
             dataset = get_libero_tfrecord_dataset(
                 tfrecord_regexp=FLAGS.config.libero_tfrecord_regexp, use_wrist_view=FLAGS.use_wrist_view, 
                 use_language=FLAGS.use_lang, config=pi_config, is_pi=True, **FLAGS.config.dataset_kwargs,
                 task_name=FLAGS.task_name, 
                 final_step_sparse_reward=FLAGS.final_step_sparse_reward,
-                # filter_successful_trajectories=FLAGS.filter_successful_trajectories,
-                # filter_successful_trajectories=False,
-                filter_successful_trajectories=True,
+                filter_successful_trajectories=FLAGS.filter_successful_trajectories,
                 use_reverse_data_paths=False,
-                alpha=2.0,
-                scale_success_reward=True,
-                intermediate_reward_mul_factor=10.0,
-                drop_images_from_output=True, # Do not need it as we are caching things are trajectory generation time #
+                alpha=FLAGS.scale_success_alpha,
+                scale_success_reward=FLAGS.scale_success_alpha > 0,
+                intermediate_reward_mul_factor=FLAGS.intermediate_reward_mul_factor,
+                drop_images_from_output=True, # Do not need it as we are caching things at trajectory generation time #
             )
         else:
             dataset = None
@@ -532,12 +499,15 @@ def train_agent(_):
         if 'edit_actor_params' in params:
             edit_actor_params = params['edit_actor_params']
     
-    # breakpoint()
     
-    agent = ExpoPiLearnerCache.create(
+    # Make sure online buffer does not exist already otherwise this will overwrite it #
+    assert not tf.io.gfile.exists(
+        tf.io.gfile.join(save_dir, "image_replay_buffer", "episode_0.tfrecord")
+    ), f"Image replay buffer already exists! ({tf.io.gfile.join(save_dir, 'image_replay_buffer', 'episode_0.tfrecord')})"
+    
+    agent = PiResidualTD3Cache.create(
         config=pi_config,
         seed=FLAGS.seed,
-        # observations=example_batch,
         batch_size=FLAGS.config.batch_size,
         rng=construct_rng,
         N=FLAGS.num_actions_to_sample,
@@ -573,8 +543,6 @@ def train_agent(_):
     ### Online training ###
     for i in range(FLAGS.num_train_steps):
         online_env_steps_this_epoch = 0
-
-        timer.tick("online_iter_total")
         # logging.info("Switching to online training...")
 
         ### Collect Trajectories ###
@@ -707,9 +675,9 @@ def train_agent(_):
                 final_step_sparse_reward=False, # Use rewards from environment and DO NOT override with sparse 0/1 rewards at final step #
                 filter_successful_trajectories=False, # Whether to use success buffer #
                 use_reverse_data_paths=False,
-                alpha=2.0,
-                scale_success_reward=True,
-                intermediate_reward_mul_factor=10.0,
+                alpha=FLAGS.scale_success_alpha,
+                scale_success_reward=FLAGS.scale_success_alpha > 0,
+                intermediate_reward_mul_factor=FLAGS.intermediate_reward_mul_factor,
                 drop_images_from_output=True,
                 **FLAGS.config.image_replay_buffer_kwargs,
             )
@@ -722,210 +690,212 @@ def train_agent(_):
             )
 
             rng, rng_update = jax.random.split(rng)
-            if i < FLAGS.warmup_steps:
-                print("Warmup")
-                batch = next(offline_train_iterator)
-                agent, info = agent.update(batch, 
-                    utd_ratio=FLAGS.config.utd_ratio, 
-                    timer=timer, 
-                    seed=rng_update,
-                    update_critic=True, 
-                    update_edit_actor=True, 
-                    critic_warmup=True,
-                    edit_actor_warmup=True,
-                )
-            else:
-                # try:
-                # Sample a batch from online and do update #
-                # RLPD style online + offline update #
-                timer.tick("batch_sampling_time")
-                offline_batch = next(offline_train_iterator)
-                online_batch = next(online_train_iterator)
-                timer.tock("batch_sampling_time")
-                
-                timer.tick("concatenate_batches_time")
-                batch = concatenate_batches([offline_batch, online_batch])
-                timer.tock("concatenate_batches_time")
-                agent, info = agent.update(batch, utd_ratio=FLAGS.config.utd_ratio, timer=timer, seed=rng_update)
+        
+        timer.tick("online_iter_total")
+        if i < FLAGS.warmup_steps:
+            print("Warmup")
+            batch = next(offline_train_iterator)
+            agent, info = agent.update(batch, 
+                utd_ratio=FLAGS.config.utd_ratio, 
+                timer=timer, 
+                seed=rng_update,
+                update_critic=True, 
+                update_edit_actor=True, 
+                critic_warmup=True,
+                edit_actor_warmup=True,
+            )
+        else:
+            # try:
+            # Sample a batch from online and do update #
+            # RLPD style online + offline update #
+            timer.tick("batch_sampling_time")
+            offline_batch = next(offline_train_iterator)
+            online_batch = next(online_train_iterator)
+            timer.tock("batch_sampling_time")
             
-            # Log batch statistics #
+            timer.tick("concatenate_batches_time")
+            batch = concatenate_batches([offline_batch, online_batch])
+            timer.tock("concatenate_batches_time")
+            agent, info = agent.update(batch, utd_ratio=FLAGS.config.utd_ratio, timer=timer, seed=rng_update)
+        
+        # Log batch statistics #
+        # breakpoint()
+        batch_stats = {
+            "batch_stats/batch_size": len(batch),
+            "batch_stats/masks_mean": np.mean(batch["masks"]),
+            "batch_stats/mc_returns_mean": np.mean(batch["mc_returns"]),
+            "batch_stats/rewards_mean": np.mean(batch["rewards"]),
+            "batch_stats/rewards_min": np.min(batch["rewards"]),
+            "batch_stats/rewards_max": np.max(batch["rewards"]),
+            "batch_stats/terminals_mean": np.mean(batch["terminals"]),
+            "batch_stats/truncations_mean": np.mean(batch["truncates"]),
+            "batch_stats/success_mean": np.mean(batch["success"]),
+            "batch_stats/success_min": np.min(batch["success"]),
+            "batch_stats/success_max": np.max(batch["success"]),
+        }
+        if wandb_logger is not None:
+            wandb_logger.log(batch_stats, step=i)
+        
+
+        # Log training metrics #
+        if wandb_logger is not None:
+            wandb_logger.log(info, step=i)
+        
+        # breakpoint()
+        
+        timer.tock("online_iter_total")
+        print(timer.get_total_times(reset=True))
+
+        ### Evaluation ###
+        if (
+            (i + 1) % FLAGS.config.eval_interval == 0
+        ) and eval_env is not None:
             # breakpoint()
-            batch_stats = {
-                "batch_stats/batch_size": len(batch),
-                "batch_stats/masks_mean": np.mean(batch["masks"]),
-                "batch_stats/mc_returns_mean": np.mean(batch["mc_returns"]),
-                "batch_stats/rewards_mean": np.mean(batch["rewards"]),
-                "batch_stats/rewards_min": np.min(batch["rewards"]),
-                "batch_stats/rewards_max": np.max(batch["rewards"]),
-                "batch_stats/terminals_mean": np.mean(batch["terminals"]),
-                "batch_stats/truncations_mean": np.mean(batch["truncates"]),
-                "batch_stats/success_mean": np.mean(batch["success"]),
-                "batch_stats/success_min": np.min(batch["success"]),
-                "batch_stats/success_max": np.max(batch["success"]),
-            }
-            if wandb_logger is not None:
-                wandb_logger.log(batch_stats, step=i)
-            
+            """eval"""
+            logging.info("Evaluating...")
+            timer.tick("evaluation/total")
 
-            # Log training metrics #
-            if wandb_logger is not None:
-                wandb_logger.log(info, step=i)
-            
-            # breakpoint()
-            
-            timer.tock("online_iter_total")
-            print(timer.get_total_times(reset=True))
-
-            ### Evaluation ###
-            if (
-                (i + 1) % FLAGS.config.eval_interval == 0
-            ) and eval_env is not None:
-                # breakpoint()
-                """eval"""
-                logging.info("Evaluating...")
-                timer.tick("evaluation/total")
-
-                if FLAGS.config.save_video:
-                    try:
-                        eval_env.start_recording(
-                            FLAGS.config.num_episodes_per_video,
-                            FLAGS.config.num_episodes_per_row,
-                        )
-                    except Exception as e:
-                        pass
-                if FLAGS.config.num_eval_episodes > 0:
-                    print("Evaluating...")
-                    q_vs_mc_returns_vals = None
-                    if "libero" not in FLAGS.environment_name: 
+            if FLAGS.config.save_video:
+                try:
+                    eval_env.start_recording(
+                        FLAGS.config.num_episodes_per_video,
+                        FLAGS.config.num_episodes_per_row,
+                    )
+                except Exception as e:
+                    pass
+            if FLAGS.config.num_eval_episodes > 0:
+                print("Evaluating...")
+                q_vs_mc_returns_vals = None
+                if "libero" not in FLAGS.environment_name: 
+                    trajectories = evaluate_with_trajectories_vectorized(
+                        eval_policy_fn,
+                        eval_env,
+                        FLAGS.config.num_eval_episodes,
+                    )
+                else:
+                    if FLAGS.num_parallel_envs != 1:
                         trajectories = evaluate_with_trajectories_vectorized(
-                            eval_policy_fn,
-                            eval_env,
-                            FLAGS.config.num_eval_episodes,
-                        )
+                        eval_policy_fn,
+                        eval_env,
+                        FLAGS.config.num_eval_episodes,
+                    )
                     else:
-                        if FLAGS.num_parallel_envs != 1:
-                            trajectories = evaluate_with_trajectories_vectorized(
-                            eval_policy_fn,
-                            eval_env,
-                            FLAGS.config.num_eval_episodes,
+                        eval_policy_fn = get_policy_fn(
+                            agent=agent,
+                            rng=eval_policy_fn_key,
+                            timer=timer,
+                            deterministic_actions=True,
                         )
-                        else:
-                            eval_policy_fn = get_policy_fn(
-                                agent=agent,
-                                rng=eval_policy_fn_key,
-                                timer=timer,
-                                deterministic_actions=True,
+
+                        evaluated_trajectories_successfully = False
+                        while not evaluated_trajectories_successfully:
+                            try:
+                                with time_limit(STEP_TIME_LIMIT):
+                                    trajectories, q_vs_mc_returns_vals = evaluate_with_trajectories_libero(
+                                        eval_policy_fn,
+                                        eval_env,
+                                        FLAGS.config.num_eval_episodes,
+                                    )
+                                    evaluated_trajectories_successfully = True
+                                    break
+                            except (StepTimeout, TimeoutError, EOFError, BrokenPipeError) as e:
+                                print(f"Evaluation failed/timed out: {type(e).__name__}: {e}")
+                                eval_env._restart()
+
+                if (FLAGS.environment_name == "calvin" or FLAGS.environment_name =='libero') and FLAGS.config.save_video:
+                    trajectories_to_save = trajectories[
+                        : FLAGS.config.num_episodes_per_video
+                    ]
+                    frames = []
+                    ind_traj = []
+                    for j, traj in enumerate(trajectories_to_save):
+                        trajectory_return = 0
+                        for transition, reward in zip(
+                            traj["observation"], traj["reward"]
+                        ):
+                            assert transition["image"].shape[-1] == 3
+                            if len(transition["image"].shape) == 4:
+                                transition["image"] = transition["image"][0]
+                            image = transition["image"]  # .transpose(2, 0, 1)
+                            # Add text for reward and return so far
+                            trajectory_return += reward
+                            # image = np.flipud(image)
+                            image = np.ascontiguousarray(image) 
+                            frame = cv2.putText(
+                                image,
+                                f"reward: {reward}. return: {trajectory_return}",
+                                (10, 10),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.3,
+                                (0, 0, 0),
+                                1,
                             )
-
-                            evaluated_trajectories_successfully = False
-                            while not evaluated_trajectories_successfully:
-                                try:
-                                    with time_limit(STEP_TIME_LIMIT):
-                                        trajectories, q_vs_mc_returns_vals = evaluate_with_trajectories_libero(
-                                            eval_policy_fn,
-                                            eval_env,
-                                            FLAGS.config.num_eval_episodes,
-                                        )
-                                        evaluated_trajectories_successfully = True
-                                        break
-                                except (StepTimeout, TimeoutError, EOFError, BrokenPipeError) as e:
-                                    print(f"Evaluation failed/timed out: {type(e).__name__}: {e}")
-                                    eval_env._restart()
-
-                    if (FLAGS.environment_name == "calvin" or FLAGS.environment_name =='libero') and FLAGS.config.save_video:
-                        trajectories_to_save = trajectories[
-                            : FLAGS.config.num_episodes_per_video
-                        ]
-                        frames = []
-                        ind_traj = []
-                        for j, traj in enumerate(trajectories_to_save):
-                            trajectory_return = 0
-                            for transition, reward in zip(
-                                traj["observation"], traj["reward"]
-                            ):
-                                assert transition["image"].shape[-1] == 3
-                                if len(transition["image"].shape) == 4:
-                                    transition["image"] = transition["image"][0]
-                                image = transition["image"]  # .transpose(2, 0, 1)
-                                # Add text for reward and return so far
-                                trajectory_return += reward
-                                # image = np.flipud(image)
-                                image = np.ascontiguousarray(image) 
-                                frame = cv2.putText(
-                                    image,
-                                    f"reward: {reward}. return: {trajectory_return}",
-                                    (10, 10),
-                                    cv2.FONT_HERSHEY_SIMPLEX,
-                                    0.3,
-                                    (0, 0, 0),
-                                    1,
-                                )
-                                ind_traj.append(frame)
-                                frame = frame.transpose(2, 0, 1)
-                                frames.append(frame)
-                            
-                            save_rollout_gif(ind_traj, save_dir, step_i=i, rollout_j=j)
-                            ind_traj = []
+                            ind_traj.append(frame)
+                            frame = frame.transpose(2, 0, 1)
+                            frames.append(frame)
                         
-                        del ind_traj, frames
-                        import gc; gc.collect()
-
-                    eval_metrics = {
-                        "eval/average_return": np.mean(
-                            [np.sum(t["reward"]) for t in trajectories]
-                        ),
-                        "eval/average_episode_length": np.mean(
-                            [len(t["reward"]) for t in trajectories]
-                        ),
-                        **(
-                            {
-                                "eval/average_normalized_return": np.mean(
-                                    [
-                                        eval_env.get_normalized_score(np.sum(t["reward"]))
-                                        for t in trajectories
-                                    ]
-                                ),
-                                "eval/min_normalized_return": np.min(
-                                    [
-                                        eval_env.get_normalized_score(np.sum(t["reward"]))
-                                        for t in trajectories
-                                    ]
-                                ),
-                                "eval/max_normalized_return": np.max(
-                                    [
-                                        eval_env.get_normalized_score(np.sum(t["reward"]))
-                                        for t in trajectories
-                                    ]
-                                ),
-                            }
-                            if hasattr(eval_env, "get_normalized_score")
-                            else {}
-                        ),
-                        "eval/average_max_reward": np.mean(
-                            [np.max(t["reward"]) for t in trajectories]
-                        ),
-                    }
-
-                    if wandb_logger is not None:
-                        wandb_logger.log(eval_metrics, step=i)
+                        save_rollout_gif(ind_traj, save_dir, step_i=i, rollout_j=j)
+                        ind_traj = []
                     
-                    del trajectories
+                    del ind_traj, frames
                     import gc; gc.collect()
-                timer.tock("evaluation/total")
 
-            if i % save_interval == 0:
-                if FLAGS.config.save_dir:
-                    os.makedirs(FLAGS.config.save_dir, exist_ok=True)
-                    final_checkpoint_path = os.path.join(FLAGS.config.save_dir, f"checkpoint_{i}.pkl")
-                    logging.info(f"Saving final checkpoint to {final_checkpoint_path}")
-                    with open(final_checkpoint_path, 'wb') as f:
-                        pickle.dump({
-                            'critic_params': agent.critic.params,
-                            'target_critic_params': agent.target_critic.params,
-                            'edit_actor_params': agent.edit_actor.params,
-                            'temp_params': agent.temp.params,
-                            'step': i,
-                        }, f)
+                eval_metrics = {
+                    "eval/average_return": np.mean(
+                        [np.sum(t["reward"]) for t in trajectories]
+                    ),
+                    "eval/average_episode_length": np.mean(
+                        [len(t["reward"]) for t in trajectories]
+                    ),
+                    **(
+                        {
+                            "eval/average_normalized_return": np.mean(
+                                [
+                                    eval_env.get_normalized_score(np.sum(t["reward"]))
+                                    for t in trajectories
+                                ]
+                            ),
+                            "eval/min_normalized_return": np.min(
+                                [
+                                    eval_env.get_normalized_score(np.sum(t["reward"]))
+                                    for t in trajectories
+                                ]
+                            ),
+                            "eval/max_normalized_return": np.max(
+                                [
+                                    eval_env.get_normalized_score(np.sum(t["reward"]))
+                                    for t in trajectories
+                                ]
+                            ),
+                        }
+                        if hasattr(eval_env, "get_normalized_score")
+                        else {}
+                    ),
+                    "eval/average_max_reward": np.mean(
+                        [np.max(t["reward"]) for t in trajectories]
+                    ),
+                }
+
+                if wandb_logger is not None:
+                    wandb_logger.log(eval_metrics, step=i)
+                
+                del trajectories
+                import gc; gc.collect()
+            timer.tock("evaluation/total")
+
+        if i % save_interval == 0:
+            if FLAGS.config.save_dir:
+                os.makedirs(FLAGS.config.save_dir, exist_ok=True)
+                final_checkpoint_path = os.path.join(FLAGS.config.save_dir, f"checkpoint_{i}.pkl")
+                logging.info(f"Saving final checkpoint to {final_checkpoint_path}")
+                with open(final_checkpoint_path, 'wb') as f:
+                    pickle.dump({
+                        'critic_params': agent.critic.params,
+                        'target_critic_params': agent.target_critic.params,
+                        'edit_actor_params': agent.edit_actor.params,
+                        'temp_params': agent.temp.params,
+                        'step': i,
+                    }, f)
 
 if __name__ == "__main__":
     app.run(train_agent)

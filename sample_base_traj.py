@@ -6,64 +6,33 @@ soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
 resource.setrlimit(resource.RLIMIT_NOFILE, (min(65535, hard), hard))
 
 import os
-import time
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Callable
 
-import cv2
-import flax
-import gym
 import jax
 import jax.numpy as jnp
 import numpy as np
-import seaborn as sns
 import tensorflow as tf
-import io
-from PIL import Image
 import pickle
+from absl import app, flags
 
-import wandb
-from absl import app, flags, logging
-from matplotlib import pyplot as plt
 from ml_collections import config_flags
-from tqdm import tqdm
 import functools
 
 from jaxrl_m.agents import agents
-from jaxrl_m.agents.continuous.action_optimization import (
-    LocalOptimizationState,
-    action_optimization_sample_actions,
-    add_base_policy_actions_to_batch,
-    local_optimization_steps as take_local_optimization_steps,
-)
 from jaxrl_m.agents.continuous.auto_regressive_transformer import (
     AutoRegressiveTransformerAgent,
 )
-from jaxrl_m.agents.continuous.base_policy import BasePolicy, BasePolicyTypes
+from jaxrl_m.agents.continuous.base_policy import BasePolicyTypes
 from jaxrl_m.agents.continuous.ddpm_bc import DDPMBCAgent
 from jaxrl_m.agents.continuous.openvla import OpenVLAAgent
 from jaxrl_m.agents.continuous.pi_0 import PiPolicy
-from jaxrl_m.common.common import JaxRLTrainState
-from jaxrl_m.common.evaluation import evaluate_with_trajectories_vectorized, supply_rng, evaluate_with_trajectories_libero, save_rollout_gif
-from jaxrl_m.common.traj import TrajSampler, calc_return_to_go
-from jaxrl_m.common.typing import Batch, Data
-from jaxrl_m.common.wandb import WandBLogger
-from jaxrl_m.data.bridge_dataset import (
-    BridgeDataset,
-    get_task_to_initial_eep,
-    glob_to_path_list,
-)
+from jaxrl_m.common.evaluation import supply_rng
+from jaxrl_m.common.traj import TrajSampler
+from jaxrl_m.common.typing import Data
 from jaxrl_m.data.image_replay_buffer_pi import (
-    ImageReplayBufferPi,
     save_trajectory_as_tfrecord,
 )
-from jaxrl_m.data.replay_buffer import ReplayBuffer
-# D4RL is not needed for Libero EXPO; keep optional to avoid Mujoco dependency errors.
-# from jaxrl_m.envs.d4rl import TruncationWrapper, get_d4rl_dataset_with_mc_calculation
 from jaxrl_m.utils.timer_utils import Timer
-from jaxrl_m.utils.train_utils import concatenate_batches, load_recorded_video
-from jaxrl_m.vision import encoders
-from jaxrl_m.utils.train_utils import preprocess_action, repack_action
-# from jaxrl_m.agents.continuous.expo_pi_cache import ExpoPiLearnerCache
 from jaxrl_m.agents.continuous.pi_vlm_cached.residual_td3 import PiResidualTD3Cache
 from jaxrl_m.utils.expo_utils import calc_mc_return_fn
 
@@ -353,14 +322,13 @@ def train_agent(_):
     if action_space is None:
         action_space = train_env.action_space
     assert action_space.high.ndim == 1, action_space.shape
-    # Create replay buffer
-    # LOG: Libero comes under this for now #
-    if FLAGS.config.image_observations:
-        # tf.io.gfile.makedirs(tf.io.gfile.join(save_dir, "image_replay_buffer"))
-        assert not tf.io.gfile.exists(
+
+    if not tf.io.gfile.exists(
             tf.io.gfile.join(save_dir, "image_replay_buffer", "episode_0.tfrecord")
-        ), f"Image replay buffer already exists! ({tf.io.gfile.join(save_dir, 'image_replay_buffer', 'episode_0.tfrecord')})"
-        state_replay_buffer = None
+        ):
+        tf.io.gfile.makedirs(tf.io.gfile.join(save_dir, "image_replay_buffer"))
+    
+    state_replay_buffer = None
 
     rng = jax.random.PRNGKey(FLAGS.seed)
     #########################################################
@@ -407,18 +375,9 @@ def train_agent(_):
 
     # TODO: Remove hardcode and init with flags appropriately #
     num_trajectories_to_collect = FLAGS.num_trajectories_to_collect
-    online_env_steps = 0
-    online_trajectories_added = 0
-    online_env_steps_this_epoch = 0
+    online_trajectories_in_buffer = len(os.listdir(os.path.join(save_dir, "image_replay_buffer")))
 
-    ### EXPO agent training ###
-    ### Online training ###
     for i in range(1):
-        # timer.tick("online_iter_total")
-        # logging.info("Switching to online training...")
-        # If we are warmping up critic, use only base policy actions directly to collect trajectories #
-        # This way the critic will be updated on reliable data #
-        debug_mode = True
 
         ### Collect Trajectories ###
         if i % FLAGS.online_trajectory_collection_frequency == 0:
@@ -474,11 +433,10 @@ def train_agent(_):
                         path=tf.io.gfile.join(
                             save_dir,
                             "image_replay_buffer",
-                            f"episode_{online_trajectories_added}.tfrecord",
+                            f"episode_{online_trajectories_in_buffer}.tfrecord",
                         ),
                     )
-                online_trajectories_added += 1
-                online_env_steps_this_epoch += len(traj["rewards"])
+                online_trajectories_in_buffer += 1
 
 if __name__ == "__main__":
     app.run(train_agent)

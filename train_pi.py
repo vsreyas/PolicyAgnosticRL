@@ -761,9 +761,9 @@ def train_agent(_):
     if FLAGS.config.image_observations:
         # tf.io.gfile.makedirs(tf.io.gfile.join(save_dir, "image_replay_buffer"))
         # if FLAGS.train_on_separate_computer_mode != "agent_training_only":
-        #     assert not tf.io.gfile.exists(
-        #         tf.io.gfile.join(save_dir, "image_replay_buffer", "episode_0.tfrecord")
-        #     ), f"Image replay buffer already exists! ({tf.io.gfile.join(save_dir, 'image_replay_buffer', 'episode_0.tfrecord')})"
+            # assert not tf.io.gfile.exists(
+            #     tf.io.gfile.join(save_dir, "image_replay_buffer", "episode_0.tfrecord")
+            # ), f"Image replay buffer already exists! ({tf.io.gfile.join(save_dir, 'image_replay_buffer', 'episode_0.tfrecord')})"
         image_replay_buffer = None  # Will be created when switching to online training.
         state_replay_buffer = None
     else:
