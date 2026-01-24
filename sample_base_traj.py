@@ -321,7 +321,7 @@ def train_agent(_):
     pi_config = get_config(FLAGS.pi_config_name)
     # breakpoint()
     pi_config.fsdp_devices = 1 # Try out with model parallel
-    pi_config.exp_name = FLAGS.wandb_experiment_name
+    pi_config.exp_name = "sample_base_traj"
     pi_config.overwrite = True
 
     wandb_logger = None

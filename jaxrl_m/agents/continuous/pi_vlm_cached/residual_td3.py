@@ -178,7 +178,7 @@ def _edit_actor_loss_and_grad(
     return edit_actor, grads, metrics
 
 
-@partial(jax.jit, static_argnames=("critic_apply_fn", "edit_actor_apply_fn", "target_critic_apply_fn", "q_clip_low", "q_clip_high", "tau"))
+@partial(jax.jit, static_argnames=("critic_apply_fn", "edit_actor_apply_fn", "target_critic_apply_fn", "tau"))
 def _critic_loss_and_grad(
     critic_params,
     target_critic_params,
@@ -263,7 +263,7 @@ def _critic_loss_and_grad(
     return critic, target_critic_params, grads, metrics
 
 
-@partial(jax.jit, static_argnames=("critic_apply_fn", "edit_actor_apply_fn", "target_critic_apply_fn", "q_clip_low", "q_clip_high", "tau"))
+@partial(jax.jit, static_argnames=("critic_apply_fn", "target_critic_apply_fn", "tau"))
 def _sarsa_loss_and_grad(
     critic_params,
     target_critic_params,

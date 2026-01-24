@@ -17,7 +17,8 @@ from configs.base_config import (
     BASE_PARL_CALQL_CONFIG,
     BASE_PI_CONFIG,
     BASE_PARL_CALQL_CONFIG_Pi0,
-    BASE_EXPO_CONFIG
+    BASE_EXPO_CONFIG,
+    BASE_RESIDUAL_TD3_CONFIG,
 )
 
 SAVE_DIR_PREFIX = os.environ.get("SAVE_DIR_PREFIX", "./")
@@ -192,6 +193,10 @@ def get_config(config_string):
     expo_config = deepcopy(BASE_EXPO_CONFIG)
     expo_config["agent_kwargs"]["batch_size"] = 256
     expo_config["image_replay_buffer_kwargs"] = dict()
+
+    pi_residual_td3_config = deepcopy(BASE_RESIDUAL_TD3_CONFIG)
+    pi_residual_td3_config["agent_kwargs"]["batch_size"] = 256
+    pi_residual_td3_config["image_replay_buffer_kwargs"] = dict()
     ###############
 
 
@@ -203,6 +208,7 @@ def get_config(config_string):
         "pi0": ml_collections.ConfigDict(pi_config),
         "parl_calql_pi0": ml_collections.ConfigDict(parl_calql_config_pi0),
         "expo": ml_collections.ConfigDict(expo_config),
+        "pi_residual_td3": ml_collections.ConfigDict(pi_residual_td3_config),
     }
 
     return possible_structures[config_string]
