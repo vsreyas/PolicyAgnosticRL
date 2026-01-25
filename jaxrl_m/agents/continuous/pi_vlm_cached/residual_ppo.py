@@ -189,38 +189,49 @@ def _edit_actor_loss_and_grad(
     return edit_actor, grads, metrics
 
 
-@partial(jax.jit, static_argnames=("critic_apply_fn",))
+@partial(jax.jit, static_argnames=("critic_apply_fn", "tau"))
 def _critic_loss_and_grad(
     critic_params,
+    target_critic_params,
     vlm_output,
     returns,
     key,
     critic_apply_fn,
     critic,
+    tau,
 ):
     """Single jitted step for critic: forward + loss + grad."""
 
     def loss_fn(critic_params):
-        value = critic_apply_fn(
+        values = critic_apply_fn(
             {"params": critic_params},
             vlm_output,
             False,
             rngs={"dropout": key},
-        )[0]
+        )
 
-        critic_loss = optax.losses.huber_loss(value, returns).mean()
+        critic_loss = optax.losses.huber_loss(values, returns).mean()
 
         metrics = {
             "critic_loss": critic_loss,
-            "value_mean": value.mean(),
-            "value_std": value.std(),
-            "value_max": value.max(),
-            "value_min": value.min(),
+            "value_mean": values.mean(),
+            "value_std": values.std(),
+            "value_max": values.max(),
+            "value_min": values.min(),
             "returns_mean": returns.mean(),
             "returns_std": returns.std(),
             "returns_max": returns.max(),
             "returns_min": returns.min(),
         }
+
+        # Add per-ensemble metrics
+        num_heads = values.shape[0]
+        for i in range(num_heads):
+            vi = values[i]
+            metrics[f"v{i+1}_mean"] = vi.mean()
+            metrics[f"v{i+1}_std"] = vi.std()
+            metrics[f"v{i+1}_max"] = vi.max()
+            metrics[f"v{i+1}_min"] = vi.min()
 
         return critic_loss, metrics
 
@@ -228,12 +239,19 @@ def _critic_loss_and_grad(
         loss_fn, has_aux=True
     )(critic_params)
     critic = critic.apply_gradients(grads=grads)
-    return critic, grads, metrics
+
+    # Update target critic with soft update
+    target_critic_params = optax.incremental_update(
+        critic.params, target_critic_params, tau
+    )
+
+    return critic, target_critic_params, grads, metrics
 
 
-@partial(jax.jit, static_argnames=("critic_apply_fn"))
+@partial(jax.jit, static_argnames=("critic_apply_fn", "target_critic_apply_fn", "tau"))
 def _critic_td_loss_and_grad(
     critic_params,
+    target_critic_params,
     vlm_output,
     rewards,
     key,
@@ -243,6 +261,9 @@ def _critic_td_loss_and_grad(
     discount,
     critic,
     mc_returns,
+    target_critic_apply_fn,
+    tau,
+    target_params,
 ):
     """Single jitted step for critic: forward + loss + grad."""
     def loss_fn(critic_params):
@@ -251,18 +272,22 @@ def _critic_td_loss_and_grad(
             vlm_output,
             False,
             rngs={"dropout": key},
-        )[0]
+        )
 
-        values_next_state = critic_apply_fn(
-            {"params": critic_params},
+        # Use target critic for next state values
+        values_next_state = target_critic_apply_fn(
+            {"params": target_params},
             next_vlm_output,
             False,
-            rngs={"dropout": key},
-        )[0]
+        )
+        # Take mean across ensemble for target
+        values_next_state = values_next_state.mean(axis=0)
 
         masks = 1.0 - terminals
         target_v = rewards + discount * masks * values_next_state
         target_v = jax.lax.stop_gradient(target_v)
+
+        # Compute loss for each ensemble member
         critic_loss = optax.losses.huber_loss(values, target_v).mean()
         critic_loss_mc = ((values - mc_returns) ** 2).mean()
 
@@ -279,13 +304,28 @@ def _critic_td_loss_and_grad(
             "target_v_min": target_v.min(),
         }
 
+        # Add per-ensemble metrics
+        num_heads = values.shape[0]
+        for i in range(num_heads):
+            vi = values[i]
+            metrics[f"v{i+1}_mean"] = vi.mean()
+            metrics[f"v{i+1}_std"] = vi.std()
+            metrics[f"v{i+1}_max"] = vi.max()
+            metrics[f"v{i+1}_min"] = vi.min()
+
         return critic_loss, metrics
 
     (loss, metrics), grads = jax.value_and_grad(
         loss_fn, has_aux=True
     )(critic_params)
     critic = critic.apply_gradients(grads=grads)
-    return critic, grads, metrics
+
+    # Update target critic with soft update
+    target_critic_params = optax.incremental_update(
+        critic.params, target_critic_params, tau
+    )
+
+    return critic, target_critic_params, grads, metrics
 
 
 @partial(jax.jit, static_argnames="apply_fn")
@@ -302,6 +342,7 @@ class PiResidualPPOCache(Agent):
     """
     actor: PiPolicy
     critic: TrainState
+    target_critic: TrainState
     edit_actor: TrainState
     temp: TrainState
     action_dim: int = struct.field(pytree_node=False)
@@ -345,8 +386,8 @@ class PiResidualPPOCache(Agent):
         hidden_dims: Sequence[int] = (512, 512, 512, 512),
         discount: float = 0.99,
         tau: float = 0.005,
-        num_qs: int = 1,
-        num_min_qs: Optional[int] = None,
+        num_qs: int = 10,
+        num_min_qs: Optional[int] = 2,
         critic_dropout_rate: Optional[float] = None,
         critic_weight_decay: Optional[float] = None,
         critic_layer_norm: bool = True,
@@ -410,10 +451,11 @@ class PiResidualPPOCache(Agent):
         
         # Load params if `params_path` is provided #
         critic_params = None
+        target_critic_params = None
         edit_actor_params = None
         temp_params = None
         if params_path is not None:
-            critic_params, edit_actor_params, temp_params = load_checkpoint(params_path)
+            critic_params, target_critic_params, edit_actor_params, temp_params = load_checkpoint(params_path)
 
         # Init edit actor #
         # Edit actor for now will take in pi0 VLM output hidden states, predicted base actions, concatenate them and compute residual action
@@ -486,6 +528,16 @@ class PiResidualPPOCache(Agent):
             tx=tx,
         )
 
+        # Create target critic with same architecture
+        target_critic_def = Ensemble(critic_cls, num=num_min_qs or num_qs)
+        # Use target_critic_params if loaded, otherwise use critic_params
+        target_critic_init_params = target_critic_params if target_critic_params is not None else critic_params
+        target_critic = TrainState.create(
+            apply_fn=target_critic_def.apply,
+            params=target_critic_init_params,
+            tx=optax.GradientTransformation(lambda _: None, lambda _: None),
+        )
+
         temp_def = Temperature(init_temperature)
 
         if temp_params is None:
@@ -511,6 +563,7 @@ class PiResidualPPOCache(Agent):
             rng=rng,
             actor=actor,
             critic=critic,
+            target_critic=target_critic,
             edit_actor=edit_actor,
             action_dim=action_dim,
             action_horizon=action_horizon,
@@ -765,8 +818,15 @@ class PiResidualPPOCache(Agent):
         rng1, rng = jax.random.split(rng)
 
         if critic_warmup:
-            critic, grads, info = _critic_td_loss_and_grad(
+            # Subsample target ensemble
+            subsample_rng, rng = jax.random.split(rng)
+            target_params = subsample_ensemble(
+                subsample_rng, self.target_critic.params, self.num_min_qs, self.num_qs
+            )
+
+            critic, target_critic_params, grads, info = _critic_td_loss_and_grad(
                 self.critic.params,
+                self.target_critic.params,
                 current_vlm_output,
                 batch["rewards"],
                 rng1,
@@ -776,18 +836,28 @@ class PiResidualPPOCache(Agent):
                 self.discount,
                 self.critic,
                 batch["mc_returns"],
+                self.target_critic.apply_fn,
+                self.tau,
+                target_params,
             )
+
+            target_critic = self.target_critic.replace(params=target_critic_params)
 
         else:
             current_returns = batch['returns_tf_from_adv']
-            critic, grads, info = _critic_loss_and_grad(
+            critic, target_critic_params, grads, info = _critic_loss_and_grad(
                 self.critic.params,
+                self.target_critic.params,
                 current_vlm_output,
                 current_returns,
                 rng1,
                 self.critic.apply_fn,
                 self.critic,
+                self.tau,
             )
+
+            target_critic = self.target_critic.replace(params=target_critic_params)
+
         timer.tock("critic_loss_and_grad_time")
 
         timer.tick("apply_gradients_time")
@@ -795,8 +865,9 @@ class PiResidualPPOCache(Agent):
         timer.tock("apply_gradients_time")
 
         info["critic_param_norm"] = optax.global_norm(critic.params)
+        info["target_critic_param_norm"] = optax.global_norm(target_critic.params)
 
-        return self.replace(critic=critic, rng=rng), info
+        return self.replace(critic=critic, target_critic=target_critic, rng=rng), info
 
     def preproess_batch(self, batch: Batch, *args, **kwargs) -> Batch:
         action_dim = self.action_dim // self.action_horizon
@@ -877,6 +948,7 @@ class PiResidualPPOCache(Agent):
     def save_checkpoint(self, path: str, step: int):
         checkpoint = {
             'critic_params': self.critic.params,
+            'target_critic_params': self.target_critic.params,
             'edit_actor_params': self.edit_actor.params,
             'temp_params': self.temp.params,
             'step': step,
@@ -885,12 +957,17 @@ class PiResidualPPOCache(Agent):
         with open(path, 'wb') as f:
             pickle.dump(checkpoint, f)
         logging.info(f"Saved checkpoint to {path}")
-    
+
 def load_checkpoint(path: str):
     checkpoint = pickle.load(open(path, 'rb'))
     critic_params = checkpoint['critic_params']
+    target_critic_params = checkpoint.get('target_critic_params', None)
     edit_actor_params = checkpoint['edit_actor_params']
     temp_params = checkpoint['temp_params']
-    
-    return critic_params, edit_actor_params, temp_params
+
+    # If target_critic_params not in checkpoint (old checkpoint), use critic_params
+    if target_critic_params is None:
+        target_critic_params = critic_params
+
+    return critic_params, target_critic_params, edit_actor_params, temp_params
 

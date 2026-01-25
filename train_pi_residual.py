@@ -554,14 +554,14 @@ def train_agent(_):
     ### Create EXPO agent #
     rng, construct_rng = jax.random.split(rng)
     
-    critic_params = None
-    edit_actor_params = None
-    if FLAGS.params_path is not None:
-        params = pickle.load(open(FLAGS.params_path, 'rb'))
-        if 'critic_params' in params:
-            critic_params = params['critic_params']
-        if 'edit_actor_params' in params:
-            edit_actor_params = params['edit_actor_params']
+    # critic_params = None
+    # edit_actor_params = None
+    # if FLAGS.params_path is not None:
+    #     params = pickle.load(open(FLAGS.params_path, 'rb'))
+    #     if 'critic_params' in params:
+    #         critic_params = params['critic_params']
+    #     if 'edit_actor_params' in params:
+    #         edit_actor_params = params['edit_actor_params']
     
     
     # Make sure online buffer does not exist already otherwise this will overwrite it #
@@ -587,8 +587,7 @@ def train_agent(_):
         rng=construct_rng,
         N=FLAGS.num_actions_to_sample,
         n_edit_samples=FLAGS.num_edit_samples,
-        critic_params=critic_params,
-        edit_actor_params=edit_actor_params,
+        params_path=FLAGS.params_path,
         exploration_epsilon=FLAGS.exploration_epsilon,
     )
     # breakpoint()
@@ -765,7 +764,10 @@ def train_agent(_):
         timer.tick("online_iter_total")
         if i < FLAGS.warmup_steps:
             print("Warmup")
+            timer.tick("sample_batch_time")
             batch = next(offline_train_iterator)
+            timer.tock("sample_batch_time")
+            # breakpoint()
             # debug_batch = next(online_train_iterator)
             # breakpoint()
             agent, info = agent.update(batch, 

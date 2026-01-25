@@ -343,21 +343,15 @@ class ImageReplayBufferPi:
             ds = ds.unbatch()   # windows become elements here
             return ds
 
-        # dataset = files.interleave(
-        #     per_file,
-        #     cycle_length=tf.data.AUTOTUNE,
-        #     num_parallel_calls=tf.data.AUTOTUNE,
-        #     deterministic=not self.is_train,
-        # )
-        dataset = files.flat_map(
+        dataset = files.interleave(
             per_file,
-            # cycle_length=tf.data.AUTOTUNE,
-            # num_parallel_calls=tf.data.AUTOTUNE,
-            # deterministic=not self.is_train,
+            cycle_length=tf.data.AUTOTUNE,
+            num_parallel_calls=tf.data.AUTOTUNE,
+            deterministic=not self.is_train,
         )
         
         if self.is_train:
-            dataset = dataset.shuffle(2048, seed=seed, reshuffle_each_iteration=True)
+            dataset = dataset.shuffle(512, seed=seed, reshuffle_each_iteration=True)
             dataset = dataset.repeat()
 
         # yields raw serialized examples
