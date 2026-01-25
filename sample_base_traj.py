@@ -403,10 +403,13 @@ def train_agent(_):
             q_vs_mc_returns_vals = []
             for traj_index in range(num_trajectories_to_collect):
                 print("Traj Index: ", traj_index)
+                fns_dict = {
+                    "policy_fn": env_data_collection_policy_fn,
+                    "vlm_output_fn": vlm_output_fn,
+                }
                 timer.tick("trajectory_sampling_time")
                 trajs, _q_vs_mc_returns_vals = data_collection_trajectory_sampler.sample(
-                    env_data_collection_policy_fn,
-                    vlm_output_fn,
+                    fns_dict=fns_dict,
                     num_episodes=1,
                     replay_buffer=state_replay_buffer,
                     calc_mc_return_fn=functools.partial(calc_mc_return_fn, discount=FLAGS.config.agent_kwargs.discount, reward_bias=FLAGS.reward_bias),

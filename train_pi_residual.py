@@ -416,8 +416,7 @@ def balance_offline_training_data(offline_dset_paths):
                 success_trajectories.append(path)
             else:
                 failed_trajectories.append(path)
-
-    # breakpoint()
+    
     # Downsample the more frequent trajectories among success/failed ones.
     if len(success_trajectories) > len(failed_trajectories):
         success_trajectories = np.random.choice(success_trajectories, size=len(failed_trajectories), replace=False)
@@ -472,6 +471,7 @@ def train_agent(_):
             wandb_config=wandb_config,
             variant=FLAGS.config.to_dict(),
             debug=FLAGS.debug,
+            allow_val_change=True,
         )
         save_dir = tf.io.gfile.join(
             (
@@ -610,11 +610,7 @@ def train_agent(_):
     num_trajectories_to_collect = FLAGS.num_trajectories_to_collect
     online_env_steps = 0
     online_trajectories_added = 0
-    save_interval = 1000
 
-    # breakpoint()
-
-    ### EXPO agent training ###
     ### Online training ###
     for i in range(FLAGS.num_train_steps):
         online_env_steps_this_epoch = 0
@@ -961,7 +957,7 @@ def train_agent(_):
                 import gc; gc.collect()
             timer.tock("evaluation/total")
 
-        if i % save_interval == 0:
+        if i % FLAGS.config.save_interval == 0:
             if FLAGS.config.save_dir:
                 os.makedirs(FLAGS.config.save_dir, exist_ok=True)
                 final_checkpoint_path = os.path.join(FLAGS.config.save_dir, f"checkpoint_{i}.pkl")

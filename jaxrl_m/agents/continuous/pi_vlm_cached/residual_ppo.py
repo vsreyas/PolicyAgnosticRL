@@ -350,8 +350,7 @@ class PiResidualPPOCache(Agent):
         critic_dropout_rate: Optional[float] = None,
         critic_weight_decay: Optional[float] = None,
         critic_layer_norm: bool = True,
-        critic_params: Optional[at.Params] = None,
-        edit_actor_params: Optional[at.Params] = None,
+        params_path: Optional[str] = None,
         target_entropy: Optional[float] = None,
         entropy_scale: float = 1.0,
         init_temperature: float = 1.0,
@@ -408,6 +407,13 @@ class PiResidualPPOCache(Agent):
 
         if decay_steps is not None:
             actor_lr = optax.cosine_decay_schedule(actor_lr, decay_steps)
+        
+        # Load params if `params_path` is provided #
+        critic_params = None
+        edit_actor_params = None
+        temp_params = None
+        if params_path is not None:
+            critic_params, edit_actor_params, temp_params = load_checkpoint(params_path)
 
         # Init edit actor #
         # Edit actor for now will take in pi0 VLM output hidden states, predicted base actions, concatenate them and compute residual action
@@ -417,10 +423,6 @@ class PiResidualPPOCache(Agent):
             (batch_size, pi0_hidden_dims + state_dim))
         # For initializing the critic
         dummy_actions = jnp.ones((batch_size, action_dim))
-        # edit_actor_base_cls = partial(
-        #     ResidualActor, hidden_dims=hidden_dims, dropout_rate=None, activate_final=True, use_pnorm=use_pnorm, use_layer_norm=True,
-        # )
-        # edit_actor_def = TanhNormal(edit_actor_base_cls, action_dim)
         edit_actor_base_cls = partial(
             ResidualActor,
             action_dim=action_dim, hidden_dims=hidden_dims, num_residual_blocks=3
@@ -440,7 +442,6 @@ class PiResidualPPOCache(Agent):
         edit_actor = TrainState.create(
             apply_fn=edit_actor_def.apply,
             params=edit_actor_params,
-            # tx=optax.adam(learning_rate=actor_lr),
             tx=optax.chain(
                 optax.clip_by_global_norm(1.0),
                 optax.adam(learning_rate=actor_lr),
@@ -455,7 +456,6 @@ class PiResidualPPOCache(Agent):
             dropout_rate=critic_dropout_rate,
             use_layer_norm=critic_layer_norm,
             use_pnorm=use_pnorm,
-            # activations=nn.swish,
             activations=nn.swish,
         )
         # critic_cls = partial(StateAndStateActionValue, base_cls=critic_base_cls)
@@ -487,6 +487,13 @@ class PiResidualPPOCache(Agent):
         )
 
         temp_def = Temperature(init_temperature)
+
+        if temp_params is None:
+            print("\n\n\nInitializing temperature parameters from scratch...\n\n\n")
+            temp_params = temp_def.init(temp_key)["params"]
+        else:
+            print("\n\n\nInitializing temperature parameters loaded from checkpoint...\n\n\n")
+
         temp_params = temp_def.init(temp_key)["params"]
         temp = TrainState.create(
             apply_fn=temp_def.apply,
@@ -878,3 +885,12 @@ class PiResidualPPOCache(Agent):
         with open(path, 'wb') as f:
             pickle.dump(checkpoint, f)
         logging.info(f"Saved checkpoint to {path}")
+    
+def load_checkpoint(path: str):
+    checkpoint = pickle.load(open(path, 'rb'))
+    critic_params = checkpoint['critic_params']
+    edit_actor_params = checkpoint['edit_actor_params']
+    temp_params = checkpoint['temp_params']
+    
+    return critic_params, edit_actor_params, temp_params
+
