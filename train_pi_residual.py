@@ -719,16 +719,15 @@ def train_agent(_):
         if i < FLAGS.warmup_steps:
             print("Warmup")
             batch = next(offline_train_iterator)
-            debug_batch = next(online_train_iterator)
-            breakpoint()
+            # debug_batch = next(online_train_iterator)
+            # breakpoint()
             agent, info = agent.update(batch, 
                 utd_ratio=FLAGS.config.utd_ratio, 
                 timer=timer, 
                 seed=rng_update,
                 update_critic=True, 
-                update_edit_actor=True, 
+                update_edit_actor=False, 
                 critic_warmup=True,
-                edit_actor_warmup=True,
             )
         else:
             # try:
@@ -750,6 +749,8 @@ def train_agent(_):
             "batch_stats/batch_size": len(batch),
             "batch_stats/masks_mean": np.mean(batch["masks"]),
             "batch_stats/mc_returns_mean": np.mean(batch["mc_returns"]),
+            "batch_stats/mc_returns_min": np.min(batch["mc_returns"]),
+            "batch_stats/mc_returns_max": np.max(batch["mc_returns"]),
             "batch_stats/rewards_mean": np.mean(batch["rewards"]),
             "batch_stats/rewards_min": np.min(batch["rewards"]),
             "batch_stats/rewards_max": np.max(batch["rewards"]),
@@ -914,14 +915,8 @@ def train_agent(_):
                 os.makedirs(FLAGS.config.save_dir, exist_ok=True)
                 final_checkpoint_path = os.path.join(FLAGS.config.save_dir, f"checkpoint_{i}.pkl")
                 logging.info(f"Saving final checkpoint to {final_checkpoint_path}")
-                with open(final_checkpoint_path, 'wb') as f:
-                    pickle.dump({
-                        'critic_params': agent.critic.params,
-                        'target_critic_params': agent.target_critic.params,
-                        'edit_actor_params': agent.edit_actor.params,
-                        'temp_params': agent.temp.params,
-                        'step': i,
-                    }, f)
+                agent.save_checkpoint(final_checkpoint_path, step=i)
+                logging.info(f"Saved checkpoint to {final_checkpoint_path}")
 
 if __name__ == "__main__":
     app.run(train_agent)

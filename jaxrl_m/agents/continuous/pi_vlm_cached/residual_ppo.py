@@ -24,6 +24,9 @@ import jax.tree_util as jtu
 import numpy as np
 import copy
 import time
+import pickle
+import logging
+import os
 
 from jaxrl_m.utils.expo_utils import (
     TanhNormal,
@@ -186,78 +189,38 @@ def _edit_actor_loss_and_grad(
     return edit_actor, grads, metrics
 
 
-@partial(jax.jit, static_argnames=("critic_apply_fn", "edit_actor_apply_fn", "target_critic_apply_fn", "tau"))
+@partial(jax.jit, static_argnames=("critic_apply_fn",))
 def _critic_loss_and_grad(
     critic_params,
-    target_critic_params,
     vlm_output,
-    actions,
-    mc_target,
+    returns,
     key,
     critic_apply_fn,
-    # #
-    target_params,  # Subsampled target critic parameters
-    next_vlm_output,
-    next_base_actions,
-    edit_actor_apply_fn,
-    edit_actor_params,
-    target_critic_apply_fn,
-    terminals,
-    rewards,
-    discount,
-    # #
     critic,
-    tau,
 ):
     """Single jitted step for critic: forward + loss + grad."""
-    r_samples = _sample_deterministic_actions(
-        edit_actor_apply_fn, edit_actor_params, next_vlm_output, next_base_actions)
-    next_actions = r_samples
-    next_actions = jnp.clip(next_actions, -1.0, 1.0)
-    next_qs = compute_q(target_critic_apply_fn, target_params,
-                        next_vlm_output, next_actions)  # (batch_size, )
-    masks = 1.0 - terminals
-    target_q = rewards + discount * masks * next_qs  # (batch_size, )
-    target_q = jax.lax.stop_gradient(target_q)
 
     def loss_fn(critic_params):
-        qs = critic_apply_fn(
+        value = critic_apply_fn(
             {"params": critic_params},
             vlm_output,
-            actions,
             False,
             rngs={"dropout": key},
-        )
+        )[0]
 
-        critic_loss_td = optax.losses.huber_loss(qs, target_q).mean()
-        critic_loss_mc = ((qs - mc_target) ** 2).mean()
-        critic_loss = critic_loss_td
+        critic_loss = optax.losses.huber_loss(value, returns).mean()
 
         metrics = {
             "critic_loss": critic_loss,
-            "critic_loss_td": critic_loss_td,
-            "critic_loss_mc": critic_loss_mc,
-            "q_mean": qs.mean(),
-            "q_std": qs.std(),
-            "q_max": qs.max(),
-            "q_min": qs.min(),
-            "target_q_mean": target_q.mean(),
-            "target_q_std": target_q.std(),
-            "target_q_max": target_q.max(),
-            "target_q_min": target_q.min(),
-            "q_diff": (qs - target_q).mean(),
-            "q_diff_std": (qs - target_q).std(),
-            "q_diff_max": (qs - target_q).max(),
-            "q_diff_min": (qs - target_q).min(),
+            "value_mean": value.mean(),
+            "value_std": value.std(),
+            "value_max": value.max(),
+            "value_min": value.min(),
+            "returns_mean": returns.mean(),
+            "returns_std": returns.std(),
+            "returns_max": returns.max(),
+            "returns_min": returns.min(),
         }
-
-        num_heads = qs.shape[0]  # static at compile time
-        for i in range(num_heads):
-            qi = qs[i]
-            metrics[f"q{i+1}_mean"] = qi.mean()
-            metrics[f"q{i+1}_std"] = qi.std()
-            metrics[f"q{i+1}_max"] = qi.max()
-            metrics[f"q{i+1}_min"] = qi.min()
 
         return critic_loss, metrics
 
@@ -265,123 +228,64 @@ def _critic_loss_and_grad(
         loss_fn, has_aux=True
     )(critic_params)
     critic = critic.apply_gradients(grads=grads)
-    target_critic_params = optax.incremental_update(
-        critic.params, target_critic_params, tau
-    )
-    return critic, target_critic_params, grads, metrics
-
-
-@partial(jax.jit, static_argnames=("critic_apply_fn", "target_critic_apply_fn", "tau"))
-def _sarsa_loss_and_grad(
-    critic_params,
-    target_critic_params,
-    vlm_output,
-    actions,
-    mc_target,
-    key,
-    critic_apply_fn,
-    # #
-    target_params,  # Subsampled target critic parameters
-    next_vlm_output,
-    batch_next_actions,
-    target_critic_apply_fn,
-    terminals,
-    rewards,
-    discount,
-    # #
-    critic,
-    tau,
-):
-    """Single jitted step for critic: forward + loss + grad."""
-    next_actions = jnp.clip(batch_next_actions, -1.0, 1.0)
-    next_qs = compute_q(target_critic_apply_fn, target_params,
-                        next_vlm_output, next_actions)  # (batch_size, )
-    masks = 1.0 - terminals
-    target_q = rewards + discount * masks * next_qs  # (batch_size, )
-    target_q = jax.lax.stop_gradient(target_q)
-
-    def loss_fn(critic_params):
-        qs = critic_apply_fn(
-            {"params": critic_params},
-            vlm_output,
-            actions,
-            False,
-            rngs={"dropout": key},
-        )
-
-        critic_loss_td = optax.losses.huber_loss(qs, target_q).mean()
-        critic_loss_mc = ((qs - mc_target) ** 2).mean()
-        critic_loss = critic_loss_td
-
-        metrics = {
-            "sarsa_critic_loss": critic_loss,
-            "sarsa_critic_loss_td": critic_loss_td,
-            "sarsa_critic_loss_mc": critic_loss_mc,
-            "q_mean": qs.mean(),
-            "q_std": qs.std(),
-            "q_max": qs.max(),
-            "q_min": qs.min(),
-            "target_q_mean": target_q.mean(),
-            "target_q_std": target_q.std(),
-            "target_q_max": target_q.max(),
-            "target_q_min": target_q.min(),
-            "q_diff": (qs - target_q).mean(),
-            "q_diff_std": (qs - target_q).std(),
-            "q_diff_max": (qs - target_q).max(),
-            "q_diff_min": (qs - target_q).min(),
-        }
-
-        num_heads = qs.shape[0]  # static at compile time
-        for i in range(num_heads):
-            qi = qs[i]
-            metrics[f"q{i+1}_mean"] = qi.mean()
-            metrics[f"q{i+1}_std"] = qi.std()
-            metrics[f"q{i+1}_max"] = qi.max()
-            metrics[f"q{i+1}_min"] = qi.min()
-
-        return critic_loss, metrics
-
-    (loss, metrics), grads = jax.value_and_grad(
-        loss_fn, has_aux=True
-    )(critic_params)
-    critic = critic.apply_gradients(grads=grads)
-    target_critic_params = optax.incremental_update(
-        critic.params, target_critic_params, tau
-    )
-    return critic, target_critic_params, grads, metrics
+    return critic, grads, metrics
 
 
 @partial(jax.jit, static_argnames=("critic_apply_fn"))
-def q_loss(
+def _critic_td_loss_and_grad(
     critic_params,
     vlm_output,
-    actions,
-    # target_q,
-    mc_target,
+    rewards,
     key,
     critic_apply_fn,
-    # #
+    next_vlm_output,
+    terminals,
+    discount,
     critic,
+    mc_returns,
 ):
     """Single jitted step for critic: forward + loss + grad."""
-
-    def loss_fn(actions):
-        qs = critic_apply_fn(
+    def loss_fn(critic_params):
+        values = critic_apply_fn(
             {"params": critic_params},
             vlm_output,
-            actions,
             False,
             rngs={"dropout": key},
-        )
+        )[0]
 
-        q_loss = qs.mean()
-        return q_loss, {"q_loss": q_loss}
+        values_next_state = critic_apply_fn(
+            {"params": critic_params},
+            next_vlm_output,
+            False,
+            rngs={"dropout": key},
+        )[0]
+
+        masks = 1.0 - terminals
+        target_v = rewards + discount * masks * values_next_state
+        target_v = jax.lax.stop_gradient(target_v)
+        critic_loss = optax.losses.huber_loss(values, target_v).mean()
+        critic_loss_mc = ((values - mc_returns) ** 2).mean()
+
+        metrics = {
+            "critic_loss": critic_loss,
+            "critic_loss_mc": critic_loss_mc,
+            "value_mean": values.mean(),
+            "value_std": values.std(),
+            "value_max": values.max(),
+            "value_min": values.min(),
+            "target_v_mean": target_v.mean(),
+            "target_v_std": target_v.std(),
+            "target_v_max": target_v.max(),
+            "target_v_min": target_v.min(),
+        }
+
+        return critic_loss, metrics
 
     (loss, metrics), grads = jax.value_and_grad(
         loss_fn, has_aux=True
-    )(actions)
-
-    return grads, metrics
+    )(critic_params)
+    critic = critic.apply_gradients(grads=grads)
+    return critic, grads, metrics
 
 
 @partial(jax.jit, static_argnames="apply_fn")
@@ -398,8 +302,6 @@ class PiResidualPPOCache(Agent):
     """
     actor: PiPolicy
     critic: TrainState
-    target_critic: TrainState
-    target_actor: PiPolicy
     edit_actor: TrainState
     temp: TrainState
     action_dim: int = struct.field(pytree_node=False)
@@ -503,7 +405,6 @@ class PiResidualPPOCache(Agent):
 
         # Init Pi0 model #
         actor = PiPolicy(rng=rng, config=config, is_target=False)
-        target_actor = actor
 
         if decay_steps is not None:
             actor_lr = optax.cosine_decay_schedule(actor_lr, decay_steps)
@@ -584,12 +485,6 @@ class PiResidualPPOCache(Agent):
             params=critic_params,
             tx=tx,
         )
-        target_critic_def = Ensemble(critic_cls, num=num_min_qs or num_qs)
-        target_critic = TrainState.create(
-            apply_fn=target_critic_def.apply,
-            params=critic_params,
-            tx=optax.GradientTransformation(lambda _: None, lambda _: None),
-        )
 
         temp_def = Temperature(init_temperature)
         temp_params = temp_def.init(temp_key)["params"]
@@ -609,9 +504,6 @@ class PiResidualPPOCache(Agent):
             rng=rng,
             actor=actor,
             critic=critic,
-            target_critic=target_critic,
-            target_actor=target_actor,
-            # target_actor_params=target_actor_params,
             edit_actor=edit_actor,
             action_dim=action_dim,
             action_horizon=action_horizon,
@@ -853,73 +745,41 @@ class PiResidualPPOCache(Agent):
     def update_critic(self, batch, *args, **kwargs) -> Tuple[TrainState, Dict[str, float]]:
         seed = kwargs.pop("seed", None)
         timer = kwargs.pop("timer", None)
-        update_sarsa = kwargs.pop("update_sarsa", False)
+        critic_warmup = kwargs.pop("critic_warmup", False)
         assert seed is not None, "seed must be provided"
         rng = seed
 
         # Sample next_actions by sampling from current edit policy #
-        next_base_actions = batch['next_diffusion_actions']
-        next_base_actions = self.actor.norm_actions(next_base_actions)
-        # (batch_size, pi0_hidden_dims)
         next_vlm_output = batch['next_vlm_output']
         current_vlm_output = batch['vlm_output']
-        # No need to append state here as it is already appended in the batch #
-        # (batch_size, action_horizon * action_dim)
-        actions = batch["actions"].reshape(-1, self.action_dim)
-        next_base_actions = next_base_actions.reshape(-1, self.action_dim)
-        subsample_rng, rng = jax.random.split(rng)
-        target_params = subsample_ensemble(
-            subsample_rng, self.target_critic.params, self.num_min_qs, self.num_qs
-        )
 
         # Use JITted version #
         timer.tick("critic_loss_and_grad_time")
         rng1, rng = jax.random.split(rng)
-        sample_rng, rng = jax.random.split(rng)
 
-        if update_sarsa:
-            critic, target_critic_params, grads, info = _sarsa_loss_and_grad(
+        if critic_warmup:
+            critic, grads, info = _critic_td_loss_and_grad(
                 self.critic.params,
-                self.target_critic.params,
                 current_vlm_output,
-                actions,
-                batch["mc_returns"],
+                batch["rewards"],
                 rng1,
                 self.critic.apply_fn,
-                target_params,
                 next_vlm_output,
-                batch["next_actions"].reshape(-1, self.action_dim),
-                self.target_critic.apply_fn,
                 batch["terminals"],
-                batch["rewards"],
                 self.discount,
                 self.critic,
-                self.tau,
+                batch["mc_returns"],
             )
 
         else:
-            critic, target_critic_params, grads, info = _critic_loss_and_grad(
+            current_returns = batch['returns_tf_from_adv']
+            critic, grads, info = _critic_loss_and_grad(
                 self.critic.params,
-                self.target_critic.params,
                 current_vlm_output,
-                actions,
-                batch["mc_returns"],
+                current_returns,
                 rng1,
                 self.critic.apply_fn,
-                # #
-                target_params,
-                next_vlm_output,
-                next_base_actions,
-                sample_rng,
-                self.edit_actor.apply_fn,
-                self.edit_actor.params,
-                self.target_critic.apply_fn,
-                batch["terminals"],
-                batch["rewards"],
-                self.discount,
-                # #
                 self.critic,
-                self.tau,
             )
         timer.tock("critic_loss_and_grad_time")
 
@@ -927,15 +787,9 @@ class PiResidualPPOCache(Agent):
         info["critic_grad_norm"] = optax.global_norm(grads)
         timer.tock("apply_gradients_time")
 
-        timer.tick("incremental_update_time")
-        target_critic = self.target_critic.replace(params=target_critic_params)
-        timer.tock("incremental_update_time")
-
         info["critic_param_norm"] = optax.global_norm(critic.params)
-        info["target_critic_param_norm"] = optax.global_norm(
-            target_critic.params)
 
-        return self.replace(critic=critic, target_critic=target_critic, rng=rng), info
+        return self.replace(critic=critic, rng=rng), info
 
     def preproess_batch(self, batch: Batch, *args, **kwargs) -> Batch:
         action_dim = self.action_dim // self.action_horizon
@@ -999,7 +853,7 @@ class PiResidualPPOCache(Agent):
             for _ in range(utd_ratio):
                 data_rng, rng = jax.random.split(rng)
                 new_agent, critic_info = new_agent.update_critic(
-                    batch, timer=timer, seed=data_rng, update_sarsa=critic_warmup)
+                    batch, timer=timer, seed=data_rng, critic_warmup=critic_warmup)
 
         if update_edit_actor:
             edit_actor_rng, rng = jax.random.split(rng)
@@ -1012,3 +866,15 @@ class PiResidualPPOCache(Agent):
         print(timer.get_total_times(reset=False))
 
         return new_agent, {**actor_info, **critic_info, **actor_update_info}
+    
+    def save_checkpoint(self, path: str, step: int):
+        checkpoint = {
+            'critic_params': self.critic.params,
+            'edit_actor_params': self.edit_actor.params,
+            'temp_params': self.temp.params,
+            'step': step,
+        }
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'wb') as f:
+            pickle.dump(checkpoint, f)
+        logging.info(f"Saved checkpoint to {path}")
