@@ -22,7 +22,7 @@ print("Imports 2")
 ### Debugging setup ###
 def inspect_tfrecords():
     # TFRECORD_PATTERN = "/data/hf_cache/datasets/LIBERO/libero_10_tf/*.tfrecord"
-    TFRECORD_PATTERN = "/data/user_data/skowshik/clean_skip_v1_server/results_expo/image_replay_buffer/episode_2.tfrecord"
+    TFRECORD_PATTERN = "/home/skowshik/vla/codebase/PolicyAgnosticRL/debug_res_ppo_ws/seed_0/image_replay_buffer/episode_0.tfrecord"
 
     PROTO_TYPE_SPEC = {
         "observations/images0": tf.uint8,
@@ -40,6 +40,7 @@ def inspect_tfrecords():
         "next_state_vlm_output": tf.float32,
         "next_state_diffusion_actions": tf.float32,
         "valid_timesteps_for_action_chunk": tf.int32,
+        "state_values": tf.float32,
     }
 
     # 1. Get files
@@ -211,6 +212,10 @@ class ImageReplayBufferPi:
         scale_success_reward: bool = False,  # Whether to scale terminal rewards by alpha/(1-gamma)
         drop_images_from_output: bool = False,
         intermediate_reward_mul_factor: float = 1.0,
+        # Generalized advantage estimation kwargs #
+        use_gae: bool = False,
+        gae_lambda: float = 0.95,
+        gae_gamma: float = 0.99,
     ):
         self.goal_relabeling_strategy = goal_relabeling_strategy
         self.goal_relabeling_kwargs = goal_relabeling_kwargs
@@ -271,6 +276,9 @@ class ImageReplayBufferPi:
         self.scale_success_reward = scale_success_reward
         self.drop_images_from_output = drop_images_from_output
         self.intermediate_reward_mul_factor = intermediate_reward_mul_factor
+        self.use_gae = use_gae
+        self.gae_lambda = gae_lambda
+        self.gae_gamma = gae_gamma
         dataset = self._construct_tf_dataset(data_paths, seed)
 
         self.train = train
@@ -501,6 +509,8 @@ class ImageReplayBufferPi:
             self.PROTO_TYPE_SPEC["language"] = tf.string
         if self.use_wrist_view:
             self.PROTO_TYPE_SPEC["observations/images1"] = tf.uint8
+        if self.use_gae:
+            self.PROTO_TYPE_SPEC["state_values"] = tf.float32
         
         # Build features dict with special handling for episode_id
         features = {
@@ -692,10 +702,17 @@ class ImageReplayBufferPi:
             )
             masks_chunk = tf.reduce_min(mask_frames, axis=-1)  # [W]
 
-            # ---- 3) stride-ah discounted return:
-            # R[t] = rewards_chunk[t] + gamma * masks_chunk[t] * R[t+ah]
-            def stride_chunk_mc_returns(rewards_chunk, masks_chunk, gamma, ah):
+            def stride_chunk_mc_returns(rewards_chunk, masks_chunk, gamma, ah, rewards_tf):
+                # rewards_chunk: (W,)
+                # masks_chunk: (W,)
+                # rewards_tf: (T,) - original step rewards for computing partial chunks
                 W = tf.shape(rewards_chunk)[0]
+                T = tf.shape(rewards_tf)[0]
+                
+                # Precompute tail sums: tail_sums[t] = sum(rewards_tf[t:T])
+                rev_rewards = tf.reverse(rewards_tf, axis=[0])
+                tail_sums = tf.reverse(tf.cumsum(rev_rewards), axis=[0])  # (T,)
+                
                 ta = tf.TensorArray(
                     dtype=rewards_chunk.dtype,
                     size=W,
@@ -710,10 +727,18 @@ class ImageReplayBufferPi:
 
                 def body(i, ta):
                     next_i = i + ah
+                    next_step = i + ah  # Next starting timestep in original space
+                    
                     next_val = tf.cond(
                         next_i < W,
+                        # Full chunk available at next position
                         lambda: ta.read(next_i),
-                        lambda: tf.zeros([], dtype=rewards_chunk.dtype),
+                        # Partial chunk - use precomputed tail sum of remaining rewards
+                        lambda: tf.cond(
+                            next_step < T,
+                            lambda: tail_sums[next_step],
+                            lambda: tf.zeros([], dtype=rewards_chunk.dtype),
+                        ),
                     )
                     val = rewards_chunk[i] + gamma * masks_chunk[i] * next_val
                     ta = ta.write(i, val)
@@ -722,9 +747,78 @@ class ImageReplayBufferPi:
                 _, ta = tf.while_loop(cond, body, [i0, ta])
                 return ta.stack()  # [W]
 
-            mc_returns_tf_chunked = stride_chunk_mc_returns(rewards_chunk, masks_chunk, gamma, ah)  # [W]
+            mc_returns_tf_chunked = stride_chunk_mc_returns(rewards_chunk, masks_chunk, gamma, ah, rewards_tf)  # [W]
 
-
+            # Generalized advantage estimation #
+            if self.use_gae and "state_values" in parsed_tensors:
+                state_values_tf = tf.squeeze(parsed_tensors["state_values"])  # (T+1,)
+                gae_lambda = tf.constant(self.gae_lambda, dtype=rewards_tf.dtype)
+                
+                def compute_gae_chunked(rewards_chunk, terminals_chunk, state_values_tf, gamma, gae_lambda, ah):
+                    # rewards_chunk: (W,) where W = T - ah + 1
+                    # terminals_chunk: (W,) - 1.0 if chunk ends in terminal, 0.0 otherwise
+                    # state_values_tf: (T+1,)
+                    W = tf.shape(rewards_chunk)[0]
+                    
+                    ta = tf.TensorArray(
+                        dtype=rewards_chunk.dtype,
+                        size=W,
+                        element_shape=tf.TensorShape([]),
+                        clear_after_read=False,
+                    )
+                    
+                    i0 = W - 1
+                    
+                    def cond(i, ta):
+                        return i >= 0
+                    
+                    def body(i, ta):
+                        v_t = state_values_tf[i]
+                        v_next = state_values_tf[i + ah]
+                        
+                        is_done = tf.greater(terminals_chunk[i], 0.5)
+                        
+                        # TD error:
+                        # If done: δ = r_chunk - V(s_t)  (no bootstrap)
+                        # If not done: δ = r_chunk + γ * V(s_{t+ah}) - V(s_t)
+                        delta = tf.cond(
+                            is_done,
+                            lambda: rewards_chunk[i] - v_t,
+                            lambda: rewards_chunk[i] + gamma * v_next - v_t,
+                        )
+                        
+                        # Next advantage (stride by ah)
+                        next_i = i + ah
+                        next_adv = tf.cond(
+                            next_i < W,
+                            lambda: ta.read(next_i),
+                            lambda: tf.zeros([], dtype=rewards_chunk.dtype),
+                        )
+                        
+                        # Advantage:
+                        # If done: adv = delta (reset GAE, no accumulation)
+                        # If not done: adv = delta + γλ * next_adv
+                        adv = tf.cond(
+                            is_done,
+                            lambda: delta,
+                            lambda: delta + gamma * gae_lambda * next_adv,
+                        )
+                        
+                        ta = ta.write(i, adv)
+                        return i - 1, ta
+                    
+                    _, ta = tf.while_loop(cond, body, [i0, ta])
+                    return ta.stack()
+                
+                advantages_tf = compute_gae_chunked(rewards_chunk, terminals_tf_chunked, state_values_tf, gamma, gae_lambda, ah)
+                
+                # Returns = advantages + values (at the starting state of each chunk)
+                values_at_chunk_starts = tf.gather(state_values_tf, start_idx)  # (W,)
+                returns_tf_from_adv = advantages_tf + values_at_chunk_starts
+                
+                out["advantages"] = advantages_tf
+                out["returns_tf_from_adv"] = returns_tf_from_adv
+            
             
             out["rewards"] = rewards_tf_chunked # (W=T - ah + 1,)
             out["masks"] = masks_tf_chunked # (W=T - ah + 1,)
@@ -1412,6 +1506,17 @@ def save_trajectory_as_tfrecord(trajectory: Dict[str, np.ndarray], path: str):
                         else {}
                     ),
                     "language":  bytes_feature(language_bytes),
+
+                    # Add values for logging #
+                    **(
+                        {
+                            "state_values": tensor_feature(
+                                np.array(trajectory["state_values"], dtype=np.float32) # DO NOT drop last step
+                            ),
+                        }
+                        if "state_values" in trajectory
+                        else {}
+                    ),
                 }
             )
         )

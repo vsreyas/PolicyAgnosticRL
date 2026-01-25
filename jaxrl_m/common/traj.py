@@ -25,8 +25,7 @@ class TrajSampler(object):
 
     def sample(
         self,
-        policy_fn,
-        vlm_output_fn,
+        fns_dict, # Dictionary containing access to different functions for the agent for flexibility 
         num_episodes,
         replay_buffer=None,
         goal_relabel_fn: Optional[callable] = None,
@@ -46,6 +45,9 @@ class TrajSampler(object):
             store_max_trajectory_reward: if True, store the max reward of the trajectory on the
                                 replay buffer.
         """
+        # Extract functions from fns_dict #
+        policy_fn = fns_dict["policy_fn"]
+
         trajectories = []
         q_vs_mc_returns_vals = []
         H = self.action_horizon
@@ -169,6 +171,13 @@ class TrajSampler(object):
 
                     out_dict_final_observation = policy_fn(next_observation)
 
+                    # Compute value of final state in case it is part of returned data #
+                    if 'state_values' in out_dict_final_observation:
+                        assert "value_fn" in fns_dict
+                        value_fn = fns_dict["value_fn"]
+                        final_state_value = value_fn(out_dict_final_observation["vlm_output"])
+                        trajectory["state_values"].append(final_state_value)
+
                     if terminals:
                         # Pick the last valid timestep for vlm_output and update it #
                         last_valid_timestep_for_action_chunk = len(trajectory['rewards']) - H + 1
@@ -176,6 +185,10 @@ class TrajSampler(object):
                         out_dict_last_valid_timestep.pop('actions')
                         for k in out_dict_last_valid_timestep.keys():
                             trajectory[k][last_valid_timestep_for_action_chunk] = out_dict_last_valid_timestep[k]
+                        
+                        if 'state_values' in out_dict_final_observation:
+                            state_values_last_valid_timestep = value_fn(out_dict_last_valid_timestep["vlm_output"])
+                            trajectory["state_values"][last_valid_timestep_for_action_chunk] = state_values_last_valid_timestep
                         
                         valid_timesteps_for_action_chunk.append(last_valid_timestep_for_action_chunk)
                 else:

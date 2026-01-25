@@ -70,6 +70,7 @@ from jaxrl_m.utils.train_utils import concatenate_batches, load_recorded_video
 from jaxrl_m.vision import encoders
 from jaxrl_m.utils.train_utils import preprocess_action, repack_action
 from jaxrl_m.agents.continuous.pi_vlm_cached.residual_td3 import PiResidualTD3Cache
+from jaxrl_m.agents.continuous.pi_vlm_cached.residual_ppo import PiResidualPPOCache
 from jaxrl_m.utils.expo_utils import calc_mc_return_fn
 from jaxrl_m.envs.libero import StepTimeout, time_limit, STEP_TIME_LIMIT
 
@@ -343,6 +344,18 @@ def get_policy_fn(
 
     return policy_fn
 
+def get_value_fn(
+    agent: PiResidualPPOCache,
+    rng: jax.random.PRNGKey,
+    timer: Timer | None = None,
+) -> Callable[[Data], np.ndarray]:
+    def _value_fn(vlm_output_with_state: np.ndarray, *args, **kwargs) -> np.ndarray:
+        return jax.device_get(agent.get_state_values(vlm_output_with_state, *args, **kwargs))
+
+    value_fn = supply_rng(_value_fn, rng=rng)
+
+    return value_fn
+
 def get_vlm_output_fn(
     agent: PiResidualTD3Cache,
     rng: jax.random.PRNGKey,
@@ -505,7 +518,18 @@ def train_agent(_):
         tf.io.gfile.join(save_dir, "image_replay_buffer", "episode_0.tfrecord")
     ), f"Image replay buffer already exists! ({tf.io.gfile.join(save_dir, 'image_replay_buffer', 'episode_0.tfrecord')})"
     
-    agent = PiResidualTD3Cache.create(
+    # agent = PiResidualTD3Cache.create(
+    #     config=pi_config,
+    #     seed=FLAGS.seed,
+    #     batch_size=FLAGS.config.batch_size,
+    #     rng=construct_rng,
+    #     N=FLAGS.num_actions_to_sample,
+    #     n_edit_samples=FLAGS.num_edit_samples,
+    #     critic_params=critic_params,
+    #     edit_actor_params=edit_actor_params,
+    #     exploration_epsilon=FLAGS.exploration_epsilon,
+    # )
+    agent = PiResidualPPOCache.create(
         config=pi_config,
         seed=FLAGS.seed,
         batch_size=FLAGS.config.batch_size,
@@ -550,13 +574,14 @@ def train_agent(_):
             print("Collecting trajectories...")
             data_collection_rng_key, rng = jax.random.split(rng)
             
-            env_data_collection_policy_fn = get_policy_fn(
+            fns_dict = {}
+            fns_dict["policy_fn"] = get_policy_fn(
                 agent=agent,
                 rng=data_collection_rng_key,
                 timer=timer,
                 deterministic_actions=False,
             )
-            vlm_output_fn = get_vlm_output_fn(
+            fns_dict["value_fn"] = get_value_fn(
                 agent=agent,
                 rng=data_collection_rng_key,
                 timer=timer,
@@ -572,8 +597,7 @@ def train_agent(_):
                     try:
                         with time_limit(STEP_TIME_LIMIT):
                             trajs, _q_vs_mc_returns_vals = data_collection_trajectory_sampler.sample(
-                                env_data_collection_policy_fn,
-                                vlm_output_fn,
+                                fns_dict=fns_dict,
                                 num_episodes=1,
                                 replay_buffer=state_replay_buffer,
                                 calc_mc_return_fn=functools.partial(calc_mc_return_fn, discount=FLAGS.config.agent_kwargs.discount, reward_bias=FLAGS.reward_bias),
@@ -695,6 +719,8 @@ def train_agent(_):
         if i < FLAGS.warmup_steps:
             print("Warmup")
             batch = next(offline_train_iterator)
+            debug_batch = next(online_train_iterator)
+            breakpoint()
             agent, info = agent.update(batch, 
                 utd_ratio=FLAGS.config.utd_ratio, 
                 timer=timer, 
