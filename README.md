@@ -159,7 +159,7 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false env -u PYOPENGL_PLATFORM python -m pdb ./tra
 # Clean Training Setup for Residual Actor Learning on top of Pi0.5
 ## Sample Base Trajectories for warmup and future use
 ```
-CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./sample_base_traj.py --config=configs/libero_config.py:pi_residual_td3 --seed=0 --environment_name=libero --reward_scale=1.0 --reward_bias=-0.1 --filter_successful_trajectories=False --config.save_dir="./debug_pi_res_td3" --num_trajectories_to_collect=60 --pi_config_name="pi05_libero_custom_low_mem"
+CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./sample_base_traj.py --config=configs/libero_config.py:pi_residual_td3 --seed=0 --environment_name=libero --reward_scale=1.0 --reward_bias=-0.1 --filter_successful_trajectories=False --config.save_dir="./debug_pi_res_td3" --num_trajectories_to_collect=100 --pi_config_name="pi05_libero_custom_low_mem"
 
 ```
 
@@ -176,7 +176,7 @@ rm -r debug_res_td3_ws && WANDB_ENTITY=shreyas-kowshik CUDA_VISIBLE_DEVICES=0 XL
 
 ## PPO warm start training
 ```
-rm -r debug_res_ppo_ws && WANDB_ENTITY=shreyas-kowshik CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./train_pi_residual.py --config=configs/libero_config.py:pi_residual_ppo --seed=0 --task_name="put both moka pots on the stove" --config.batch_size=256 --config.agent_kwargs.batch_size=256 --environment_name=libero --wandb_experiment_name=debug_res_td3_ws --num_edit_samples=4 --num_actions_to_sample=4 --final_step_sparse_reward=False --online_trajectory_collection_frequency 5000000 --num_trajectories_to_collect=1 --config.utd_ratio=4 --config.num_eval_episodes=10 --config.num_episodes_per_video=5 --config.eval_interval=1000000 --reward_scale=1.0 --reward_bias=-0.1 --config.libero_tfrecord_regexp="/home/skowshik/vla/codebase/PolicyAgnosticRL/debug_pi_res_td3/image_replay_buffer/*.tfrecord" --filter_successful_trajectories=False --config.save_dir="./debug_res_ppo_ws" --scale_success_alpha=2.0 --intermediate_reward_mul_factor 10.0 --warmup_steps 50000 --num_train_steps 50000 --config.image_replay_buffer_kwargs.use_gae=True
+rm -r debug_res_ppo_ws && WANDB_ENTITY=shreyas-kowshik CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./train_pi_residual.py --config=configs/libero_config.py:pi_residual_ppo --seed=0 --task_name="put both moka pots on the stove" --config.batch_size=256 --config.agent_kwargs.batch_size=256 --environment_name=libero --wandb_experiment_name=debug_res_td3_ws --num_edit_samples=4 --num_actions_to_sample=4 --final_step_sparse_reward=False --online_trajectory_collection_frequency 5000000 --num_trajectories_to_collect=1 --config.utd_ratio=4 --config.num_eval_episodes=10 --config.num_episodes_per_video=5 --config.eval_interval=1000000 --reward_scale=1.0 --reward_bias=-0.1 --config.libero_tfrecord_regexp="/home/skowshik/vla/codebase/PolicyAgnosticRL/debug_pi_res_td3/image_replay_buffer/*.tfrecord" --filter_successful_trajectories=False --config.save_dir="./debug_res_ppo_ws" --scale_success_alpha=2.0 --intermediate_reward_mul_factor 10.0 --warmup_steps 50000 --num_train_steps 50000 --config.image_replay_buffer_kwargs.use_gae=True --balance_offline_training_data=True
 ```
 
 ### ResidualEditActor based training

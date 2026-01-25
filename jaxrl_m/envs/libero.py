@@ -273,13 +273,16 @@ def get_libero_tfrecord_dataset(tfrecord_regexp: str,
                                 is_pi: bool = False,
                                 task_name=None,
                                 filter_successful_trajectories: bool = False,
+                                paths=None,
                                 **kwargs):
     """
     is_pi -- the flag which retrieves the dataset with how pi processes it
     task_name -- retrieves only one task of the libero dataset
     """
-    assert tfrecord_regexp.endswith(".tfrecord")
-    paths = glob_to_path_list(tfrecord_regexp)
+    if paths is None:
+        assert tfrecord_regexp.endswith(".tfrecord")
+        paths = glob_to_path_list(tfrecord_regexp)
+    
     if is_pi:
         return ImageReplayBufferPi(data_paths=paths,
         seed=seed,

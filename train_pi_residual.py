@@ -215,6 +215,11 @@ flags.DEFINE_float(
     1.0,
     "Multiplier for the intermediate reward.",
 )
+flags.DEFINE_bool(
+    "balance_offline_training_data",
+    False,
+    "Balance offline training data by downsampling the more frequent trajectories among success/failed ones.",
+)
 
 
 ### Try subprocenv ###
@@ -386,6 +391,46 @@ def get_vlm_output_fn(
     return policy_fn
 
 
+def balance_offline_training_data(offline_dset_paths):
+    # Inspect tf records, check if trajectory is successful or not and subsmple more frequent ones.
+    # Returns a list of paths to the balanced offline training data.
+    success_trajectories = []
+    failed_trajectories = []
+
+    for path in offline_dset_paths:
+        dataset = tf.data.TFRecordDataset(path)
+        for raw_record in dataset:
+            example = tf.train.Example()
+            example.ParseFromString(raw_record.numpy())
+            found_keys = list(example.features.feature.keys())
+            features_dict = {
+                k: tf.io.FixedLenFeature([], tf.string)
+                for k in found_keys
+            }
+            parsed_features = tf.io.parse_single_example(raw_record, features_dict)
+            raw_bytes = parsed_features["terminals"]
+            dtype = tf.float32
+            tensor = tf.io.parse_tensor(raw_bytes, out_type=dtype)
+
+            if tensor.numpy().sum() > 0:
+                success_trajectories.append(path)
+            else:
+                failed_trajectories.append(path)
+
+    # breakpoint()
+    # Downsample the more frequent trajectories among success/failed ones.
+    if len(success_trajectories) > len(failed_trajectories):
+        success_trajectories = np.random.choice(success_trajectories, size=len(failed_trajectories), replace=False)
+        success_trajectories = list(success_trajectories)
+    elif len(success_trajectories) < len(failed_trajectories):
+        failed_trajectories = np.random.choice(failed_trajectories, size=len(success_trajectories), replace=False)
+        failed_trajectories = list(failed_trajectories)
+    
+    print("Balanced offline training data: Success trajectories: ", len(success_trajectories), "Failed trajectories: ", len(failed_trajectories))
+    print("\n\n\n\n\n")
+
+    return success_trajectories + failed_trajectories
+
 def train_agent(_):
     # breakpoint()
     
@@ -453,6 +498,11 @@ def train_agent(_):
         )
 
         if len(FLAGS.config.libero_tfrecord_regexp) > 0:
+            paths = None
+            if FLAGS.balance_offline_training_data:
+                offline_dset_paths = glob_to_path_list(FLAGS.config.libero_tfrecord_regexp)
+                paths = balance_offline_training_data(offline_dset_paths)
+
             dataset = get_libero_tfrecord_dataset(
                 tfrecord_regexp=FLAGS.config.libero_tfrecord_regexp, use_wrist_view=FLAGS.use_wrist_view, 
                 use_language=FLAGS.use_lang, config=pi_config, is_pi=True, **FLAGS.config.dataset_kwargs,
@@ -464,6 +514,7 @@ def train_agent(_):
                 scale_success_reward=FLAGS.scale_success_alpha > 0,
                 intermediate_reward_mul_factor=FLAGS.intermediate_reward_mul_factor,
                 drop_images_from_output=True, # Do not need it as we are caching things at trajectory generation time #
+                paths=paths, # If `None` then constructs paths based on `tfrecord_regexp`
             )
         else:
             dataset = None
