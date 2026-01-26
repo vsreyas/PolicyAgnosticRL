@@ -199,21 +199,30 @@ def _critic_loss_and_grad(
     critic_apply_fn,
     critic,
     tau,
+    success_wt,
+    success_mask,
 ):
     """Single jitted step for critic: forward + loss + grad."""
 
     def loss_fn(critic_params):
-        values = critic_apply_fn(
+        values_all = critic_apply_fn(
             {"params": critic_params},
             vlm_output,
             False,
             rngs={"dropout": key},
         )
+        values = values_all.mean(axis=0)
 
-        critic_loss = optax.losses.huber_loss(values, returns).mean()
+        critic_loss_unweighted = (values - returns) ** 2.0 # optax.losses.huber_loss(values, returns)
+        # Weight using success_wt
+        critic_loss_success = critic_loss_unweighted * success_mask * success_wt
+        critic_loss_failure = critic_loss_unweighted * (1.0 - success_mask)
+        critic_loss = (critic_loss_success + critic_loss_failure).mean()
 
         metrics = {
             "critic_loss": critic_loss,
+            "critic_loss_success": critic_loss_success.mean(),
+            "critic_loss_failure": critic_loss_failure.mean(),
             "value_mean": values.mean(),
             "value_std": values.std(),
             "value_max": values.max(),
@@ -225,9 +234,9 @@ def _critic_loss_and_grad(
         }
 
         # Add per-ensemble metrics
-        num_heads = values.shape[0]
+        num_heads = values_all.shape[0]
         for i in range(num_heads):
-            vi = values[i]
+            vi = values_all[i]
             metrics[f"v{i+1}_mean"] = vi.mean()
             metrics[f"v{i+1}_std"] = vi.std()
             metrics[f"v{i+1}_max"] = vi.max()
@@ -239,11 +248,6 @@ def _critic_loss_and_grad(
         loss_fn, has_aux=True
     )(critic_params)
     critic = critic.apply_gradients(grads=grads)
-
-    # Update target critic with soft update
-    target_critic_params = optax.incremental_update(
-        critic.params, target_critic_params, tau
-    )
 
     return critic, target_critic_params, grads, metrics
 
@@ -367,6 +371,7 @@ class PiResidualPPOCache(Agent):
     backup_entropy: bool = struct.field(pytree_node=False)
     pi0_hidden_dims: int
     exploration_epsilon: float
+    critic_success_wt: float
 
     @classmethod
     def create(
@@ -386,8 +391,8 @@ class PiResidualPPOCache(Agent):
         hidden_dims: Sequence[int] = (512, 512, 512, 512),
         discount: float = 0.99,
         tau: float = 0.005,
-        num_qs: int = 10,
-        num_min_qs: Optional[int] = 2,
+        num_qs: int = 1,
+        num_min_qs: Optional[int] = None,
         critic_dropout_rate: Optional[float] = None,
         critic_weight_decay: Optional[float] = None,
         critic_layer_norm: bool = True,
@@ -420,6 +425,7 @@ class PiResidualPPOCache(Agent):
         batch_size_dict_key: str = 'actions',
         entropy_mul_scale_factor: float = 3.0,
         exploration_epsilon: float = 0.05,
+        critic_success_wt: float = 1.0,
     ):
         # Assertions
         assert N >= n_edit_samples, f"N must be greater than or equal to n_edit_samples, got N={N} and n_edit_samples={n_edit_samples}"
@@ -586,6 +592,7 @@ class PiResidualPPOCache(Agent):
             backup_entropy=backup_entropy,
             pi0_hidden_dims=pi0_hidden_dims,
             exploration_epsilon=exploration_epsilon,
+            critic_success_wt=critic_success_wt,
         )
     
     def get_state_values(self, vlm_output: np.ndarray, *args, **kwargs):
@@ -705,12 +712,16 @@ class PiResidualPPOCache(Agent):
         # action = diffusion_actions
         if num_action_samples == 1:
             action = diffusion_actions
+        
+        # Compute state values for caching and advantages calculations in PPO #
+        v_values = compute_v_all(self.critic.apply_fn, self.critic.params, vlm_output)
 
         rng, _ = jax.random.split(rng, 2)
         out_dict = {
             "actions": action.squeeze(),  # (action_horizon, action_dim)
             "vlm_output": vlm_output[0],  # (pi0_hidden_dims,)
             "diffusion_actions": diffusion_actions,
+            "state_values": v_values[0],  # (1,)
         }
 
         if num_action_samples > 1:
@@ -780,16 +791,16 @@ class PiResidualPPOCache(Agent):
             bc_warmup,
         )
 
-        q_loss_rng, rng = jax.random.split(rng)
-        q_loss_grads, q_loss_metrics = q_loss(
-            self.critic.params,
-            vlm_output,
-            base_actions,
-            batch["mc_returns"],
-            q_loss_rng,
-            self.critic.apply_fn,
-            self.critic,
-        )
+        # q_loss_rng, rng = jax.random.split(rng)
+        # q_loss_grads, q_loss_metrics = q_loss(
+        #     self.critic.params,
+        #     vlm_output,
+        #     base_actions,
+        #     batch["mc_returns"],
+        #     q_loss_rng,
+        #     self.critic.apply_fn,
+        #     self.critic,
+        # )
 
         actor_info["edit_actor_grad_norm"] = optax.global_norm(grads)
         # edit_actor = self.edit_actor.apply_gradients(grads=grads)
@@ -797,8 +808,8 @@ class PiResidualPPOCache(Agent):
             edit_actor.params)
         actor_info["target_entropy"] = self.target_entropy
 
-        actor_info.update(q_loss_metrics)
-        actor_info["q_loss_grad_norm"] = optax.global_norm(q_loss_grads)
+        # actor_info.update(q_loss_metrics)
+        # actor_info["q_loss_grad_norm"] = optax.global_norm(q_loss_grads)
 
         return self.replace(edit_actor=edit_actor, rng=rng), actor_info
 
@@ -854,6 +865,8 @@ class PiResidualPPOCache(Agent):
                 self.critic.apply_fn,
                 self.critic,
                 self.tau,
+                self.critic_success_wt,
+                batch["success"]
             )
 
             target_critic = self.target_critic.replace(params=target_critic_params)
@@ -906,7 +919,7 @@ class PiResidualPPOCache(Agent):
         relevant_keys = [
             "actions", "rewards", "masks", "mc_returns",
             "terminals", "truncates", "vlm_output", "next_vlm_output", "diffusion_actions", "next_diffusion_actions",
-            "next_actions", "success",
+            "next_actions", "success", "returns_tf_from_adv",
         ]
         batch = {k: v for k, v in batch.items() if k in relevant_keys}
         # Normalization of state has already happened in image_replay_buffer_pi.py #

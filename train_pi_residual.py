@@ -7,6 +7,7 @@ resource.setrlimit(resource.RLIMIT_NOFILE, (min(65535, hard), hard))
 
 
 import os
+import re
 import time
 from typing import Any, Callable, Dict, List, Optional, Union
 
@@ -220,6 +221,16 @@ flags.DEFINE_bool(
     False,
     "Balance offline training data by downsampling the more frequent trajectories among success/failed ones.",
 )
+flags.DEFINE_bool(
+    "on_policy",
+    False,
+    "Flag for whether we want to run on policy updates"
+)
+flags.DEFINE_float(
+    "critic_success_wt",
+    1.0,
+    "Weight to multiply successful trajectories in a batch to account for imbalanced data during critic training",
+)
 
 
 ### Try subprocenv ###
@@ -340,6 +351,26 @@ def get_policy_fn(
         out_dict = jax.device_get(
             agent.sample_actions(
                 observations, *args, **kwargs, timer=timer, output_action_chunk=True, use_deterministic_actions=deterministic_actions
+            )
+        )
+
+        return out_dict
+
+    policy_fn = supply_rng(policy_fn, rng=rng)
+
+    return policy_fn
+
+def get_base_policy_fn(
+    agent: PiResidualTD3Cache,
+    rng: jax.random.PRNGKey,
+) -> Callable[[Data], np.ndarray]:
+    def policy_fn(observations: Data, *args, **kwargs) -> np.ndarray:
+        if not isinstance(observations, dict):
+            observations = {"state": observations}
+        
+        out_dict = jax.device_get(
+            agent.sample_base_actions(
+                observations, *args, **kwargs,
             )
         )
 
@@ -589,6 +620,7 @@ def train_agent(_):
         n_edit_samples=FLAGS.num_edit_samples,
         params_path=FLAGS.params_path,
         exploration_epsilon=FLAGS.exploration_epsilon,
+        critic_success_wt=FLAGS.critic_success_wt,
     )
     # breakpoint()
 
@@ -621,12 +653,18 @@ def train_agent(_):
             data_collection_rng_key, rng = jax.random.split(rng)
             
             fns_dict = {}
-            fns_dict["policy_fn"] = get_policy_fn(
-                agent=agent,
-                rng=data_collection_rng_key,
-                timer=timer,
-                deterministic_actions=False,
-            )
+            if i >= FLAGS.warmup_steps:
+                fns_dict["policy_fn"] = get_policy_fn(
+                    agent=agent,
+                    rng=data_collection_rng_key,
+                    timer=timer,
+                    deterministic_actions=False,
+                )
+            else:
+               fns_dict["policy_fn"] = get_base_policy_fn(
+                    agent=agent,
+                    rng=data_collection_rng_key,
+                )
             fns_dict["value_fn"] = get_value_fn(
                 agent=agent,
                 rng=data_collection_rng_key,
@@ -727,6 +765,25 @@ def train_agent(_):
             data_paths = glob_to_path_list(
                 tf.io.gfile.join(save_dir, "image_replay_buffer", "*.tfrecord")
             )
+
+            if FLAGS.on_policy:
+                # Keep only latest collected trajectories and discard all the other ones
+                def extract_episode_id(path):
+                    """Extract episode ID from path like 'episode_<id>.tfrecord'"""
+                    basename = os.path.basename(path)
+                    match = re.match(r'episode_(\d+)\.tfrecord', basename)
+                    if match:
+                        return int(match.group(1))
+                    return -1  # For files that don't match the pattern
+
+                # Sort by episode ID in descending order (highest ID first)
+                data_paths = sorted(data_paths, key=extract_episode_id, reverse=True)
+
+                # Keep only the last num_trajectories_to_collect episodes (highest IDs)
+                if len(data_paths) > FLAGS.num_trajectories_to_collect:
+                    data_paths = data_paths[:FLAGS.num_trajectories_to_collect]
+                    logging.info(f"On-policy mode: Keeping only the last {FLAGS.num_trajectories_to_collect} trajectories (episode IDs: {[extract_episode_id(p) for p in data_paths]})")
+            
             #########################
             
             # Do some cleanups to avoid hangs #
@@ -765,18 +822,16 @@ def train_agent(_):
         if i < FLAGS.warmup_steps:
             print("Warmup")
             timer.tick("sample_batch_time")
-            batch = next(offline_train_iterator)
+            # batch = next(offline_train_iterator)
+            batch = next(online_train_iterator)
             timer.tock("sample_batch_time")
-            # breakpoint()
-            # debug_batch = next(online_train_iterator)
-            # breakpoint()
             agent, info = agent.update(batch, 
                 utd_ratio=FLAGS.config.utd_ratio, 
                 timer=timer, 
                 seed=rng_update,
                 update_critic=True, 
                 update_edit_actor=False, 
-                critic_warmup=True,
+                critic_warmup=False,
             )
         else:
             # try:
