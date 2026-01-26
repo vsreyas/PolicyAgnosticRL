@@ -186,9 +186,9 @@ class TrajSampler(object):
                         for k in out_dict_last_valid_timestep.keys():
                             trajectory[k][last_valid_timestep_for_action_chunk] = out_dict_last_valid_timestep[k]
                         
-                        if 'state_values' in out_dict_final_observation:
-                            state_values_last_valid_timestep = value_fn(out_dict_last_valid_timestep["vlm_output"])
-                            trajectory["state_values"][last_valid_timestep_for_action_chunk] = state_values_last_valid_timestep
+                        # if 'state_values' in out_dict_final_observation:
+                        #     state_values_last_valid_timestep = value_fn(out_dict_last_valid_timestep["vlm_output"])
+                        #     trajectory["state_values"][last_valid_timestep_for_action_chunk] = state_values_last_valid_timestep
                         
                         valid_timesteps_for_action_chunk.append(last_valid_timestep_for_action_chunk)
                 else:
@@ -261,15 +261,19 @@ class TrajSampler(object):
 
                     replay_buffer.insert(transition)
 
-            if 'vlm_output' in out_dict_final_observation:
-                trajectory['vlm_output'].append(out_dict_final_observation['vlm_output'])
-                trajectory['diffusion_actions'].append(out_dict_final_observation['diffusion_actions'])
+            out_dict_final_keys_to_append = ["vlm_output", "diffusion_actions", "log_probs"]
+            for key_to_append in out_dict_final_keys_to_append:
+                if key_to_append in out_dict_final_observation:
+                    trajectory[key_to_append].append(out_dict_final_observation[key_to_append])
+            
+            # if 'vlm_output' in out_dict_final_observation:
+            #     trajectory['vlm_output'].append(out_dict_final_observation['vlm_output'])
+            #     trajectory['diffusion_actions'].append(out_dict_final_observation['diffusion_actions'])
             
             valid_timesteps_for_action_chunk = sorted(valid_timesteps_for_action_chunk)
             trajectory['valid_timesteps_for_action_chunk'] = valid_timesteps_for_action_chunk
 
             trajectories.append(trajectory)
-            # breakpoint()
             
             if len(curr_episode_q_vs_mc_returns_vals) > 0:
                 q_vs_mc_returns_vals.append(curr_episode_q_vs_mc_returns_vals)

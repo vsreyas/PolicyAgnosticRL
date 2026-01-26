@@ -505,6 +505,7 @@ class ImageReplayBufferPi:
             self.PROTO_TYPE_SPEC["observations/images1"] = tf.uint8
         if self.use_gae:
             self.PROTO_TYPE_SPEC["state_values"] = tf.float32
+        self.PROTO_TYPE_SPEC["log_probs"] = tf.float32
         
         # Build features dict with special handling for episode_id
         features = {
@@ -820,6 +821,10 @@ class ImageReplayBufferPi:
             out["mc_returns"] = mc_returns_tf_chunked # (W=T - ah + 1,)
         
         base_actions_tf = actions_tf
+
+        # Add log_probs
+        if "log_probs" in parsed_tensors:
+            out["log_probs"] = parsed_tensors["log_probs"]
 
         actions_tf = tf.map_fn(
             lambda t: actions_tf[t : t + ah],
@@ -1501,7 +1506,6 @@ def save_trajectory_as_tfrecord(trajectory: Dict[str, np.ndarray], path: str):
                     ),
                     "language":  bytes_feature(language_bytes),
 
-                    # Add values for logging #
                     **(
                         {
                             "state_values": tensor_feature(
@@ -1509,6 +1513,16 @@ def save_trajectory_as_tfrecord(trajectory: Dict[str, np.ndarray], path: str):
                             ),
                         }
                         if "state_values" in trajectory
+                        else {}
+                    ),
+
+                    **(
+                        {
+                            "log_probs": tensor_feature(
+                                np.array(trajectory["log_probs"], dtype=np.float32)
+                            ),
+                        }
+                        if "log_probs" in trajectory
                         else {}
                     ),
                 }

@@ -231,6 +231,11 @@ flags.DEFINE_float(
     1.0,
     "Weight to multiply successful trajectories in a batch to account for imbalanced data during critic training",
 )
+flags.DEFINE_float(
+    "bc_loss_coef",
+    1000.0,
+    "Weight to multiply successful trajectories in a batch with bc loss",
+)
 
 
 ### Try subprocenv ###
@@ -830,8 +835,10 @@ def train_agent(_):
                 timer=timer, 
                 seed=rng_update,
                 update_critic=True, 
-                update_edit_actor=False, 
-                critic_warmup=False,
+                update_edit_actor=True, 
+                critic_warmup=True,
+                edit_actor_warmup=True,
+                bc_loss_coef=FLAGS.bc_loss_coef,
             )
         else:
             # try:
