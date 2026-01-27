@@ -535,6 +535,9 @@ class PiPolicy(BasePolicy):
             # if timer is not None:
             #     timer.tick("processing_time")
 
+            if timer is not None:
+                timer.tick("input_transforms_time")
+            
             if not processed_obs:
                 # breakpoint()
                 # if infer:
@@ -568,11 +571,8 @@ class PiPolicy(BasePolicy):
             else:
                 obs = _observations
             
-            # if timer is not None:
-            #     timer.tock("processing_time")
-
-            # if timer is not None:
-            #     timer.tick("repeat_tree_time")
+            if timer is not None:
+                timer.tock("input_transforms_time")
 
             if repeat > 1:
                 obs = repeat_tree(obs, repeat)
@@ -585,35 +585,37 @@ class PiPolicy(BasePolicy):
             #     timer.tock("repeat_tree_time")
             
             obs_ = _model.Observation.from_dict(obs)
-        
+
+            if timer is not None:
+                timer.tick("building_jit_time")
             if batch_size not in self.sample_actions_with_vlm_output_cache:
                 self.sample_actions_with_vlm_output_cache[batch_size] = self._build_sample_actions_with_vlm_output_jit()
+            if timer is not None:
+                timer.tock("building_jit_time")
+            
             
             forward_fn = self.sample_actions_with_vlm_output_cache[batch_size]
 
-            # if repeat > 1:
-            #     obs = repeat_tree(obs, repeat)
-            #     obs = flatten_repeat(obs)  
-            # outputs = {
-            #     "state": observation.state,
-            # }
-
-            # timer.tick("forward_fn_time")
+            if timer is not None:
+                timer.tick("forward_fn_time")
             params = self.train_state.params
             actions, vlm_output = forward_fn(params, rng, obs_)
-            # timer.tock("forward_fn_time")
+            if timer is not None:
+                timer.tock("forward_fn_time")
 
             outputs["actions"] = actions # (batch_size, action_horizon, 32)
             # breakpoint()
             # outputs = jax.tree.map(lambda x: np.asarray(x), outputs)
 
-            # NOTE: The output_data_transforms handles the 32 -> 7 conversion of actions #
-            # timer.tick("output_data_transforms_time")
+            # NOTE: The output_data_transforms handles the 32 -> 7 conversion of actions #            
+            if timer is not None:
+                timer.tick("output_transforms_time")
             if normalized:
                 outputs = self.output_data_transforms_without_unnorm(outputs)
             else:
                 outputs = self.output_data_transforms(outputs)
-            # timer.tock("output_data_transforms_time")
+            if timer is not None:
+                timer.tock("output_transforms_time")
 
             if repeat > 1:
                 outputs = unflatten_repeat(outputs,repeat)

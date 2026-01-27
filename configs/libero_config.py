@@ -205,6 +205,7 @@ def get_config(config_string):
         "use_gae": True,
         "gae_lambda": 0.95,
         "gae_gamma": 0.99,
+        "load_log_probs": True,
     }
     ###############
 

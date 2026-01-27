@@ -551,6 +551,9 @@ def train_agent(_):
                 intermediate_reward_mul_factor=FLAGS.intermediate_reward_mul_factor,
                 drop_images_from_output=True, # Do not need it as we are caching things at trajectory generation time #
                 paths=paths, # If `None` then constructs paths based on `tfrecord_regexp`
+                offline_flag=1.0,
+                use_dummy_adv_returns=True,
+                use_dummy_advantages=True,
             )
         else:
             dataset = None
@@ -786,8 +789,18 @@ def train_agent(_):
 
                 # Keep only the last num_trajectories_to_collect episodes (highest IDs)
                 if len(data_paths) > FLAGS.num_trajectories_to_collect:
-                    data_paths = data_paths[:FLAGS.num_trajectories_to_collect]
-                    logging.info(f"On-policy mode: Keeping only the last {FLAGS.num_trajectories_to_collect} trajectories (episode IDs: {[extract_episode_id(p) for p in data_paths]})")
+                    paths_to_keep = data_paths[:FLAGS.num_trajectories_to_collect]
+                    paths_to_delete = data_paths[FLAGS.num_trajectories_to_collect:]
+                    
+                    # Delete old tfrecord files from disk
+                    for path in paths_to_delete:
+                        try:
+                            tf.io.gfile.remove(path)
+                        except Exception as e:
+                            logging.warning(f"Failed to delete {path}: {e}")
+                    
+                    logging.info(f"On-policy mode: Deleted {len(paths_to_delete)} old trajectories, keeping {len(paths_to_keep)} (episode IDs: {[extract_episode_id(p) for p in paths_to_keep]})")
+                    data_paths = paths_to_keep
             
             #########################
             
@@ -811,6 +824,7 @@ def train_agent(_):
                 scale_success_reward=FLAGS.scale_success_alpha > 0,
                 intermediate_reward_mul_factor=FLAGS.intermediate_reward_mul_factor,
                 drop_images_from_output=True,
+                offline_flag=0.0,
                 **FLAGS.config.image_replay_buffer_kwargs,
             )
             timer.tock("recreate_image_replay_buffer_iterator")
@@ -823,36 +837,24 @@ def train_agent(_):
 
             rng, rng_update = jax.random.split(rng)
         
+        is_warmup_flag = i < FLAGS.warmup_steps
         timer.tick("online_iter_total")
-        if i < FLAGS.warmup_steps:
-            print("Warmup")
-            timer.tick("sample_batch_time")
-            # batch = next(offline_train_iterator)
-            batch = next(online_train_iterator)
-            timer.tock("sample_batch_time")
-            agent, info = agent.update(batch, 
-                utd_ratio=FLAGS.config.utd_ratio, 
-                timer=timer, 
-                seed=rng_update,
-                update_critic=True, 
-                update_edit_actor=True, 
-                critic_warmup=True,
-                edit_actor_warmup=True,
-                bc_loss_coef=FLAGS.bc_loss_coef,
-            )
-        else:
-            # try:
-            # Sample a batch from online and do update #
-            # RLPD style online + offline update #
-            timer.tick("batch_sampling_time")
-            offline_batch = next(offline_train_iterator)
-            online_batch = next(online_train_iterator)
-            timer.tock("batch_sampling_time")
-            
-            timer.tick("concatenate_batches_time")
-            batch = concatenate_batches([offline_batch, online_batch])
-            timer.tock("concatenate_batches_time")
-            agent, info = agent.update(batch, utd_ratio=FLAGS.config.utd_ratio, timer=timer, seed=rng_update)
+        print("Warmup")
+        timer.tick("sample_batch_time")
+        offline_batch = next(offline_train_iterator)
+        online_batch = next(online_train_iterator)
+        batch = concatenate_batches([offline_batch, online_batch])
+        timer.tock("sample_batch_time")
+        agent, info = agent.update(batch, 
+            utd_ratio=FLAGS.config.utd_ratio, 
+            timer=timer, 
+            seed=rng_update,
+            update_critic=True, 
+            update_edit_actor=True, 
+            critic_warmup=is_warmup_flag,
+            edit_actor_warmup=is_warmup_flag,
+            bc_loss_coef=FLAGS.bc_loss_coef,
+        )
         
         # Log batch statistics #
         # breakpoint()
@@ -870,6 +872,9 @@ def train_agent(_):
             "batch_stats/success_mean": np.mean(batch["success"]),
             "batch_stats/success_min": np.min(batch["success"]),
             "batch_stats/success_max": np.max(batch["success"]),
+            "batch_stats/is_offline_data_mean": np.mean(batch["is_offline_data"]),
+            "batch_stats/is_offline_data_max": np.max(batch["is_offline_data"]),
+            "batch_stats/is_offline_data_min": np.min(batch["is_offline_data"]),
         }
         if wandb_logger is not None:
             wandb_logger.log(batch_stats, step=i)

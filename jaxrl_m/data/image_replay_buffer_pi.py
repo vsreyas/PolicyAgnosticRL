@@ -216,6 +216,13 @@ class ImageReplayBufferPi:
         use_gae: bool = False,
         gae_lambda: float = 0.95,
         gae_gamma: float = 0.99,
+        # PPO related data loading #
+        load_log_probs=False,
+        # Dummy values to load #
+        dummy_log_probs=-0.5,
+        offline_flag=1.0, # By default assumes data is offline and not from current policy as such
+        use_dummy_adv_returns=False, # Initializes "returns_tf_from_adv" as the mc_returns itself; IMPORTANT to not use this value and only treat it as a placeholder
+        use_dummy_advantages=False, # ...
     ):
         self.goal_relabeling_strategy = goal_relabeling_strategy
         self.goal_relabeling_kwargs = goal_relabeling_kwargs
@@ -279,6 +286,11 @@ class ImageReplayBufferPi:
         self.use_gae = use_gae
         self.gae_lambda = gae_lambda
         self.gae_gamma = gae_gamma
+        self.load_log_probs = load_log_probs
+        self.dummy_log_probs = dummy_log_probs
+        self.offline_flag = offline_flag
+        self.use_dummy_adv_returns = use_dummy_adv_returns
+        self.use_dummy_advantages = use_dummy_advantages
         dataset = self._construct_tf_dataset(data_paths, seed)
 
         self.train = train
@@ -505,7 +517,9 @@ class ImageReplayBufferPi:
             self.PROTO_TYPE_SPEC["observations/images1"] = tf.uint8
         if self.use_gae:
             self.PROTO_TYPE_SPEC["state_values"] = tf.float32
-        self.PROTO_TYPE_SPEC["log_probs"] = tf.float32
+        
+        if self.load_log_probs:
+            self.PROTO_TYPE_SPEC["log_probs"] = tf.float32
         
         # Build features dict with special handling for episode_id
         features = {
@@ -825,6 +839,18 @@ class ImageReplayBufferPi:
         # Add log_probs
         if "log_probs" in parsed_tensors:
             out["log_probs"] = parsed_tensors["log_probs"]
+        elif self.dummy_log_probs is not None:
+            out["log_probs"] = tf.ones([tf.shape(base_actions_tf)[0]], dtype=base_actions_tf.dtype) * self.dummy_log_probs
+        
+        
+        if self.offline_flag is not None:
+            out["is_offline_data"] = tf.ones([tf.shape(base_actions_tf)[0]], dtype=base_actions_tf.dtype) * self.offline_flag
+
+        if self.use_dummy_adv_returns:
+            out["returns_tf_from_adv"] = out["mc_returns"]
+        
+        if self.use_dummy_advantages:
+            out["advantages"] = tf.ones([tf.shape(base_actions_tf)[0]], dtype=base_actions_tf.dtype) * 1.0
 
         actions_tf = tf.map_fn(
             lambda t: actions_tf[t : t + ah],

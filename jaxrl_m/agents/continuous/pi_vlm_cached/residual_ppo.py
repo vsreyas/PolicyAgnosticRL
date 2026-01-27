@@ -112,6 +112,7 @@ def _edit_actor_loss_and_grad(
     bc_warmup,
     rng_update,
     bc_loss_coef,
+    offline_flag,
 ):
     """Single jitted step for edit_actor: forward + loss + grad."""
 
@@ -121,7 +122,9 @@ def _edit_actor_loss_and_grad(
         actions_sample_key, rng = jax.random.split(rng)
         actions_sampled = dist.sample(seed=actions_sample_key)
         actions = jnp.clip(actions_sampled, -0.98, 0.98)
-        log_probs = dist.log_prob(actions)
+        _log_probs = dist.log_prob(actions)
+        log_probs = jnp.clip(_log_probs, -20.0, 20.0)
+
         # jax.debug.breakpoint()
         ratio = jnp.exp(log_probs - old_log_probs)
         policy_loss = -(jnp.minimum(ratio * advantages, jnp.clip(ratio, 1 - epsilon_low, 1 + epsilon_high) * advantages)).mean()
@@ -136,7 +139,7 @@ def _edit_actor_loss_and_grad(
 
         # Only apply BC loss to successful trajectories #
         bc_loss = (jnp.square(batch_actions - means) * success).mean()
-        edit_actor_loss = bc_loss * bc_loss_coef + (ppo_loss * (1.0 - bc_warmup))
+        edit_actor_loss = bc_loss * bc_loss_coef + (ppo_loss * (1.0 - bc_warmup) * (1.0 - offline_flag)) # Only do bc loss on offline data for PPO
 
         clip_frac_low = (ratio < 1 - epsilon_low).mean()
         clip_frac_high = (ratio > 1 + epsilon_high).mean()
@@ -152,7 +155,12 @@ def _edit_actor_loss_and_grad(
             "stds_min": stds.min(),
             "stds_max": stds.max(),
             "entropy": entropy.mean(),
-            "log_probs": log_probs.mean(),
+            "log_probs_mean": log_probs.mean(),
+            "log_probs_max": log_probs.max(),
+            "log_probs_min": log_probs.min(),
+            "old_log_probs_mean": old_log_probs.mean(),
+            "old_log_probs_max": old_log_probs.max(),
+            "old_log_probs_min": old_log_probs.min(),
             "bc_warmup": bc_warmup,
             "clip_frac_low": clip_frac_low,
             "clip_frac_high": clip_frac_high,
@@ -211,6 +219,7 @@ def _critic_loss_and_grad(
     tau,
     success_wt,
     success_mask,
+    offline_flag,
 ):
     """Single jitted step for critic: forward + loss + grad."""
 
@@ -227,7 +236,7 @@ def _critic_loss_and_grad(
         # Weight using success_wt
         critic_loss_success = critic_loss_unweighted * success_mask * success_wt
         critic_loss_failure = critic_loss_unweighted * (1.0 - success_mask)
-        critic_loss = (critic_loss_success + critic_loss_failure).mean()
+        critic_loss = ((critic_loss_success + critic_loss_failure) * offline_flag).mean()
 
         metrics = {
             "critic_loss": critic_loss,
@@ -362,7 +371,7 @@ class PiResidualPPOCache(Agent):
         critic_success_wt: float = 1.0,
         epsilon_low: float = 0.2,
         epsilon_high: float = 0.2,
-        ent_coef: float = 0.01,
+        ent_coef: float = 0.001,
     ):
         # Assertions
         assert N >= n_edit_samples, f"N must be greater than or equal to n_edit_samples, got N={N} and n_edit_samples={n_edit_samples}"
@@ -548,7 +557,7 @@ class PiResidualPPOCache(Agent):
 
         seed = kwargs.pop("seed", None)
         seed, rng = jax.random.split(seed)
-        # timer = kwargs.pop("timer", None)
+        timer = kwargs.pop("timer", None)
         use_deterministic_actions = kwargs.pop(
             "use_deterministic_actions", False)
         num_action_samples = kwargs.pop("num_action_samples", 1)
@@ -560,13 +569,17 @@ class PiResidualPPOCache(Agent):
         # Do a forward pass to get VLM output #
         seed, rng = jax.random.split(seed)
 
+        timer.tick("base_sample_actions_time")
         actions, vlm_output, processed_obs = self.actor.sample_actions_with_vlm_output(
-            rng, observations)
+            rng, observations, timer=timer
+        )
+        timer.tock("base_sample_actions_time")
         # (1, action_horizon, action_dim) # Unnormalized actions #
         diffusion_actions = actions.copy()
         # Returned actions are not normalized, normalize before passing to edit actor #
-        # timer.tick("norm_actions_time")
+        timer.tick("norm_actions_time")
         actions = self.actor.norm_actions(actions)
+        timer.tock("norm_actions_time")
 
         # Take mean across tokens as representation from VLM #
         # (1, pi0_hidden_dims)
@@ -581,9 +594,11 @@ class PiResidualPPOCache(Agent):
         actions = actions.reshape(1, self.action_dim)
         r_observations = vlm_output
         
-        actions, means, log_stds, rng, log_probs = _sample_actions(
+        timer.tick("sample_actions_time")
+        dist, actions, means, log_stds, rng, log_probs = _sample_actions(
             rng, self.edit_actor.apply_fn, self.edit_actor.params, r_observations, actions
         )
+        timer.tock("sample_actions_time")
 
         if use_deterministic_actions:
             actions = means
@@ -594,10 +609,14 @@ class PiResidualPPOCache(Agent):
         )
 
         # Unnormalize actions before returning #
+        timer.tick("unnorm_time")
         final_action = self.actor.unnorm_actions(final_action)
+        timer.tock("unnorm_time")
 
         # Compute state values for caching and advantages calculations in PPO #
+        timer.tick("compute_v_time")
         v_values = compute_v_all(self.critic.apply_fn, self.critic.params, vlm_output)
+        timer.tock("compute_v_time")
 
         rng, _ = jax.random.split(rng, 2)
         out_dict = {
@@ -723,10 +742,11 @@ class PiResidualPPOCache(Agent):
             self.epsilon_high,
             self.ent_coef,
             self.edit_actor.apply_fn,
-            batch["success"].reshape(-1, 1),
+            batch["success"][:, None],
             bc_warmup,
             rng_update,
             bc_loss_coef,
+            batch["is_offline_data"][:, None]
         )
         # breakpoint()
 
@@ -806,7 +826,8 @@ class PiResidualPPOCache(Agent):
             self.critic,
             self.tau,
             self.critic_success_wt,
-            batch["success"]
+            batch["success"],
+            batch["is_offline_data"],
         )
 
         target_critic = self.target_critic.replace(params=target_critic_params)
@@ -860,7 +881,7 @@ class PiResidualPPOCache(Agent):
         relevant_keys = [
             "actions", "rewards", "masks", "mc_returns",
             "terminals", "truncates", "vlm_output", "next_vlm_output", "diffusion_actions", "next_diffusion_actions",
-            "next_actions", "success", "returns_tf_from_adv", "log_probs", "advantages",
+            "next_actions", "success", "returns_tf_from_adv", "log_probs", "advantages", "is_offline_data",
         ]
         batch = {k: v for k, v in batch.items() if k in relevant_keys}
         # Normalization of state has already happened in image_replay_buffer_pi.py #
