@@ -159,38 +159,59 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false env -u PYOPENGL_PLATFORM python -m pdb ./tra
 # Clean Training Setup for Residual Actor Learning on top of Pi0.5
 ## Sample Base Trajectories for warmup and future use
 ```
-CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./sample_base_traj.py --config=configs/libero_config.py:pi_residual_td3 --seed=0 --environment_name=libero --reward_scale=1.0 --reward_bias=-0.1 --filter_successful_trajectories=False --config.save_dir="./debug_pi_res_td3" --num_trajectories_to_collect=100 --pi_config_name="pi05_libero_custom_low_mem"
+CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./sample_base_traj.py --config=configs/libero_config.py:pi_residual_td3 --seed=0 --environment_name=libero --reward_scale=1.0 --reward_bias=-0.1 --filter_successful_trajectories=False --config.save_dir="/data/user_data/skowshik/gradacc_2k_base_policy_rollouts" --num_trajectories_to_collect=40 --pi_config_name="pi05_libero_gradacc2_2k" --num_diffusion_samples=16
 
 ```
 
 ## Find trajectory statistics
 ```
-python find_traj_stats.py --tf_record_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/debug_pi_res_td3/image_replay_buffer/*.tfrecord"
+python find_traj_stats.py --tf_record_path="/data/user_data/skowshik/gradacc_2k_base_policy_rollouts/image_replay_buffer/*.tfrecord"
 ```
 
 ## Warmstart critic and residual actor
-rm -r debug_res_td3_ws && WANDB_ENTITY=shreyas-kowshik CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./train_pi_residual.py --config=configs/libero_config.py:pi_residual_td3 --seed=0 --task_name="put both moka pots on the stove" --config.batch_size=256 --config.agent_kwargs.batch_size=256 --environment_name=libero --wandb_experiment_name=debug_res_td3_ws --num_edit_samples=4 --num_actions_to_sample=4 --final_step_sparse_reward=False --online_trajectory_collection_frequency 5000000 --num_trajectories_to_collect=1 --config.utd_ratio=4 --config.num_eval_episodes=10 --config.num_episodes_per_video=5 --config.eval_interval=1000000 --reward_scale=1.0 --reward_bias=-0.1 --config.libero_tfrecord_regexp="/home/skowshik/vla/codebase/PolicyAgnosticRL/debug_pi_res_td3/image_replay_buffer/*.tfrecord" --filter_successful_trajectories=False --config.save_dir="./debug_res_td3_ws" --scale_success_alpha=2.0 --intermediate_reward_mul_factor 10.0 --warmup_steps 50000 --num_train_steps 50000
+rm -r td3_gradacc2_2k_base_ws && WANDB_ENTITY=shreyas-kowshik CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./train_pi_residual.py --config=configs/libero_config.py:pi_residual_td3 --seed=0 --task_name="put both moka pots on the stove" --config.batch_size=256 --environment_name=libero --wandb_experiment_name=debug_res_td3_ws --num_edit_samples=4 --num_actions_to_sample=4 --final_step_sparse_reward=False --online_trajectory_collection_frequency 5000000 --num_trajectories_to_collect=1 --config.utd_ratio=4 --config.num_eval_episodes=10 --config.num_episodes_per_video=5 --config.eval_interval=1000000 --reward_scale=1.0 --reward_bias=-0.1 --config.libero_tfrecord_regexp="/data/user_data/skowshik/gradacc_2k_base_policy_rollouts/image_replay_buffer/*.tfrecord" --filter_successful_trajectories=False --config.save_dir="./td3_gradacc2_2k_base_ws" --scale_success_alpha=2.0 --intermediate_reward_mul_factor 10.0 --warmup_steps 50000 --num_train_steps 50000
 
 
 #########################
 
 ## PPO warm start training
 ```
-rm -r debug_res_ppo_ws_wt10_edit_actor_ws && WANDB_ENTITY=shreyas-kowshik CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./train_pi_residual.py --config=configs/libero_config.py:pi_residual_ppo --seed=0 --task_name="put both moka pots on the stove" --config.batch_size=256 --config.agent_kwargs.batch_size=256 --environment_name=libero --wandb_experiment_name=debug_res_td3_ws --num_edit_samples=4 --num_actions_to_sample=4 --final_step_sparse_reward=False --online_trajectory_collection_frequency 200 --num_trajectories_to_collect=10 --config.utd_ratio=1 --config.num_eval_episodes=10 --config.num_episodes_per_video=5 --config.eval_interval=1000000 --reward_scale=1.0 --reward_bias=-0.1 --config.libero_tfrecord_regexp="/home/skowshik/vla/codebase/PolicyAgnosticRL/debug_pi_res_td3/image_replay_buffer/*.tfrecord" --filter_successful_trajectories=True --config.save_dir="./debug_res_ppo_ws_wt10_edit_actor_ws" --scale_success_alpha=2.0 --intermediate_reward_mul_factor 10.0 --warmup_steps 5000 --num_train_steps 50000 --config.image_replay_buffer_kwargs.use_gae=True --balance_offline_training_data=False --config.save_interval=200 --on_policy=True --critic_success_wt=10.0 --bc_loss_coef=1000.0
+rm -r debug_refactor && WANDB_ENTITY=shreyas-kowshik CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./train_pi_residual.py --config=configs/libero_config.py:pi_residual_ppo --seed=0 --task_name="put both moka pots on the stove" --config.batch_size=256 --config.agent_kwargs.batch_size=256 --environment_name=libero --wandb_experiment_name=debug_res_td3_ws --num_edit_samples=4 --num_actions_to_sample=4 --final_step_sparse_reward=False --online_trajectory_collection_frequency 200 --num_trajectories_to_collect=10 --config.utd_ratio=1 --config.num_eval_episodes=10 --config.num_episodes_per_video=5 --config.eval_interval=1000000 --reward_scale=1.0 --reward_bias=-0.1 --config.libero_tfrecord_regexp="/home/skowshik/vla/codebase/PolicyAgnosticRL/debug_pi_res_td3/image_replay_buffer/*.tfrecord" --filter_successful_trajectories=True --config.save_dir="./debug_refactor" --scale_success_alpha=2.0 --intermediate_reward_mul_factor 10.0 --warmup_steps 5000 --num_train_steps 50000 --config.image_replay_buffer_kwargs.use_gae=True --balance_offline_training_data=False --config.save_interval=200 --on_policy=True --critic_success_wt=10.0 --bc_loss_coef=1000.0
 ```
 
 ## PPO full training
 ```
-rm -r res_ppo_full_training && WANDB_ENTITY=shreyas-kowshik CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./train_pi_residual.py --config=configs/libero_config.py:pi_residual_ppo --seed=0 --task_name="put both moka pots on the stove" --config.batch_size=256 --config.agent_kwargs.batch_size=256 --environment_name=libero --wandb_experiment_name=debug_res_td3_ws --num_edit_samples=4 --num_actions_to_sample=4 --final_step_sparse_reward=False --online_trajectory_collection_frequency 200 --num_trajectories_to_collect=10 --config.utd_ratio=1 --config.num_eval_episodes=10 --config.num_episodes_per_video=5 --config.eval_interval=1000000 --reward_scale=1.0 --reward_bias=-0.1 --config.libero_tfrecord_regexp="/home/skowshik/vla/codebase/PolicyAgnosticRL/debug_pi_res_td3/image_replay_buffer/*.tfrecord" --filter_successful_trajectories=True --config.save_dir="./res_ppo_full_training" --scale_success_alpha=2.0 --intermediate_reward_mul_factor 10.0 --warmup_steps 0 --num_train_steps 50000 --config.image_replay_buffer_kwargs.use_gae=True --balance_offline_training_data=False --config.save_interval=200 --on_policy=True --critic_success_wt=10.0 --bc_loss_coef=1000.0 --params_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/debug_res_ppo_ws_wt10_edit_actor_ws/checkpoint_2000.pkl"
+rm -r res_ppo_full_training && WANDB_ENTITY=shreyas-kowshik CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./train_pi_residual.py --config=configs/libero_config.py:pi_residual_ppo --seed=0 --task_name="put both moka pots on the stove" --config.batch_size=256 --config.agent_kwargs.batch_size=256 --environment_name=libero --wandb_experiment_name=debug_res_td3_ws --num_edit_samples=4 --num_actions_to_sample=4 --final_step_sparse_reward=False --online_trajectory_collection_frequency 500 --num_trajectories_to_collect=10 --config.utd_ratio=4 --config.num_eval_episodes=10 --config.num_episodes_per_video=5 --config.eval_interval=1000000 --reward_scale=1.0 --reward_bias=-0.1 --config.libero_tfrecord_regexp="/home/skowshik/vla/codebase/PolicyAgnosticRL/debug_pi_res_td3/image_replay_buffer/*.tfrecord" --filter_successful_trajectories=True --config.save_dir="./res_ppo_full_training" --scale_success_alpha=2.0 --intermediate_reward_mul_factor 10.0 --warmup_steps 3000 --num_train_steps 50000 --config.image_replay_buffer_kwargs.use_gae=True --balance_offline_training_data=False --config.save_interval=200 --on_policy=True --critic_success_wt=10.0 --bc_loss_coef=10000.0 --params_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/debug_res_ppo_ws_wt10_edit_actor_ws/checkpoint_2000.pkl"
 ```
 
 ##########################
 
 ## Visualize Trained Model
+### PPO
 ```
-python visualize_traj_predictions.py --tfrecord_path="/data/user_data/skowshik/libero_10_pi05_put_the_two_mocha_pots_on_the_stove/results_expo/image_replay_buffer/episode_13.tfrecord" --checkpoint_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/debug_res_ppo_ws_wt10_edit_actor_ws/checkpoint_2000.pkl" --output_path="./traj_vis_ppo_online_critic_ws_wt10_13.mp4"
+python visualize_traj_predictions.py \
+  --config=configs/libero_config.py:pi_residual_ppo \
+  --agent_name=pi_residual_ppo \
+  --tfrecord_path="/data/user_data/skowshik/gradacc_2k_base_policy_rollouts/image_replay_buffer/episode_2.tfrecord" \
+  --checkpoint_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/debug_res_ppo_ws_wt10_edit_actor_ws/checkpoint_2000.pkl" \
+  --output_path="./traj_vis_ppo_online_critic_ws_wt10_1_v3.mp4" \
+  --vis_type=1 \
+  --config.image_replay_buffer_kwargs.load_log_probs=False \
+  --config.image_replay_buffer_kwargs.use_gae=False
+```
+
+### TD3
+```
+python visualize_traj_predictions.py \
+  --config=configs/libero_config.py:pi_residual_td3 \
+  --agent_name=pi_residual_td3 \
+  --tfrecord_path="/data/user_data/skowshik/gradacc_2k_base_policy_rollouts/image_replay_buffer/episode_2.tfrecord" \
+  --checkpoint_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/td3_gradacc2_2k_base_ws/checkpoint_2000.pkl" \
+  --output_path="./traj_vis_td3_umap_ws_wt10_1_q_v3.mp4" \
+  --vis_type=2 \
+  --config.image_replay_buffer_kwargs.load_action_samples=True
 ```
 
 ```
-python dump_tf_record.py --tfrecord_path "/home/skowshik/vla/codebase/PolicyAgnosticRL/res_ppo_full_training/seed_0/image_replay_buffer/episode_249.tfrecord" --output_gif_path "./vis_traj_v2.mp4"
+python dump_tf_record.py --tfrecord_path "/home/skowshik/vla/codebase/PolicyAgnosticRL/res_ppo_full_training/seed_0/image_replay_buffer/episode_759.tfrecord" --output_gif_path "./vis_traj_v2.mp4"
 ```

@@ -51,6 +51,7 @@ from jaxrl_m.common.typing import Batch, Data, PRNGKey
 from jaxrl_m.agents.continuous.pi_0 import PiPolicy
 from openpi.training.config import TrainConfig
 import openpi.models.gemma as _gemma
+from jaxrl_m.agents.continuous.pi_vlm_cached.residual_base import PiResidualBase
 
 
 def decay_mask_fn(params):
@@ -124,22 +125,23 @@ def _edit_actor_loss_and_grad(
         actions = jnp.clip(actions_sampled, -0.98, 0.98)
         _log_probs = dist.log_prob(actions)
         log_probs = jnp.clip(_log_probs, -20.0, 20.0)
+        old_log_probs_clip = jnp.clip(old_log_probs, -20.0, 20.0)
 
         # jax.debug.breakpoint()
-        ratio = jnp.exp(log_probs - old_log_probs)
-        policy_loss = -(jnp.minimum(ratio * advantages, jnp.clip(ratio, 1 - epsilon_low, 1 + epsilon_high) * advantages)).mean()
+        ratio = jnp.exp(log_probs - old_log_probs_clip)
+        policy_loss = -(jnp.minimum(ratio * advantages, jnp.clip(ratio, 1 - epsilon_low, 1 + epsilon_high) * advantages))
         
         # entropy = dist.entropy()
         entropy = 0.5 * (1.0 + jnp.log(2.0 * jnp.pi)) + log_stds
         if entropy.ndim > 1:
             entropy = entropy.sum(axis=-1)
 
-        entropy_loss = -entropy.mean()
-        ppo_loss = policy_loss + ent_coef * entropy_loss
+        entropy_loss = -entropy
+        ppo_loss = ((policy_loss + ent_coef * entropy_loss) * (1.0 - offline_flag)).mean()
 
         # Only apply BC loss to successful trajectories #
         bc_loss = (jnp.square(batch_actions - means) * success).mean()
-        edit_actor_loss = bc_loss * bc_loss_coef + (ppo_loss * (1.0 - bc_warmup) * (1.0 - offline_flag)) # Only do bc loss on offline data for PPO
+        edit_actor_loss = bc_loss * bc_loss_coef + (ppo_loss * (1.0 - bc_warmup)) # Only do bc loss on offline data for PPO
 
         clip_frac_low = (ratio < 1 - epsilon_low).mean()
         clip_frac_high = (ratio > 1 + epsilon_high).mean()
@@ -236,7 +238,7 @@ def _critic_loss_and_grad(
         # Weight using success_wt
         critic_loss_success = critic_loss_unweighted * success_mask * success_wt
         critic_loss_failure = critic_loss_unweighted * (1.0 - success_mask)
-        critic_loss = ((critic_loss_success + critic_loss_failure) * offline_flag).mean()
+        critic_loss = ((critic_loss_success + critic_loss_failure) * (1.0 - offline_flag)).mean() # Update critic only on online data
 
         metrics = {
             "critic_loss": critic_loss,
@@ -369,9 +371,9 @@ class PiResidualPPOCache(Agent):
         entropy_mul_scale_factor: float = 3.0,
         exploration_epsilon: float = 0.05,
         critic_success_wt: float = 1.0,
-        epsilon_low: float = 0.2,
-        epsilon_high: float = 0.2,
-        ent_coef: float = 0.001,
+        epsilon_low: float = 0.05,
+        epsilon_high: float = 0.05,
+        ent_coef: float = 0.00001,
     ):
         # Assertions
         assert N >= n_edit_samples, f"N must be greater than or equal to n_edit_samples, got N={N} and n_edit_samples={n_edit_samples}"
@@ -546,6 +548,23 @@ class PiResidualPPOCache(Agent):
     
     def get_state_values(self, vlm_output: np.ndarray, *args, **kwargs):
         vlm_output = vlm_output.reshape(1, -1)
+        return compute_v_all(self.critic.apply_fn, self.critic.params, vlm_output)[0]
+    
+    def compute_q(self, vlm_output: np.ndarray, actions: np.ndarray, *args, **kwargs):
+        """Compute Q-values for given VLM output and actions.
+        
+        For PPO, this actually computes state values (V) as PPO uses a value function.
+        Method exists for interface compatibility with TD3.
+        
+        Args:
+            vlm_output: VLM output representation (can be batched or single)
+            actions: Actions (not used for PPO, kept for interface compatibility)
+            
+        Returns:
+            State values (same shape as batch dimension)
+        """
+        if vlm_output.ndim == 1:
+            vlm_output = vlm_output.reshape(1, -1)
         return compute_v_all(self.critic.apply_fn, self.critic.params, vlm_output)[0]
 
     def sample_actions(self, _observations: Data, is_target=False, *args, **kwargs):

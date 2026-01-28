@@ -445,25 +445,59 @@ BASE_RESIDUAL_TD3_CONFIG = dict(
     # PaliGemma config name from openpi
     paligemma_config_name="pi05_libero_custom_low_mem",
     agent_kwargs=dict(
-        batch_size=16,
-        score_network_kwargs=dict(
-            time_dim=128,
-            num_blocks=3,
-            dropout_rate=0.1,
-            hidden_dim=256,
-            use_layer_norm=True,
-        ),
-        use_proprio=False,
-        beta_schedule="cosine",
-        diffusion_steps=5,
-        action_samples=64,
-        repeat_last_step=0,
-        learning_rate=3e-4,
-        warmup_steps=1000,
-        actor_decay_steps=int(3e6),
-        image_observations=False,
+        # Agent architecture params
+        action_dim=7,
+        state_dim=8,
+        hidden_dims=(512, 512, 512, 512),
+        
+        # Learning rates
+        actor_lr=3e-4,
+        critic_lr=3e-4,
+        temp_lr=3e-4,
+        
+        # Training params
         discount=0.99,
-        drq_padding=0,
+        tau=0.005,
+        decay_steps=int(3e6),
+        
+        # Critic params
+        num_qs=2,
+        num_min_qs=None,
+        critic_dropout_rate=None,
+        critic_weight_decay=None,
+        critic_layer_norm=True,
+        use_critic_resnet=False,
+        
+        # Actor params
+        actor_tau=0.003,
+        actor_dropout_rate=None,
+        actor_num_blocks=3,
+        actor_layer_norm=True,
+        
+        # Action sampling params
+        N=4,
+        n_edit_samples=4,
+        edit_action_scale=3.0,
+        exploration_epsilon=0.05,
+        
+        # Entropy params
+        target_entropy=None,
+        entropy_scale=1.0,
+        init_temperature=1.0,
+        entropy_mul_scale_factor=3.0,
+        adjust_target_entropy=True,
+        
+        # Other params
+        backup_entropy=True,
+        use_pnorm=False,
+        clip_sampler=True,
+        time_dim=128,
+        T=10,
+        M=0,
+        batch_split=1,
+        ddpm_temperature=1.0,
+        beta_schedule='vp',
+        batch_size_dict_key='actions',
     ),
 )
 
@@ -496,25 +530,65 @@ BASE_RESIDUAL_PPO_CONFIG = dict(
     # PaliGemma config name from openpi
     paligemma_config_name="pi05_libero_custom_low_mem",
     agent_kwargs=dict(
-        batch_size=16,
-        score_network_kwargs=dict(
-            time_dim=128,
-            num_blocks=3,
-            dropout_rate=0.1,
-            hidden_dim=256,
-            use_layer_norm=True,
-        ),
-        use_proprio=False,
-        beta_schedule="cosine",
-        diffusion_steps=5,
-        action_samples=64,
-        repeat_last_step=0,
-        learning_rate=3e-4,
-        warmup_steps=1000,
-        actor_decay_steps=int(3e6),
-        image_observations=False,
+        # Agent architecture params
+        action_dim=7,
+        state_dim=8,
+        hidden_dims=(512, 512, 512, 512),
+        
+        # Learning rates
+        actor_lr=3e-4,
+        critic_lr=3e-4,
+        temp_lr=3e-4,
+        
+        # Training params
         discount=0.99,
-        drq_padding=0,
+        tau=0.005,
+        decay_steps=int(3e6),
+        
+        # Critic params (PPO uses value function, num_qs=1 by default)
+        num_qs=1,
+        num_min_qs=None,
+        critic_dropout_rate=None,
+        critic_weight_decay=None,
+        critic_layer_norm=True,
+        use_critic_resnet=False,
+        critic_success_wt=1.0,
+        
+        # Actor params
+        actor_tau=0.003,
+        actor_dropout_rate=None,
+        actor_num_blocks=3,
+        actor_layer_norm=True,
+        
+        # Action sampling params
+        N=4,
+        n_edit_samples=4,
+        edit_action_scale=3.0,
+        exploration_epsilon=0.05,
+        
+        # PPO-specific params
+        epsilon_low=0.05,
+        epsilon_high=0.05,
+        ent_coef=0.00001,
+        
+        # Entropy params
+        target_entropy=None,
+        entropy_scale=1.0,
+        init_temperature=1.0,
+        entropy_mul_scale_factor=3.0,
+        adjust_target_entropy=True,
+        
+        # Other params
+        backup_entropy=True,
+        use_pnorm=False,
+        clip_sampler=True,
+        time_dim=128,
+        T=10,
+        M=0,
+        batch_split=1,
+        ddpm_temperature=1.0,
+        beta_schedule='vp',
+        batch_size_dict_key='actions',
     ),
 )
 

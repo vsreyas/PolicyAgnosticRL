@@ -70,8 +70,11 @@ from jaxrl_m.utils.timer_utils import Timer
 from jaxrl_m.utils.train_utils import concatenate_batches, load_recorded_video
 from jaxrl_m.vision import encoders
 from jaxrl_m.utils.train_utils import preprocess_action, repack_action
-from jaxrl_m.agents.continuous.pi_vlm_cached.residual_td3 import PiResidualTD3Cache
-from jaxrl_m.agents.continuous.pi_vlm_cached.residual_ppo import PiResidualPPOCache
+from jaxrl_m.agents.continuous.pi_vlm_cached import (
+    create_agent,
+    PiResidualTD3Cache,
+    PiResidualPPOCache,
+)
 from jaxrl_m.utils.expo_utils import calc_mc_return_fn
 from jaxrl_m.envs.libero import StepTimeout, time_limit, STEP_TIME_LIMIT
 
@@ -93,6 +96,7 @@ flags.DEFINE_string("environment_name", "", "Environment name.")
 flags.DEFINE_string("wandb_project_name", "PI-0.5-finetuning", "WandB project name.") #"PA-RL""debug"
 flags.DEFINE_string("wandb_experiment_name", "", "WandB experiment name.")
 flags.DEFINE_string("wandb_group", "", "WandB group.")
+flags.DEFINE_string("agent_name", "pi_residual_td3", "Agent name (pi_residual_td3 or pi_residual_ppo).")
 config_flags.DEFINE_config_file(
     "config",
     None,
@@ -236,7 +240,11 @@ flags.DEFINE_float(
     1000.0,
     "Weight to multiply successful trajectories in a batch with bc loss",
 )
-
+flags.DEFINE_bool(
+    "load_action_samples",
+    False,
+    "Flag for whether we want to load action samples for each state"
+)
 
 ### Try subprocenv ###
 import multiprocessing as mp
@@ -344,7 +352,7 @@ BASE_POLICY_TYPE_TO_CLASS = {
 devices = jax.local_devices()
 
 def get_policy_fn(
-    agent: PiResidualTD3Cache,
+    agent,
     rng: jax.random.PRNGKey,
     timer: Timer | None = None,
     deterministic_actions: bool = False,
@@ -366,7 +374,7 @@ def get_policy_fn(
     return policy_fn
 
 def get_base_policy_fn(
-    agent: PiResidualTD3Cache,
+    agent,
     rng: jax.random.PRNGKey,
 ) -> Callable[[Data], np.ndarray]:
     def policy_fn(observations: Data, *args, **kwargs) -> np.ndarray:
@@ -398,7 +406,7 @@ def get_value_fn(
     return value_fn
 
 def get_vlm_output_fn(
-    agent: PiResidualTD3Cache,
+    agent,
     rng: jax.random.PRNGKey,
     timer: Timer | None = None,
     debug_mode: bool = False,
@@ -552,8 +560,7 @@ def train_agent(_):
                 drop_images_from_output=True, # Do not need it as we are caching things at trajectory generation time #
                 paths=paths, # If `None` then constructs paths based on `tfrecord_regexp`
                 offline_flag=1.0,
-                use_dummy_adv_returns=True,
-                use_dummy_advantages=True,
+                **FLAGS.config.offline_image_replay_buffer_kwargs,
             )
         else:
             dataset = None
@@ -570,7 +577,7 @@ def train_agent(_):
 
     if dataset is not None:
         offline_train_iterator = dataset.iterator(
-            batch_size=FLAGS.config.agent_kwargs.batch_size
+            batch_size=FLAGS.config.batch_size
         )
     else:
         offline_train_iterator = None
@@ -593,46 +600,31 @@ def train_agent(_):
     ### Create EXPO agent #
     rng, construct_rng = jax.random.split(rng)
     
-    # critic_params = None
-    # edit_actor_params = None
-    # if FLAGS.params_path is not None:
-    #     params = pickle.load(open(FLAGS.params_path, 'rb'))
-    #     if 'critic_params' in params:
-    #         critic_params = params['critic_params']
-    #     if 'edit_actor_params' in params:
-    #         edit_actor_params = params['edit_actor_params']
-    
-    
     # Make sure online buffer does not exist already otherwise this will overwrite it #
     assert not tf.io.gfile.exists(
         tf.io.gfile.join(save_dir, "image_replay_buffer", "episode_0.tfrecord")
     ), f"Image replay buffer already exists! ({tf.io.gfile.join(save_dir, 'image_replay_buffer', 'episode_0.tfrecord')})"
     
-    # agent = PiResidualTD3Cache.create(
-    #     config=pi_config,
-    #     seed=FLAGS.seed,
-    #     batch_size=FLAGS.config.batch_size,
-    #     rng=construct_rng,
-    #     N=FLAGS.num_actions_to_sample,
-    #     n_edit_samples=FLAGS.num_edit_samples,
-    #     critic_params=critic_params,
-    #     edit_actor_params=edit_actor_params,
-    #     exploration_epsilon=FLAGS.exploration_epsilon,
-    # )
-    agent = PiResidualPPOCache.create(
+    # Build agent kwargs from config and flags
+    # Remove keys that are already passed explicitly to avoid conflicts
+    agent_kwargs = dict(FLAGS.config.agent_kwargs)
+    for key in ['config', 'seed', 'batch_size', 'rng', 'params_path']:
+        agent_kwargs.pop(key, None)
+    
+    agent = create_agent(
+        agent_name=FLAGS.agent_name,
         config=pi_config,
         seed=FLAGS.seed,
         batch_size=FLAGS.config.batch_size,
         rng=construct_rng,
-        N=FLAGS.num_actions_to_sample,
-        n_edit_samples=FLAGS.num_edit_samples,
         params_path=FLAGS.params_path,
-        exploration_epsilon=FLAGS.exploration_epsilon,
-        critic_success_wt=FLAGS.critic_success_wt,
+        **agent_kwargs,
     )
-    # breakpoint()
 
     timer = Timer()
+
+    # example_batch = next(offline_train_iterator)
+    # breakpoint()
 
     ### Evaluation Setup ###
     env_data_collection_policy_fn = None  # Will get set later
@@ -832,7 +824,7 @@ def train_agent(_):
 
             # Update online iterator #
             online_train_iterator = image_replay_buffer.iterator(
-                batch_size=FLAGS.config.agent_kwargs.batch_size
+                batch_size=FLAGS.config.batch_size
             )
 
             rng, rng_update = jax.random.split(rng)
@@ -842,8 +834,9 @@ def train_agent(_):
         print("Warmup")
         timer.tick("sample_batch_time")
         offline_batch = next(offline_train_iterator)
-        online_batch = next(online_train_iterator)
-        batch = concatenate_batches([offline_batch, online_batch])
+        # online_batch = next(online_train_iterator)
+        # batch = concatenate_batches([offline_batch, online_batch])
+        batch = offline_batch
         timer.tock("sample_batch_time")
         agent, info = agent.update(batch, 
             utd_ratio=FLAGS.config.utd_ratio, 

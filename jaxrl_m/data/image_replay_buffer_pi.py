@@ -223,6 +223,7 @@ class ImageReplayBufferPi:
         offline_flag=1.0, # By default assumes data is offline and not from current policy as such
         use_dummy_adv_returns=False, # Initializes "returns_tf_from_adv" as the mc_returns itself; IMPORTANT to not use this value and only treat it as a placeholder
         use_dummy_advantages=False, # ...
+        load_action_samples=False, # For diffusion action samples
     ):
         self.goal_relabeling_strategy = goal_relabeling_strategy
         self.goal_relabeling_kwargs = goal_relabeling_kwargs
@@ -291,6 +292,7 @@ class ImageReplayBufferPi:
         self.offline_flag = offline_flag
         self.use_dummy_adv_returns = use_dummy_adv_returns
         self.use_dummy_advantages = use_dummy_advantages
+        self.load_action_samples = load_action_samples
         dataset = self._construct_tf_dataset(data_paths, seed)
 
         self.train = train
@@ -520,6 +522,9 @@ class ImageReplayBufferPi:
         
         if self.load_log_probs:
             self.PROTO_TYPE_SPEC["log_probs"] = tf.float32
+        
+        if self.load_action_samples:
+            self.PROTO_TYPE_SPEC["action_samples"] = tf.float32
         
         # Build features dict with special handling for episode_id
         features = {
@@ -906,18 +911,6 @@ class ImageReplayBufferPi:
                 image1_ns = image1_ns.numpy()
             if hasattr(next_actions, "numpy"):
                 next_actions = next_actions.numpy()
-            
-            # This is inverting the image, DO NOT do this!: BUG FIX #
-            # if img0.ndim == 4:   # [T,H,W,C]
-            #     img0 = img0[:, ::-1, ::-1, :]
-            #     img1 = img1[:, ::-1, ::-1, :]
-            #     image0_ns = image0_ns[:, ::-1, ::-1, :]
-            #     image1_ns = image1_ns[:, ::-1, ::-1, :]
-            # else:                # [H,W,C]
-            #     img0 = img0[::-1, ::-1, :]
-            #     img1 = img1[::-1, ::-1, :]
-            #     image0_ns = image0_ns[::-1, ::-1, :]
-            #     image1_ns = image1_ns[::-1, ::-1, :]
 
             if self.use_8D and state.shape[-1] != 8:
                 state = convert_state_15_to_8(state)
@@ -930,7 +923,7 @@ class ImageReplayBufferPi:
                 "actions": actions,
                 "observation/wrist_image": img1, 
                 "prompt": prompt,            
-                }
+            }
             
             # Apply OpenPI transform chain
             out = self.data_transforms(input_dict)
@@ -1058,8 +1051,8 @@ class ImageReplayBufferPi:
             idx = 0
             out['observations'] = {}
             out['observations']["proprio"] = outputs[idx]; idx += 1
-            # out["actions"] = outputs[idx]; idx += 1 #drop the last action to align dimensions
-            out["actions"] = actions_tf; idx += 1
+            # Use normalized actions from transforms
+            out["actions"] = outputs[idx]; idx += 1
 
             
             out['observations']["image"] = outputs[idx]; idx += 1
@@ -1082,8 +1075,8 @@ class ImageReplayBufferPi:
             # Apply to next states/images
             out['next_observations'] = {}
             out['next_observations']["proprio"] = outputs[idx]; idx += 1
-            # out["next_actions"] = outputs[idx]; idx += 1
-            out["next_actions"] = next_actions_tf; idx += 1
+            # Use normalized next_actions from transforms
+            out["next_actions"] = outputs[idx]; idx += 1
 
             out['next_observations']["image"] = outputs[idx]; idx += 1
             out['next_observations']["wrist_image"] = outputs[idx]; idx += 1
@@ -1235,6 +1228,11 @@ class ImageReplayBufferPi:
             out['diffusion_actions'] = _diffusion_actions_tf
             out['next_vlm_output'] = next_state_vlm_output_tf
             out['next_diffusion_actions'] = next_state_diffusion_actions_tf
+        
+        if "action_samples" in parsed_tensors:
+            action_samples = parsed_tensors["action_samples"]
+            action_samples_tf = tf.gather(action_samples, start_idx)
+            out["action_samples"] = action_samples_tf
         
         # If 'terminals' sum is > 0, then add a new key to out called 'success' and set it to 1, otherwise set it to 0 #
         # Make this the same size as 'terminals' #
@@ -1551,6 +1549,13 @@ def save_trajectory_as_tfrecord(trajectory: Dict[str, np.ndarray], path: str):
                         if "log_probs" in trajectory
                         else {}
                     ),
+                    **(
+                        {
+                            "action_samples": tensor_feature(
+                                np.array(trajectory["action_samples"], dtype=np.float32)
+                            ),
+                        }
+                    )
                 }
             )
         )

@@ -11,6 +11,8 @@ import jax
 # jax.config.update("jax_traceback_filtering", "off")  # more context in logs
 
 import jax.numpy as jnp
+import os
+import pickle
 import optax
 from flax import struct
 import flax.linen as nn
@@ -47,6 +49,7 @@ from jaxrl_m.common.typing import Batch, Data, PRNGKey
 from jaxrl_m.agents.continuous.pi_0 import PiPolicy
 from openpi.training.config import TrainConfig
 import openpi.models.gemma as _gemma
+from jaxrl_m.agents.continuous.pi_vlm_cached.residual_base import PiResidualBase
 
 
 def decay_mask_fn(params):
@@ -440,8 +443,7 @@ class PiResidualTD3Cache(Agent):
         critic_dropout_rate: Optional[float] = None,
         critic_weight_decay: Optional[float] = None,
         critic_layer_norm: bool = True,
-        critic_params: Optional[at.Params] = None,
-        edit_actor_params: Optional[at.Params] = None,
+        params_path: Optional[str] = None,
         target_entropy: Optional[float] = None,
         entropy_scale: float = 1.0,
         init_temperature: float = 1.0,
@@ -492,6 +494,14 @@ class PiResidualTD3Cache(Agent):
 
         rng = jax.random.PRNGKey(seed)
         rng, actor_key, critic_key, temp_key = jax.random.split(rng, 4)
+
+        # Load params if `params_path` is provided #
+        critic_params = None
+        target_critic_params = None
+        edit_actor_params = None
+        temp_params = None
+        if params_path is not None:
+            critic_params, target_critic_params, edit_actor_params, temp_params = load_checkpoint(params_path)
 
         # Init Pi0 model #
         actor = PiPolicy(rng=rng, config=config, is_target=False)
@@ -554,6 +564,8 @@ class PiResidualTD3Cache(Agent):
             print("\n\n\nInitializing critic parameters from scratch...\n\n\n")
             critic_params = critic_def.init(
                 critic_key, dummy_observations, dummy_actions)["params"]
+        else:
+            print("\n\n\nInitializing critic parameters loaded from checkpoint...\n\n\n")
 
         if critic_weight_decay is not None:
             tx = optax.adamw(
@@ -573,15 +585,25 @@ class PiResidualTD3Cache(Agent):
             params=critic_params,
             tx=tx,
         )
+
+        # Create target critic with same architecture
         target_critic_def = Ensemble(critic_cls, num=num_min_qs or num_qs)
+        # Use target_critic_params if loaded, otherwise use critic_params
+        target_critic_init_params = target_critic_params if target_critic_params is not None else critic_params
         target_critic = TrainState.create(
             apply_fn=target_critic_def.apply,
-            params=critic_params,
+            params=target_critic_init_params,
             tx=optax.GradientTransformation(lambda _: None, lambda _: None),
         )
 
         temp_def = Temperature(init_temperature)
-        temp_params = temp_def.init(temp_key)["params"]
+
+        if temp_params is None:
+            print("\n\n\nInitializing temperature parameters from scratch...\n\n\n")
+            temp_params = temp_def.init(temp_key)["params"]
+        else:
+            print("\n\n\nInitializing temperature parameters loaded from checkpoint...\n\n\n")
+
         temp = TrainState.create(
             apply_fn=temp_def.apply,
             params=temp_params,
@@ -708,7 +730,7 @@ class PiResidualTD3Cache(Agent):
         seed = kwargs.pop("seed", None)
         seed, rng = jax.random.split(seed)
 
-        num_action_samples = kwargs.pop("num_action_samples", 1)
+        num_action_samples = kwargs.pop("num_diffusion_samples", 1)
 
         # Repeat observations to sample `N` actions#
         # observations = repeat_observations(_observations, self.N, axis=0)
@@ -737,10 +759,7 @@ class PiResidualTD3Cache(Agent):
         state = processed_obs['state'][0, :8][None, :8]  # State dimension
         # (1, pi0_hidden_dims + state_dim)
         vlm_output = jnp.concatenate([vlm_output, state], axis=1)
-
-        # action = diffusion_actions
-        if num_action_samples == 1:
-            action = diffusion_actions
+        action = diffusion_actions
 
         rng, _ = jax.random.split(rng, 2)
         out_dict = {
@@ -751,6 +770,8 @@ class PiResidualTD3Cache(Agent):
 
         if num_action_samples > 1:
             out_dict["action_samples"] = diffusion_samples
+        else:
+            out_dict["action_samples"] = diffusion_actions
 
         return out_dict
 
@@ -778,6 +799,31 @@ class PiResidualTD3Cache(Agent):
         vlm_output = jnp.concatenate([vlm_output, state], axis=1)
 
         return vlm_output[0]
+    
+    def compute_q(self, vlm_output: np.ndarray, actions: np.ndarray, *args, **kwargs):
+        """Compute Q-values for given VLM output and actions.
+        
+        Args:
+            vlm_output: VLM output representation (can be batched or single)
+            actions: Actions (can be batched or single)
+            
+        Returns:
+            Q-values from first Q-head (same shape as batch dimension)
+        """
+        # Ensure proper shapes
+        if vlm_output.ndim == 1:
+            vlm_output = vlm_output.reshape(1, -1)
+        if actions.ndim == 1:
+            actions = actions.reshape(1, -1)
+            
+        q_values = compute_q_all(
+            self.critic.apply_fn, 
+            self.critic.params, 
+            vlm_output, 
+            actions
+        )
+        # Return first Q-head
+        return q_values[0]
 
     def update_edit_actor(self, batch: Batch, *args, **kwargs) -> Tuple[Agent, Dict[str, float]]:
         seed = kwargs.pop("seed", None)
@@ -1000,3 +1046,30 @@ class PiResidualTD3Cache(Agent):
         print(timer.get_total_times(reset=False))
 
         return new_agent, {**actor_info, **critic_info, **actor_update_info}
+
+    def save_checkpoint(self, path: str, step: int):
+        checkpoint = {
+            'critic_params': self.critic.params,
+            'target_critic_params': self.target_critic.params,
+            'edit_actor_params': self.edit_actor.params,
+            'temp_params': self.temp.params,
+            'step': step,
+        }
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'wb') as f:
+            pickle.dump(checkpoint, f)
+        # logging.info(f"Saved checkpoint to {path}")
+        print(f"Saved checkpoint to {path}")
+
+def load_checkpoint(path: str):
+    checkpoint = pickle.load(open(path, 'rb'))
+    critic_params = checkpoint['critic_params']
+    target_critic_params = checkpoint.get('target_critic_params', None)
+    edit_actor_params = checkpoint['edit_actor_params']
+    temp_params = checkpoint['temp_params']
+
+    # If target_critic_params not in checkpoint (old checkpoint), use critic_params
+    if target_critic_params is None:
+        target_critic_params = critic_params
+
+    return critic_params, target_critic_params, edit_actor_params, temp_params

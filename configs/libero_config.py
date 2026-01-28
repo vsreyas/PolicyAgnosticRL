@@ -196,16 +196,25 @@ def get_config(config_string):
     expo_config["image_replay_buffer_kwargs"] = dict()
 
     pi_residual_td3_config = deepcopy(BASE_RESIDUAL_TD3_CONFIG)
-    pi_residual_td3_config["agent_kwargs"]["batch_size"] = 256
-    pi_residual_td3_config["image_replay_buffer_kwargs"] = dict()
+    pi_residual_td3_config["batch_size"] = 256
+    pi_residual_td3_config["image_replay_buffer_kwargs"] = {
+        "load_action_samples": True,
+    }
+    pi_residual_td3_config["offline_image_replay_buffer_kwargs"] = dict()
 
     pi_residual_ppo_config = deepcopy(BASE_RESIDUAL_PPO_CONFIG)
-    pi_residual_ppo_config["agent_kwargs"]["batch_size"] = 256
+    pi_residual_ppo_config["batch_size"] = 256
     pi_residual_ppo_config["image_replay_buffer_kwargs"] = {
         "use_gae": True,
         "gae_lambda": 0.95,
         "gae_gamma": 0.99,
         "load_log_probs": True,
+        "load_action_samples": True,
+    }
+    pi_residual_ppo_config["offline_image_replay_buffer_kwargs"] = {
+        "use_dummy_adv_returns": True,
+        "use_dummy_advantages": True,
+        "load_action_samples": True,
     }
     ###############
 
