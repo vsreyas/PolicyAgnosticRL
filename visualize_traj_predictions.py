@@ -43,6 +43,10 @@ flags.DEFINE_bool("use_lang", True, "Use language conditioning.")
 flags.DEFINE_integer("fps", 10, "FPS for output video.")
 flags.DEFINE_integer("output_dim", 1024, "Output video dimension (width and height).")
 flags.DEFINE_integer("vis_type", 1, "Visualization type: 1=state values, 2=UMAP Q-values.")
+flags.DEFINE_bool("plot_grad_q_line", False, "Plot Q-gradient line in UMAP visualization.")
+flags.DEFINE_integer("grad_line_points", 20, "Number of points along gradient line.")
+flags.DEFINE_float("grad_line_scale_low", -0.5, "Low scale for gradient line.")
+flags.DEFINE_float("grad_line_scale_high", 0.5, "High scale for gradient line.")
 
 
 def load_trajectory_from_tfrecord(
@@ -112,7 +116,7 @@ def load_trajectory_from_tfrecord(
     }
 
     if use_wrist_view:
-        trajectory_data['observations']['image_wrist'] = []
+        trajectory_data['observations']['wrist_image'] = []
 
     # Iterate through the dataset to collect all steps
     dataset_iter = dataset.iterator(batch_size=1)
@@ -122,8 +126,8 @@ def load_trajectory_from_tfrecord(
         trajectory_data['observations']['image'].append(batch['observations']['image'][0])
         trajectory_data['observations']['proprio'].append(batch['observations']['proprio'][0])
 
-        if use_wrist_view and 'image_wrist' in batch['observations']:
-            trajectory_data['observations']['image_wrist'].append(batch['observations']['image_wrist'][0])
+        if use_wrist_view and 'wrist_image' in batch['observations']:
+            trajectory_data['observations']['wrist_image'].append(batch['observations']['wrist_image'][0])
 
         trajectory_data['actions'].append(batch['actions'][0])
         trajectory_data['rewards'].append(batch['rewards'][0])
@@ -153,8 +157,8 @@ def load_trajectory_from_tfrecord(
         'terminals': np.array(trajectory_data['terminals']),
     }
 
-    if use_wrist_view and len(trajectory_data['observations']['image_wrist']) > 0:
-        trajectory['observations']['image_wrist'] = np.array(trajectory_data['observations']['image_wrist'])
+    if use_wrist_view and len(trajectory_data['observations']['wrist_image']) > 0:
+        trajectory['observations']['wrist_image'] = np.array(trajectory_data['observations']['wrist_image'])
 
     if len(trajectory_data['vlm_output']) > 0:
         trajectory['vlm_output'] = np.array(trajectory_data['vlm_output'])
@@ -407,6 +411,10 @@ def create_visualization_video_umap(
     output_dir: str,
     fps: int = 10,
     dim: int = 1024,
+    plot_grad_q_line: bool = False,
+    grad_line_points: int = 20,
+    grad_line_scale_low: float = -0.5,
+    grad_line_scale_high: float = 0.5,
 ) -> None:
     """Create visualization with UMAP action embeddings and Q-values.
     
@@ -416,6 +424,10 @@ def create_visualization_video_umap(
         output_dir: Directory to save output files
         fps: Frames per second
         dim: Output video dimension (width and height)
+        plot_grad_q_line: Whether to plot Q-gradient line
+        grad_line_points: Number of points along gradient line
+        grad_line_scale_low: Low scale for gradient line
+        grad_line_scale_high: High scale for gradient line
     """
     # Create output directory
     output_dir = Path(output_dir)
@@ -432,7 +444,7 @@ def create_visualization_video_umap(
     diffusion_actions = trajectory.get('diffusion_actions', actions)  # (T, action_horizon, action_dim)
     vlm_outputs = trajectory['vlm_output']  # (T, hidden_dim)
     images_base = trajectory['observations']['image']  # (T, H, W, 3)
-    images_wrist = trajectory['observations'].get('image_wrist', images_base)
+    images_wrist = trajectory['observations'].get('wrist_image', images_base)
     
     T = len(actions)
     num_samples = action_samples.shape[1]
@@ -474,6 +486,60 @@ def create_visualization_video_umap(
     q_action_samples = np.array(q_action_samples)  # (T, num_samples)
     q_diffusion_actions = np.array(q_diffusion_actions)  # (T,)
     
+    # Compute gradient line if requested
+    grad_line_actions = None
+    grad_line_q_values = None
+    grad_line_embedded = None
+    
+    if plot_grad_q_line:
+        logging.info("Computing Q-value gradients for diffusion actions...")
+        
+        # Define a function to compute Q-value for a single action
+        def compute_q_single(action, vlm_output):
+            """Compute Q-value for a single action given VLM output."""
+            q_vals = agent.compute_q(vlm_output, action)
+            return q_vals[0]  # Return scalar Q-value
+        
+        # Create gradient function
+        grad_q_fn = jax.grad(compute_q_single, argnums=0)
+        
+        # Compute gradients and create line actions
+        all_grad_line_actions = []  # (T, grad_line_points, action_horizon*action_dim)
+        all_grad_line_q_values = []  # (T, grad_line_points)
+        
+        scales = np.linspace(grad_line_scale_low, grad_line_scale_high, grad_line_points)
+        
+        for t in range(T):
+            vlm_t = vlm_outputs[t]
+            diffusion_action_t = diffusion_actions_flat[t]
+            
+            # Compute gradient
+            grad_t = grad_q_fn(diffusion_action_t, vlm_t)  # (action_horizon*action_dim,)
+            grad_t = np.array(grad_t)
+            
+            # Normalize gradient to unit length
+            grad_norm = np.linalg.norm(grad_t)
+            if grad_norm > 1e-8:
+                grad_t = grad_t / grad_norm
+            
+            # Create line of actions along gradient
+            line_actions_t = []
+            line_q_values_t = []
+            
+            for scale in scales:
+                action_on_line = diffusion_action_t + scale * grad_t
+                line_actions_t.append(action_on_line)
+                
+                # Compute Q-value for this action
+                q_val = agent.compute_q(vlm_t, action_on_line)[0]
+                line_q_values_t.append(q_val)
+            
+            all_grad_line_actions.append(np.array(line_actions_t))
+            all_grad_line_q_values.append(np.array(line_q_values_t))
+        
+        grad_line_actions = np.array(all_grad_line_actions)  # (T, grad_line_points, action_horizon*action_dim)
+        grad_line_q_values = np.array(all_grad_line_q_values)  # (T, grad_line_points)
+    
     logging.info("Training UMAP on action samples...")
     # Flatten all action samples for UMAP
     all_actions_flat = action_samples_flat.reshape(-1, action_horizon * action_dim)  # (T*num_samples, action_horizon*action_dim)
@@ -483,6 +549,13 @@ def create_visualization_video_umap(
     
     # Embed diffusion actions
     diffusion_actions_embedded = reducer.transform(diffusion_actions_flat)  # (T, 2)
+    
+    # Embed gradient line actions if computed
+    if plot_grad_q_line:
+        logging.info("Embedding gradient line actions in UMAP space...")
+        grad_line_actions_flat = grad_line_actions.reshape(-1, action_horizon * action_dim)
+        grad_line_embedded_flat = reducer.transform(grad_line_actions_flat)  # (T*grad_line_points, 2)
+        grad_line_embedded = grad_line_embedded_flat.reshape(T, grad_line_points, 2)  # (T, grad_line_points, 2)
     
     logging.info("Creating video frames...")
     # For 2x2 layout: each panel is half of total width and height
@@ -530,6 +603,18 @@ def create_visualization_video_umap(
                       marker='X', s=200, c='yellow', edgecolors='black', linewidths=2,
                       label=f"Diffusion (Q={q_diffusion_actions[t]:.2f})")
             
+            # Plot gradient line if requested
+            if plot_grad_q_line and grad_line_embedded is not None:
+                grad_line_2d_t = grad_line_embedded[t]  # (grad_line_points, 2)
+                grad_line_q_t = grad_line_q_values[t]  # (grad_line_points,)
+                
+                # Plot as red X markers
+                grad_mask = np.isfinite(grad_line_q_t) & np.isfinite(grad_line_2d_t).all(axis=1)
+                if grad_mask.sum() > 0:
+                    ax.scatter(grad_line_2d_t[grad_mask, 0], grad_line_2d_t[grad_mask, 1],
+                             marker='x', s=100, c='red', linewidths=2,
+                             label='Grad Q line')
+            
             ax.set_xlabel("UMAP 1")
             ax.set_ylabel("UMAP 2")
             ax.set_title(f"UMAP Actions (t={t})")
@@ -562,6 +647,11 @@ def create_visualization_video_umap(
         'diffusion_actions': diffusion_actions_flat,  # (T, action_horizon*action_dim)
         'q_diffusion_actions': q_diffusion_actions,  # (T,)
     }
+    
+    # Add gradient line data if computed
+    if plot_grad_q_line and grad_line_actions is not None:
+        data_to_save['grad_line_actions'] = grad_line_actions  # (T, grad_line_points, action_horizon*action_dim)
+        data_to_save['grad_line_q_values'] = grad_line_q_values  # (T, grad_line_points)
     
     numpy_path = output_dir / "actions_and_q_values.npz"
     np.savez(numpy_path, **data_to_save)
@@ -635,6 +725,10 @@ def main(_):
             output_dir=FLAGS.output_dir,
             fps=FLAGS.fps,
             dim=FLAGS.output_dim,
+            plot_grad_q_line=FLAGS.plot_grad_q_line,
+            grad_line_points=FLAGS.grad_line_points,
+            grad_line_scale_low=FLAGS.grad_line_scale_low,
+            grad_line_scale_high=FLAGS.grad_line_scale_high,
         )
     else:
         raise ValueError(f"Invalid vis_type: {FLAGS.vis_type}. Must be 1 or 2.")
