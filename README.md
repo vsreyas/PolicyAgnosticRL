@@ -206,8 +206,8 @@ python visualize_traj_predictions.py \
   --config=configs/libero_config.py:pi_residual_td3 \
   --agent_name=pi_residual_td3 \
   --tfrecord_path="/data/user_data/skowshik/gradacc_2k_base_policy_rollouts/image_replay_buffer/episode_2.tfrecord" \
-  --checkpoint_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/td3_gradacc2_2k_base_ws/checkpoint_2000.pkl" \
-  --output_path="./traj_vis_td3_umap_ws_wt10_1_q_v3.mp4" \
+  --checkpoint_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/td3_gradacc2_2k_base_ws/checkpoint_1000.pkl" \
+  --output_dir="./traj_vis_td3_umap_ws_wt10_1_q" \
   --vis_type=2 \
   --config.image_replay_buffer_kwargs.load_action_samples=True
 ```

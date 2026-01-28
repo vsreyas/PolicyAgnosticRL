@@ -32,7 +32,7 @@ config_flags.DEFINE_config_file(
 )
 flags.DEFINE_string("tfrecord_path", None, "Path to tfrecord file (can be glob pattern).")
 flags.DEFINE_string("checkpoint_path", None, "Path to model checkpoint (.pkl file).")
-flags.DEFINE_string("output_path", "./trajectory_visualization.mp4", "Output path for visualization.")
+flags.DEFINE_string("output_dir", "./trajectory_visualization", "Output directory for visualization files.")
 flags.DEFINE_string("task_name", "put both moka pots on the stove", "Task name.")
 flags.DEFINE_string("pi_config_name", "pi05_libero_custom_low_mem_ep5", "PI config name.")
 flags.DEFINE_string("agent_name", "pi_residual_ppo", "Agent name (pi_residual_td3 or pi_residual_ppo).")
@@ -219,12 +219,14 @@ def compute_state_values(agent, vlm_outputs: np.ndarray) -> np.ndarray:
     return np.array(state_values)
 
 
-def create_value_plot(state_values: np.ndarray, current_step: int) -> np.ndarray:
+def create_value_plot(state_values: np.ndarray, current_step: int, title: str = 'Predicted State Values', ylabel: str = 'State Value') -> np.ndarray:
     """Create a plot of state values up to current step.
 
     Args:
         state_values: Array of state values
         current_step: Current timestep to plot up to
+        title: Plot title
+        ylabel: Y-axis label
 
     Returns:
         Image array (H, W, 3) in uint8 format
@@ -238,8 +240,8 @@ def create_value_plot(state_values: np.ndarray, current_step: int) -> np.ndarray
     ax.scatter([current_step], [values[-1]], color='red', s=100, zorder=5)
 
     ax.set_xlabel('Timestep', fontsize=12)
-    ax.set_ylabel('State Value', fontsize=12)
-    ax.set_title('Predicted State Values', fontsize=14)
+    ax.set_ylabel(ylabel, fontsize=12)
+    ax.set_title(title, fontsize=14)
     ax.grid(True, alpha=0.3)
 
     # Set consistent y-axis limits
@@ -287,7 +289,7 @@ def resize_image(img: np.ndarray, height: int, width: int) -> np.ndarray:
 def create_visualization_video(
     trajectory: Dict[str, np.ndarray],
     agent,
-    output_path: str,
+    output_dir: str,
     fps: int = 10,
     dim: int = 1024,
 ) -> None:
@@ -296,15 +298,19 @@ def create_visualization_video(
     Args:
         trajectory: Trajectory data dictionary
         agent: Trained agent with get_state_values method
-        output_path: Path to save output video
+        output_dir: Directory to save output files
         fps: Frames per second
         dim: Output video dimension (width and height)
     """
+    # Create output directory
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
     # Compute state values
     vlm_outputs = trajectory['vlm_output']
     state_values = compute_state_values(agent, vlm_outputs)
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    output_path = output_dir / "visualize.mp4"
 
     # Extract images from trajectory
     observations = trajectory['observations']
@@ -398,7 +404,7 @@ def plot_actions_colored_by_q(
 def create_visualization_video_umap(
     trajectory: Dict[str, np.ndarray],
     agent,
-    output_path: str,
+    output_dir: str,
     fps: int = 10,
     dim: int = 1024,
 ) -> None:
@@ -407,12 +413,15 @@ def create_visualization_video_umap(
     Args:
         trajectory: Trajectory data with action_samples, diffusion_actions
         agent: Trained agent (must support Q-value computation)
-        output_path: Path to save output video
+        output_dir: Directory to save output files
         fps: Frames per second
         dim: Output video dimension (width and height)
     """
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    # Create output directory
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    output_path = output_dir / "visualize.mp4"
     
     logging.info("Computing Q-values for action samples...")
     
@@ -476,9 +485,9 @@ def create_visualization_video_umap(
     diffusion_actions_embedded = reducer.transform(diffusion_actions_flat)  # (T, 2)
     
     logging.info("Creating video frames...")
-    # For 1x3 layout: each panel is third of total width, full height
-    panel_width = dim // 3
-    panel_height = dim // 2  # Keep reasonable aspect ratio
+    # For 2x2 layout: each panel is half of total width and height
+    panel_width = dim // 2
+    panel_height = dim // 2
     
     with imageio.get_writer(
         str(output_path),
@@ -491,6 +500,15 @@ def create_visualization_video_umap(
             # Resize images
             img_base = resize_image(images_base[t], panel_height, panel_width)
             img_wrist = resize_image(images_wrist[t], panel_height, panel_width)
+            
+            # Create Q-value trajectory plot
+            q_plot = create_value_plot(
+                q_diffusion_actions, 
+                t, 
+                title='Diffusion Action Q-Values',
+                ylabel='Q Value'
+            )
+            q_plot = resize_image(q_plot, panel_height, panel_width)
             
             # Create UMAP plot with Q-values
             # Add markers for selected and diffusion actions with Q-values
@@ -527,10 +545,27 @@ def create_visualization_video_umap(
             
             umap_img = resize_image(umap_img, panel_height, panel_width)
             
-            # Combine into 1x3 grid: [base | wrist | umap]
-            frame = np.concatenate([img_base, img_wrist, umap_img], axis=1)
+            # Combine into 2x2 grid: 
+            # [base | wrist]
+            # [q_plot | umap]
+            top_row = np.concatenate([img_base, img_wrist], axis=1)
+            bottom_row = np.concatenate([q_plot, umap_img], axis=1)
+            frame = np.concatenate([top_row, bottom_row], axis=0)
             
             writer.append_data(frame)
+    
+    # Save raw actions and Q-values to numpy file
+    data_to_save = {
+        'action_samples': action_samples_flat,  # (T, num_samples, action_horizon*action_dim)
+        'q_action_samples': q_action_samples,  # (T, num_samples)
+        'actions': actions_flat,  # (T, action_horizon*action_dim)
+        'diffusion_actions': diffusion_actions_flat,  # (T, action_horizon*action_dim)
+        'q_diffusion_actions': q_diffusion_actions,  # (T,)
+    }
+    
+    numpy_path = output_dir / "actions_and_q_values.npz"
+    np.savez(numpy_path, **data_to_save)
+    logging.info(f"Saved actions and Q-values to {numpy_path}")
     
     logging.info(f"UMAP visualization saved to {output_path}")
 
@@ -586,7 +621,7 @@ def main(_):
         create_visualization_video(
             trajectory=trajectory,
             agent=agent,
-            output_path=FLAGS.output_path,
+            output_dir=FLAGS.output_dir,
             fps=FLAGS.fps,
             dim=FLAGS.output_dim,
         )
@@ -597,7 +632,7 @@ def main(_):
         create_visualization_video_umap(
             trajectory=trajectory,
             agent=agent,
-            output_path=FLAGS.output_path,
+            output_dir=FLAGS.output_dir,
             fps=FLAGS.fps,
             dim=FLAGS.output_dim,
         )
