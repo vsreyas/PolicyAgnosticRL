@@ -198,7 +198,8 @@ def get_config(config_string):
     pi_residual_td3_config = deepcopy(BASE_RESIDUAL_TD3_CONFIG)
     pi_residual_td3_config["batch_size"] = 256
     pi_residual_td3_config["image_replay_buffer_kwargs"] = {
-        "load_action_samples": True,
+        "load_action_samples": False,
+        "use_gae": False,
     }
     pi_residual_td3_config["offline_image_replay_buffer_kwargs"] = dict()
 

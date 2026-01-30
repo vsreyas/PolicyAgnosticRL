@@ -33,7 +33,11 @@ from jaxrl_m.data.image_replay_buffer_pi import (
     save_trajectory_as_tfrecord,
 )
 from jaxrl_m.utils.timer_utils import Timer
-from jaxrl_m.agents.continuous.pi_vlm_cached.residual_td3 import PiResidualTD3Cache
+from jaxrl_m.agents.continuous.pi_vlm_cached import (
+    create_agent,
+    PiResidualTD3Cache,
+    PiResidualPPOCache,
+)
 from jaxrl_m.utils.expo_utils import calc_mc_return_fn
 
 try:
@@ -51,6 +55,7 @@ flags.DEFINE_string("environment_name", "", "Environment name.")
 flags.DEFINE_string("wandb_project_name", "PI-0.5-finetuning", "WandB project name.") #"PA-RL""debug"
 flags.DEFINE_string("wandb_experiment_name", "", "WandB experiment name.")
 flags.DEFINE_string("wandb_group", "", "WandB group.")
+flags.DEFINE_string("agent_name", "pi_residual_td3", "Agent name (pi_residual_td3 or pi_residual_ppo).")
 config_flags.DEFINE_config_file(
     "config",
     None,
@@ -155,9 +160,9 @@ flags.DEFINE_bool(
     "Use Wrist view camera."
 )
 flags.DEFINE_string(
-    "critic_params_path",
+    "params_path",
     None,
-    "Path to the critic parameters to load.",
+    "Path to the parameters to load.",
 )
 flags.DEFINE_bool(
     "filter_successful_trajectories",
@@ -215,7 +220,7 @@ def sanitize_obs(obs):
 
 
 def get_policy_fn(
-    agent: PiResidualTD3Cache,
+    agent,
     rng: jax.random.PRNGKey,
     timer: Timer | None = None,
     debug_mode: bool = False,
@@ -246,7 +251,7 @@ def get_policy_fn(
     return policy_fn
 
 def get_vlm_output_fn(
-    agent: PiResidualTD3Cache,
+    agent,
     rng: jax.random.PRNGKey,
     timer: Timer | None = None,
     debug_mode: bool = False,
@@ -302,8 +307,6 @@ def train_agent(_):
     # Create environment and dataset
     action_space = None
     offline_dataset_size = None
-
-    # breakpoint()
     
     ####### Dataset and evironment setup ###########
     if FLAGS.environment_name=="libero":
@@ -347,20 +350,20 @@ def train_agent(_):
     # LOG: sharded batch is used to calibrate batch size in `create` method of `ExpoPiLearner` class #
     rng, construct_rng = jax.random.split(rng)
     
-    if FLAGS.critic_params_path is not None:
-        critic_params = pickle.load(open(FLAGS.critic_params_path, 'rb'))['critic_params']
-    else:
-        critic_params = None
+    # Build agent kwargs from config and flags
+    # Remove keys that are already passed explicitly to avoid conflicts
+    agent_kwargs = dict(FLAGS.config.agent_kwargs)
+    for key in ['config', 'seed', 'batch_size', 'rng', 'params_path']:
+        agent_kwargs.pop(key, None)
     
-    agent = PiResidualTD3Cache.create(
+    agent = create_agent(
+        agent_name=FLAGS.agent_name,
         config=pi_config,
         seed=FLAGS.seed,
-        # observations=example_batch,
         batch_size=FLAGS.config.batch_size,
         rng=construct_rng,
-        N=FLAGS.num_actions_to_sample,
-        n_edit_samples=FLAGS.num_edit_samples,
-        critic_params=critic_params,
+        params_path=FLAGS.params_path,
+        **agent_kwargs,
     )
     # breakpoint()
 

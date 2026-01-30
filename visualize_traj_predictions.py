@@ -47,6 +47,8 @@ flags.DEFINE_bool("plot_grad_q_line", False, "Plot Q-gradient line in UMAP visua
 flags.DEFINE_integer("grad_line_points", 20, "Number of points along gradient line.")
 flags.DEFINE_float("grad_line_scale_low", -0.5, "Low scale for gradient line.")
 flags.DEFINE_float("grad_line_scale_high", 0.5, "High scale for gradient line.")
+flags.DEFINE_bool("generate_action_samples", False, "Generate new action samples from agent.")
+flags.DEFINE_integer("num_action_samples", 100, "Number of action samples to generate per timestep.")
 
 
 def load_trajectory_from_tfrecord(
@@ -113,6 +115,7 @@ def load_trajectory_from_tfrecord(
         'vlm_output': [],
         'action_samples': [],
         'diffusion_actions': [],
+        'prompt': [],
     }
 
     if use_wrist_view:
@@ -141,6 +144,12 @@ def load_trajectory_from_tfrecord(
         
         if 'diffusion_actions' in batch:
             trajectory_data['diffusion_actions'].append(batch['diffusion_actions'][0])
+        
+        # if 'prompt_bytes' in batch:
+        #     # Decode the prompt from bytes to string
+        prompt_bytes = batch['prompt_bytes'][0]
+        prompt_str = prompt_bytes.tobytes().split(b"\x00", 1)[0].decode("utf-8")
+        trajectory_data['prompt'].append(prompt_str)
 
         # Stop if we've reached the end of the trajectory
         if batch['terminals'][0] or i >= 1000:  # safety limit
@@ -168,6 +177,10 @@ def load_trajectory_from_tfrecord(
     
     if len(trajectory_data['diffusion_actions']) > 0:
         trajectory['diffusion_actions'] = np.array(trajectory_data['diffusion_actions'])
+    
+    if len(trajectory_data['prompt']) > 0:
+        # Store prompts as a list of strings (they should all be the same across timesteps)
+        trajectory['prompt'] = trajectory_data['prompt'][0] if trajectory_data['prompt'] else ""
 
     logging.info(f"Loaded trajectory with {len(trajectory['actions'])} timesteps")
 
@@ -415,6 +428,8 @@ def create_visualization_video_umap(
     grad_line_points: int = 20,
     grad_line_scale_low: float = -0.5,
     grad_line_scale_high: float = 0.5,
+    generate_action_samples: bool = False,
+    num_action_samples: int = 100,
 ) -> None:
     """Create visualization with UMAP action embeddings and Q-values.
     
@@ -428,6 +443,8 @@ def create_visualization_video_umap(
         grad_line_points: Number of points along gradient line
         grad_line_scale_low: Low scale for gradient line
         grad_line_scale_high: High scale for gradient line
+        generate_action_samples: Whether to generate new action samples from agent
+        num_action_samples: Number of action samples to generate per timestep
     """
     # Create output directory
     output_dir = Path(output_dir)
@@ -439,7 +456,7 @@ def create_visualization_video_umap(
     
     # Get data
     action_dim = agent.action_dim // agent.action_horizon
-    action_samples = trajectory['action_samples']  # (T, num_samples, action_horizon, action_dim)
+    action_samples = trajectory['action_samples']  # (T, num_samples, action_horizon, action_dim) - always the original
     actions = trajectory['actions'][:, :, :action_dim]  # (T, action_horizon, action_dim)
     diffusion_actions = trajectory.get('diffusion_actions', actions)  # (T, action_horizon, action_dim)
     vlm_outputs = trajectory['vlm_output']  # (T, hidden_dim)
@@ -447,18 +464,55 @@ def create_visualization_video_umap(
     images_wrist = trajectory['observations'].get('wrist_image', images_base)
     
     T = len(actions)
-    num_samples = action_samples.shape[1]
     action_horizon = actions.shape[1]
     action_dim = actions.shape[2]
+    num_samples = action_samples.shape[1]
+    
+    # Generate new action samples if requested
+    action_samples_generated = None
+    num_samples_generated = 0
+    if generate_action_samples:
+        logging.info(f"Generating {num_action_samples} action samples per timestep from agent...")
+        generated_action_samples_list = []
+        
+        # Initialize RNG for sampling
+        sample_rng = jax.random.PRNGKey(42)
+        
+        for t in range(T):
+            # Create input dict for sample_base_actions
+            # Need to unnormalize proprio as data from replay buffer is normalized
+            proprio_normalized = trajectory['observations']['proprio'][t]  # (state_dim,)
+            proprio_normalized = proprio_normalized[:agent.state_dim]
+            # Add dummy actions for unnormalization (required by the transform)
+            dummy_actions = np.zeros((action_horizon, action_dim), dtype=np.float32)
+            proprio_dict = {
+                "state": proprio_normalized[np.newaxis, :],  # (1, state_dim)
+                "actions": dummy_actions  # (1, action_horizon, action_dim)
+            }
+            proprio_unnorm = agent.actor.unnormalize(proprio_dict)["state"][0]  # (state_dim,)
+            
+            obs_dict = {
+                'proprio': proprio_unnorm,
+                'image': trajectory['observations']['image'][t],
+                'wrist_image': trajectory['observations']['wrist_image'][t],
+                'prompt': trajectory['prompt'],
+            }
+            
+            # Sample base actions from agent with num_action_samples
+            sample_rng, use_rng = jax.random.split(sample_rng)
+            result_dict = agent.sample_base_actions(obs_dict, seed=use_rng, num_diffusion_samples=num_action_samples)
+            
+            # Extract action_samples from the returned dictionary
+            base_actions_samples = result_dict['action_samples']  # (num_action_samples, action_horizon, action_dim)
+            generated_action_samples_list.append(base_actions_samples)
+        
+        action_samples_generated = np.array(generated_action_samples_list)  # (T, num_action_samples, action_horizon, action_dim)
+        num_samples_generated = num_action_samples
     
     # Normalize actions using agent's normalization function (similar to residual_td3.py line 677)
     logging.info("Normalizing actions...")
     # No need to normalize actions as that should be done in the replay buffer
     diffusion_actions = agent.actor.norm_actions(diffusion_actions)  # (T, action_horizon, action_dim)
-    # Normalize action_samples - need to reshape for norm_actions
-    # action_samples_reshaped = action_samples.reshape(T * num_samples, action_horizon, action_dim)
-    # action_samples_normalized = agent.actor.norm_actions(action_samples_reshaped)
-    # action_samples = action_samples_normalized.reshape(T, num_samples, action_horizon, action_dim)
     
     # Reshape actions for Q-value computation: flatten action_horizon * action_dim
     action_samples_flat = action_samples.reshape(T, num_samples, -1)  # (T, num_samples, action_horizon*action_dim)
@@ -485,6 +539,20 @@ def create_visualization_video_umap(
     
     q_action_samples = np.array(q_action_samples)  # (T, num_samples)
     q_diffusion_actions = np.array(q_diffusion_actions)  # (T,)
+    
+    # Compute Q-values for generated action samples if we generated new ones
+    q_action_samples_generated = None
+    action_samples_generated_flat = None
+    if generate_action_samples:
+        logging.info("Computing Q-values for generated action samples...")
+        action_samples_generated_flat = action_samples_generated.reshape(T, num_samples_generated, -1)
+        q_action_samples_generated = []
+        for t in range(T):
+            vlm_t = vlm_outputs[t]
+            vlm_t_repeated = jnp.repeat(jnp.expand_dims(vlm_t, 0), num_samples_generated, axis=0)
+            q_samples_t = agent.compute_q(vlm_t_repeated, action_samples_generated_flat[t])
+            q_action_samples_generated.append(q_samples_t)
+        q_action_samples_generated = np.array(q_action_samples_generated)  # (T, num_samples_generated)
     
     # Compute gradient line if requested
     grad_line_actions = None
@@ -540,12 +608,20 @@ def create_visualization_video_umap(
         grad_line_actions = np.array(all_grad_line_actions)  # (T, grad_line_points, action_horizon*action_dim)
         grad_line_q_values = np.array(all_grad_line_q_values)  # (T, grad_line_points)
     
-    logging.info("Training UMAP on action samples...")
-    # Flatten all action samples for UMAP
+    logging.info("Training UMAP on action samples (original)...")
+    # Flatten all action samples for UMAP - train on original action_samples
     all_actions_flat = action_samples_flat.reshape(-1, action_horizon * action_dim)  # (T*num_samples, action_horizon*action_dim)
-    reducer = umap.UMAP(n_components=2)
+    reducer = umap.UMAP(n_components=2, random_state=42, n_jobs=1)
     actions_embedded = reducer.fit_transform(all_actions_flat)  # (T*num_samples, 2)
     actions_embedded = actions_embedded.reshape(T, num_samples, 2)  # (T, num_samples, 2)
+    
+    # Embed generated action samples if we generated new ones
+    action_samples_generated_embedded = None
+    if generate_action_samples:
+        logging.info("Embedding generated action samples in UMAP space...")
+        action_samples_generated_flat_all = action_samples_generated_flat.reshape(-1, action_horizon * action_dim)
+        action_samples_generated_embedded = reducer.transform(action_samples_generated_flat_all)
+        action_samples_generated_embedded = action_samples_generated_embedded.reshape(T, num_samples_generated, 2)
     
     # Embed diffusion actions
     diffusion_actions_embedded = reducer.transform(diffusion_actions_flat)  # (T, 2)
@@ -584,19 +660,35 @@ def create_visualization_video_umap(
             q_plot = resize_image(q_plot, panel_height, panel_width)
             
             # Create UMAP plot with Q-values
-            # Add markers for selected and diffusion actions with Q-values
+            # Add markers for action samples and diffusion actions with Q-values
             fig, ax = plt.subplots(figsize=(6, 5))
             q_samples_t = q_action_samples[t]
             actions_2d_t = actions_embedded[t]
             
-            # Plot action samples
+            # Determine Q-value range for consistent coloring (only for original action samples)
+            q_finite = q_samples_t[np.isfinite(q_samples_t)]
+            if len(q_finite) > 0:
+                qmin, qmax = q_finite.min(), q_finite.max()
+            else:
+                qmin, qmax = 0, 1
+            norm = mpl.colors.Normalize(vmin=qmin, vmax=qmax)
+            
+            # Plot original action samples (always present)
             mask = np.isfinite(q_samples_t) & np.isfinite(actions_2d_t).all(axis=1)
             if mask.sum() > 0:
-                qmin, qmax = q_samples_t[mask].min(), q_samples_t[mask].max()
-                norm = mpl.colors.Normalize(vmin=qmin, vmax=qmax)
                 sc = ax.scatter(actions_2d_t[mask, 0], actions_2d_t[mask, 1],
-                              c=q_samples_t[mask], cmap='viridis', norm=norm, s=25, alpha=0.6)
+                              c=q_samples_t[mask], cmap='viridis', norm=norm, s=25, alpha=0.6,
+                              label="Action samples")
                 fig.colorbar(sc, ax=ax, label="Q value")
+            
+            # Plot generated action samples if we generated new ones
+            if generate_action_samples and action_samples_generated_embedded is not None:
+                gen_2d_t = action_samples_generated_embedded[t]
+                gen_mask = np.isfinite(gen_2d_t).all(axis=1)
+                if gen_mask.sum() > 0:
+                    ax.scatter(gen_2d_t[gen_mask, 0], gen_2d_t[gen_mask, 1],
+                              marker='x', s=100, c='red', linewidths=2,
+                              label="Generated samples")
             
             # Plot diffusion action
             ax.scatter(diffusion_actions_embedded[t, 0], diffusion_actions_embedded[t, 1],
@@ -641,12 +733,17 @@ def create_visualization_video_umap(
     
     # Save raw actions and Q-values to numpy file
     data_to_save = {
-        'action_samples': action_samples_flat,  # (T, num_samples, action_horizon*action_dim)
+        'action_samples': action_samples_flat,  # (T, num_samples, action_horizon*action_dim) - original samples
         'q_action_samples': q_action_samples,  # (T, num_samples)
         'actions': actions_flat,  # (T, action_horizon*action_dim)
         'diffusion_actions': diffusion_actions_flat,  # (T, action_horizon*action_dim)
         'q_diffusion_actions': q_diffusion_actions,  # (T,)
     }
+    
+    # Add generated samples if we generated new ones
+    if generate_action_samples and action_samples_generated_flat is not None:
+        data_to_save['action_samples_generated'] = action_samples_generated_flat  # (T, num_samples_generated, action_horizon*action_dim)
+        data_to_save['q_action_samples_generated'] = q_action_samples_generated  # (T, num_samples_generated)
     
     # Add gradient line data if computed
     if plot_grad_q_line and grad_line_actions is not None:
@@ -729,6 +826,8 @@ def main(_):
             grad_line_points=FLAGS.grad_line_points,
             grad_line_scale_low=FLAGS.grad_line_scale_low,
             grad_line_scale_high=FLAGS.grad_line_scale_high,
+            generate_action_samples=FLAGS.generate_action_samples,
+            num_action_samples=FLAGS.num_action_samples,
         )
     else:
         raise ValueError(f"Invalid vis_type: {FLAGS.vis_type}. Must be 1 or 2.")

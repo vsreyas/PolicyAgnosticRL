@@ -1020,9 +1020,9 @@ class ImageReplayBufferPi:
                     tf.float32,  # state
                     tf.float32,  # actions
 
-                    tf.float32,  # base_0_rgb
-                    tf.float32,  # left_wrist_0_rgb
-                    tf.float32,  # right_wrist_0_rgb
+                    tf.uint8,  # base_0_rgb
+                    tf.uint8,  # left_wrist_0_rgb
+                    tf.uint8,  # right_wrist_0_rgb
 
                     tf.bool,     # mask base
                     tf.bool,     # mask left
@@ -1037,9 +1037,9 @@ class ImageReplayBufferPi:
                     tf.float32,  # next actions
 
                     # Next images
-                    tf.float32,  # base_0_rgb
-                    tf.float32,  # left_wrist_0_rgb
-                    tf.float32,  # right_wrist_0_rgb
+                    tf.uint8,  # base_0_rgb
+                    tf.uint8,  # left_wrist_0_rgb
+                    tf.uint8,  # right_wrist_0_rgb
 
                     # Next image masks
                     tf.bool,     # mask base
