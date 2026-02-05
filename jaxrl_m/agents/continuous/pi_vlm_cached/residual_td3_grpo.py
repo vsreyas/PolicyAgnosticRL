@@ -630,7 +630,7 @@ class PiResidualTD3GRPO(Agent):
         pi0_hidden_dims: int = 4096,
         rng: PRNGKey | None = None,
         actor_lr: float = 3e-4,
-        critic_lr: float = 3e-4,
+        critic_lr: float = 1e-3,
         temp_lr: float = 3e-4,
         hidden_dims: Sequence[int] = (512, 512, 512, 512),
         discount: float = 0.99,

@@ -385,27 +385,29 @@ def train_agent(_):
         ### Collect Trajectories ###
         if i % FLAGS.online_trajectory_collection_frequency == 0:
             print("Collecting trajectories...")
-            data_collection_rng_key, rng = jax.random.split(rng)
-            
-            env_data_collection_policy_fn = get_policy_fn(
-                agent=agent,
-                rng=data_collection_rng_key,
-                timer=timer,
-                # debug_mode=debug_mode,
-                debug_mode=True,
-                num_diffusion_samples=FLAGS.num_diffusion_samples,
-                normalize_diffusion_actions=FLAGS.normalize_diffusion_actions,
-            )
-            vlm_output_fn = get_vlm_output_fn(
-                agent=agent,
-                rng=data_collection_rng_key,
-                timer=timer,
-            )
-
             trajectories = []
             q_vs_mc_returns_vals = []
             for traj_index in range(num_trajectories_to_collect):
                 print("Traj Index: ", traj_index)
+
+                # Fresh RNG keys per trajectory, with independent keys for policy and VLM
+                data_collection_rng_key, rng = jax.random.split(rng)
+                policy_rng, vlm_rng = jax.random.split(data_collection_rng_key)
+
+                env_data_collection_policy_fn = get_policy_fn(
+                    agent=agent,
+                    rng=policy_rng,
+                    timer=timer,
+                    debug_mode=True,
+                    num_diffusion_samples=FLAGS.num_diffusion_samples,
+                    normalize_diffusion_actions=FLAGS.normalize_diffusion_actions,
+                )
+                vlm_output_fn = get_vlm_output_fn(
+                    agent=agent,
+                    rng=vlm_rng,
+                    timer=timer,
+                )
+
                 fns_dict = {
                     "policy_fn": env_data_collection_policy_fn,
                     "vlm_output_fn": vlm_output_fn,

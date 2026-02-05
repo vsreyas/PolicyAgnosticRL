@@ -43,6 +43,8 @@ flags.DEFINE_integer("num_grad_steps", 50, "Number of gradient ascent steps.")
 flags.DEFINE_integer("timestep", -1, "Specific timestep to visualize (-1 for all, creates video).")
 flags.DEFINE_integer("plot_type", 3, "1=gradient line only, 2=gradient ascent only, 3=both.")
 flags.DEFINE_bool("clip_actions", True, "Clip actions to [-1, 1] during gradient ascent.")
+flags.DEFINE_string("sub_base_q_network_path", None,
+    "Path to checkpoint (.pkl) whose critic Q-values are subtracted from the main Q-values.")
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -129,7 +131,7 @@ def compute_grad_ascent_trajectory(agent, vlm_output, start_action, eta, num_ste
 
 # ── Plotting ───────────────────────────────────────────────────────────────────
 
-def create_grad_line_plot(line_2d, line_q, diff_2d, q_diff, timestep):
+def create_grad_line_plot(line_2d, line_q, diff_2d, q_diff, timestep, relative=False):
     """Scatter-plot of gradient-line points in UMAP space colored by Q.
 
     Returns:
@@ -147,7 +149,8 @@ def create_grad_line_plot(line_2d, line_q, diff_2d, q_diff, timestep):
         c=q[mask], cmap="viridis", norm=norm, s=40, alpha=0.8,
         label="Grad line",
     )
-    fig.colorbar(sc, ax=ax, label="Q value")
+    q_label = "Q - Q*" if relative else "Q value"
+    fig.colorbar(sc, ax=ax, label=q_label)
 
     # Light connecting line to show direction
     ax.plot(line_2d[:, 0], line_2d[:, 1], "k-", alpha=0.3, linewidth=1)
@@ -161,7 +164,8 @@ def create_grad_line_plot(line_2d, line_q, diff_2d, q_diff, timestep):
 
     ax.set_xlabel("UMAP 1")
     ax.set_ylabel("UMAP 2")
-    ax.set_title(f"Q along Gradient Direction (t={timestep})")
+    title_suffix = " - Relative to Q*" if relative else ""
+    ax.set_title(f"Q along Gradient Direction{title_suffix} (t={timestep})")
     ax.legend(loc="best")
     ax.grid(True, linewidth=0.5, alpha=0.4)
     fig.tight_layout()
@@ -173,7 +177,7 @@ def create_grad_line_plot(line_2d, line_q, diff_2d, q_diff, timestep):
     return img
 
 
-def create_grad_ascent_plot(traj_2d, traj_q, diff_2d, q_diff, timestep):
+def create_grad_ascent_plot(traj_2d, traj_q, diff_2d, q_diff, timestep, relative=False):
     """Scatter-plot of gradient-ascent trajectory with arrows in UMAP space.
 
     Returns:
@@ -192,7 +196,8 @@ def create_grad_ascent_plot(traj_2d, traj_q, diff_2d, q_diff, timestep):
         traj_2d[mask, 0], traj_2d[mask, 1],
         c=q[mask], cmap="viridis", norm=norm, s=50, alpha=0.8, zorder=5,
     )
-    fig.colorbar(sc, ax=ax, label="Q value")
+    q_label = "Q - Q*" if relative else "Q value"
+    fig.colorbar(sc, ax=ax, label=q_label)
 
     # Arrows between consecutive points
     for i in range(len(traj_2d) - 1):
@@ -222,7 +227,47 @@ def create_grad_ascent_plot(traj_2d, traj_q, diff_2d, q_diff, timestep):
 
     ax.set_xlabel("UMAP 1")
     ax.set_ylabel("UMAP 2")
-    ax.set_title(f"Gradient Ascent Trajectory (t={timestep})")
+    title_suffix = " - Relative to Q*" if relative else ""
+    ax.set_title(f"Gradient Ascent Trajectory{title_suffix} (t={timestep})")
+    ax.legend(loc="best")
+    ax.grid(True, linewidth=0.5, alpha=0.4)
+    fig.tight_layout()
+
+    fig.canvas.draw()
+    img = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+    img = img.reshape(fig.canvas.get_width_height()[::-1] + (4,))[:, :, :3]
+    plt.close(fig)
+    return img
+
+
+def create_q_evolution_plot(timesteps_so_far, q_series_dict, current_t, title,
+                            ylabel="Q value", xlim=None):
+    """Line plot showing evolution of Q values across trajectory timesteps.
+
+    Args:
+        timesteps_so_far: list/array of timestep indices up to current frame.
+        q_series_dict: dict mapping label -> list of Q values (one per timestep).
+        current_t: current timestep (highlighted with vertical line).
+        title: plot title.
+        ylabel: y-axis label.
+        xlim: optional (xmin, xmax) to fix the x-axis range across frames.
+
+    Returns:
+        Image array ``(H, W, 3)`` uint8.
+    """
+    fig, ax = plt.subplots(figsize=(7, 6))
+
+    for label, qs in q_series_dict.items():
+        ax.plot(timesteps_so_far, qs, marker="o", markersize=3, label=label)
+
+    ax.axvline(x=current_t, color="red", linestyle="--", alpha=0.5, label=f"t={current_t}")
+
+    if xlim is not None:
+        ax.set_xlim(xlim)
+
+    ax.set_xlabel("Timestep")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
     ax.legend(loc="best")
     ax.grid(True, linewidth=0.5, alpha=0.4)
     fig.tight_layout()
@@ -263,6 +308,30 @@ def main(_):
         critic_params_path=FLAGS.critic_params_path,
         edit_actor_params_path=FLAGS.edit_actor_params_path,
     )
+
+    # Load base Q network for subtraction if requested
+    base_critic_params = None
+    if FLAGS.sub_base_q_network_path is not None:
+        logging.info(f"Loading base Q network from {FLAGS.sub_base_q_network_path}")
+        with open(FLAGS.sub_base_q_network_path, 'rb') as f:
+            base_ckpt = pickle.load(f)
+        if 'critic_params' in base_ckpt:
+            base_critic_params = base_ckpt['critic_params']
+        else:
+            raise ValueError(f"critic_params not found in {FLAGS.sub_base_q_network_path}")
+
+    is_relative = base_critic_params is not None
+
+    def compute_base_q(vlm_output, actions):
+        """Compute Q using base critic params, matching agent.compute_q interface."""
+        if vlm_output.ndim == 1:
+            vlm_output = vlm_output.reshape(1, -1)
+        if actions.ndim == 1:
+            actions = actions.reshape(1, -1)
+        q_values = agent.critic.apply_fn(
+            {'params': base_critic_params}, jnp.array(vlm_output), jnp.array(actions), False
+        )
+        return np.array(q_values[0])
 
     # Image replay buffer kwargs from config
     image_replay_buffer_kwargs = {}
@@ -333,6 +402,15 @@ def main(_):
             all_ascent_actions[t] = ta
             all_ascent_q[t] = tq
 
+        # Subtract base Q values if sub_base_q_network_path is provided
+        if is_relative:
+            if do_line:
+                vlm_rep = np.repeat(vlm_t.reshape(1, -1), len(all_line_actions[t]), axis=0)
+                all_line_q[t] = all_line_q[t] - compute_base_q(vlm_rep, all_line_actions[t])
+            if do_ascent:
+                vlm_rep = np.repeat(vlm_t.reshape(1, -1), len(all_ascent_actions[t]), axis=0)
+                all_ascent_q[t] = all_ascent_q[t] - compute_base_q(vlm_rep, all_ascent_actions[t])
+
     # ── Fit a single UMAP on all computed points ───────────────────────────
     all_points = []
     for t in timesteps:
@@ -374,7 +452,10 @@ def main(_):
     dim = FLAGS.output_dim
 
     def _q_diff(t):
-        return float(agent.compute_q(vlm_outputs[t], diffusion_actions_flat[t])[0])
+        q = float(agent.compute_q(vlm_outputs[t], diffusion_actions_flat[t])[0])
+        if is_relative:
+            q -= float(compute_base_q(vlm_outputs[t], diffusion_actions_flat[t])[0])
+        return q
 
     if len(timesteps) == 1:
         # Single timestep → save PNG images
@@ -382,13 +463,13 @@ def main(_):
         q_d = _q_diff(t)
 
         if do_line:
-            img = create_grad_line_plot(line_emb[t], all_line_q[t], diffusion_emb[t], q_d, t)
+            img = create_grad_line_plot(line_emb[t], all_line_q[t], diffusion_emb[t], q_d, t, relative=is_relative)
             p = output_dir / f"grad_line_t{t}.png"
             Image.fromarray(img).save(str(p))
             logging.info(f"Saved gradient line plot to {p}")
 
         if do_ascent:
-            img = create_grad_ascent_plot(ascent_emb[t], all_ascent_q[t], diffusion_emb[t], q_d, t)
+            img = create_grad_ascent_plot(ascent_emb[t], all_ascent_q[t], diffusion_emb[t], q_d, t, relative=is_relative)
             p = output_dir / f"grad_ascent_t{t}.png"
             Image.fromarray(img).save(str(p))
             logging.info(f"Saved gradient ascent plot to {p}")
@@ -396,29 +477,58 @@ def main(_):
     else:
         # Multiple timesteps → MP4 video
         if FLAGS.plot_type == 3:
-            # 2×2 grid: [base | wrist] / [grad_line | grad_ascent]
-            pw, ph = dim // 2, dim // 2
+            pw = dim // 2
             out_path = output_dir / "grad_q_plots.mp4"
+
+            if is_relative:
+                # 3×2 grid: [base | wrist] / [grad_line | grad_ascent] / [q_evolution (full width)]
+                ph = dim // 3
+                # Precompute raw Q values for the bottom row
+                all_agent_qs = []
+                all_base_qs = []
+                for t in timesteps:
+                    all_agent_qs.append(float(agent.compute_q(vlm_outputs[t], diffusion_actions_flat[t])[0]))
+                    all_base_qs.append(float(compute_base_q(vlm_outputs[t], diffusion_actions_flat[t])[0]))
+                xlim = (timesteps[0], timesteps[-1])
+            else:
+                # 2×2 grid: [base | wrist] / [grad_line | grad_ascent]
+                ph = dim // 2
 
             with imageio.get_writer(
                 str(out_path), fps=FLAGS.fps, codec="libx264",
                 quality=8, pixelformat="yuv420p",
             ) as writer:
-                for t in timesteps:
+                for i, t in enumerate(timesteps):
                     q_d = _q_diff(t)
                     img_b = resize_image(images[t], ph, pw)
                     img_w = resize_image(images_wrist[t], ph, pw)
                     li = resize_image(
-                        create_grad_line_plot(line_emb[t], all_line_q[t], diffusion_emb[t], q_d, t),
+                        create_grad_line_plot(line_emb[t], all_line_q[t], diffusion_emb[t], q_d, t, relative=is_relative),
                         ph, pw,
                     )
                     ai = resize_image(
-                        create_grad_ascent_plot(ascent_emb[t], all_ascent_q[t], diffusion_emb[t], q_d, t),
+                        create_grad_ascent_plot(ascent_emb[t], all_ascent_q[t], diffusion_emb[t], q_d, t, relative=is_relative),
                         ph, pw,
                     )
                     top = np.concatenate([img_b, img_w], axis=1)
-                    bot = np.concatenate([li, ai], axis=1)
-                    writer.append_data(np.concatenate([top, bot], axis=0))
+                    mid = np.concatenate([li, ai], axis=1)
+                    frame = np.concatenate([top, mid], axis=0)
+
+                    if is_relative:
+                        ts_so_far = timesteps[:i + 1]
+                        q_evol = resize_image(
+                            create_q_evolution_plot(
+                                ts_so_far,
+                                {"Q": all_agent_qs[:i + 1],
+                                 "Q*": all_base_qs[:i + 1]},
+                                t, "Q Values Across Time",
+                                ylabel="Q value", xlim=xlim,
+                            ),
+                            ph, dim,
+                        )
+                        frame = np.concatenate([frame, q_evol], axis=0)
+
+                    writer.append_data(frame)
 
             logging.info(f"Saved video to {out_path}")
 
@@ -437,9 +547,9 @@ def main(_):
                     img_obs = resize_image(images[t], ph, pw)
 
                     if do_line:
-                        plot = create_grad_line_plot(line_emb[t], all_line_q[t], diffusion_emb[t], q_d, t)
+                        plot = create_grad_line_plot(line_emb[t], all_line_q[t], diffusion_emb[t], q_d, t, relative=is_relative)
                     else:
-                        plot = create_grad_ascent_plot(ascent_emb[t], all_ascent_q[t], diffusion_emb[t], q_d, t)
+                        plot = create_grad_ascent_plot(ascent_emb[t], all_ascent_q[t], diffusion_emb[t], q_d, t, relative=is_relative)
                     plot = resize_image(plot, ph, pw)
 
                     writer.append_data(np.concatenate([img_obs, plot], axis=1))
