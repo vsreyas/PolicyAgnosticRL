@@ -149,7 +149,7 @@ def create_grad_line_plot(line_2d, line_q, diff_2d, q_diff, timestep, relative=F
         c=q[mask], cmap="viridis", norm=norm, s=40, alpha=0.8,
         label="Grad line",
     )
-    q_label = "Q - Q*" if relative else "Q value"
+    q_label = "Q*" if relative else "Q value"
     fig.colorbar(sc, ax=ax, label=q_label)
 
     # Light connecting line to show direction
@@ -164,7 +164,7 @@ def create_grad_line_plot(line_2d, line_q, diff_2d, q_diff, timestep, relative=F
 
     ax.set_xlabel("UMAP 1")
     ax.set_ylabel("UMAP 2")
-    title_suffix = " - Relative to Q*" if relative else ""
+    title_suffix = " (colored by Q*)" if relative else ""
     ax.set_title(f"Q along Gradient Direction{title_suffix} (t={timestep})")
     ax.legend(loc="best")
     ax.grid(True, linewidth=0.5, alpha=0.4)
@@ -196,7 +196,7 @@ def create_grad_ascent_plot(traj_2d, traj_q, diff_2d, q_diff, timestep, relative
         traj_2d[mask, 0], traj_2d[mask, 1],
         c=q[mask], cmap="viridis", norm=norm, s=50, alpha=0.8, zorder=5,
     )
-    q_label = "Q - Q*" if relative else "Q value"
+    q_label = "Q*" if relative else "Q value"
     fig.colorbar(sc, ax=ax, label=q_label)
 
     # Arrows between consecutive points
@@ -227,7 +227,7 @@ def create_grad_ascent_plot(traj_2d, traj_q, diff_2d, q_diff, timestep, relative
 
     ax.set_xlabel("UMAP 1")
     ax.set_ylabel("UMAP 2")
-    title_suffix = " - Relative to Q*" if relative else ""
+    title_suffix = " (colored by Q*)" if relative else ""
     ax.set_title(f"Gradient Ascent Trajectory{title_suffix} (t={timestep})")
     ax.legend(loc="best")
     ax.grid(True, linewidth=0.5, alpha=0.4)
@@ -402,14 +402,14 @@ def main(_):
             all_ascent_actions[t] = ta
             all_ascent_q[t] = tq
 
-        # Subtract base Q values if sub_base_q_network_path is provided
+        # Use base critic Q values for coloring if sub_base_q_network_path is provided
         if is_relative:
             if do_line:
                 vlm_rep = np.repeat(vlm_t.reshape(1, -1), len(all_line_actions[t]), axis=0)
-                all_line_q[t] = all_line_q[t] - compute_base_q(vlm_rep, all_line_actions[t])
+                all_line_q[t] = compute_base_q(vlm_rep, all_line_actions[t])
             if do_ascent:
                 vlm_rep = np.repeat(vlm_t.reshape(1, -1), len(all_ascent_actions[t]), axis=0)
-                all_ascent_q[t] = all_ascent_q[t] - compute_base_q(vlm_rep, all_ascent_actions[t])
+                all_ascent_q[t] = compute_base_q(vlm_rep, all_ascent_actions[t])
 
     # ── Fit a single UMAP on all computed points ───────────────────────────
     all_points = []
@@ -452,10 +452,9 @@ def main(_):
     dim = FLAGS.output_dim
 
     def _q_diff(t):
-        q = float(agent.compute_q(vlm_outputs[t], diffusion_actions_flat[t])[0])
         if is_relative:
-            q -= float(compute_base_q(vlm_outputs[t], diffusion_actions_flat[t])[0])
-        return q
+            return float(compute_base_q(vlm_outputs[t], diffusion_actions_flat[t])[0])
+        return float(agent.compute_q(vlm_outputs[t], diffusion_actions_flat[t])[0])
 
     if len(timesteps) == 1:
         # Single timestep → save PNG images
