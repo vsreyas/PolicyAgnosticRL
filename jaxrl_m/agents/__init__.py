@@ -11,6 +11,7 @@ from .continuous.auto_regressive_transformer import AutoRegressiveTransformerAge
 from .continuous.pi_0 import PiPolicy
 from .continuous.expo_pi import ExpoPiLearner
 from .continuous.pi_vlm_cached.residual_td3 import PiResidualTD3Cache
+from .continuous.pi_vlm_cached.residual_td3_grpo import PiResidualTD3GRPO
 
 agents = {
     "ddpm_bc": DDPMBCAgent,
@@ -27,5 +28,6 @@ agents = {
     "expo": ExpoPiLearner,
     # Residual Agents working with VLM output of Pi0.5 #
     "pi_residual_td3": PiResidualTD3Cache,
+    "pi_residual_td3_grpo": PiResidualTD3GRPO,
     ####################################################
 }

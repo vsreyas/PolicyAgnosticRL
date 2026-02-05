@@ -592,6 +592,94 @@ BASE_RESIDUAL_PPO_CONFIG = dict(
     ),
 )
 
+BASE_RESIDUAL_TD3_GRPO_CONFIG = dict(
+    batch_size=16,
+    save_video=True,
+    image_observations=True,
+    libero_tfrecord_regexp="/data/hf_cache/datasets/LIBERO/libero_10_tf/*.tfrecord",
+    dataset_kwargs=dict(
+        cache=False,
+        tfrecords_include_next_observations=False,
+    ),
+    num_epochs=100,
+    num_train_steps_per_epoch=1000,
+    num_eval_episodes=4,
+    num_episodes_per_video=2,
+    eval_interval=10,
+    log_interval=10,
+    save_interval=1000,
+    discount=0.99,
+    actor_lr=3e-4,
+    critic_lr=3e-4,
+    temp_lr=3e-4,
+    tau=0.005,
+    utd_ratio=4,
+    q_clip_low=-50.0,
+    q_clip_high=5.0,
+    max_episode_steps=1000,
+    save_dir=os.path.join(SAVE_DIR_PREFIX, "results_pi_residual_td3_grpo"),
+    # PaliGemma config name from openpi
+    paligemma_config_name="pi05_libero_custom_low_mem",
+    agent_kwargs=dict(
+        # Agent architecture params
+        action_dim=7,
+        state_dim=8,
+        hidden_dims=(512, 512, 512, 512),
+        
+        # Learning rates
+        actor_lr=3e-4,
+        critic_lr=3e-4,
+        temp_lr=3e-4,
+        
+        # Training params
+        discount=0.99,
+        tau=0.005,
+        decay_steps=int(3e6),
+        
+        # Critic params
+        num_qs=10,
+        num_min_qs=2,
+        critic_dropout_rate=0.0,
+        critic_weight_decay=0.0,
+        critic_layer_norm=True,
+        use_critic_resnet=False,
+        
+        # Actor params
+        actor_tau=0.003,
+        actor_dropout_rate=0.0,
+        actor_num_blocks=3,
+        actor_layer_norm=True,
+        
+        # Action sampling params
+        N=4,
+        n_edit_samples=4,
+        edit_action_scale=3.0,
+        exploration_epsilon=0.05,
+        
+        # GRPO-specific params
+        grpo_beta=1.0,
+        
+        # Entropy params
+        target_entropy=-7.0,
+        entropy_scale=1.0,
+        init_temperature=1.0,
+        entropy_mul_scale_factor=3.0,
+        adjust_target_entropy=True,
+        
+        # Other params
+        backup_entropy=True,
+        use_pnorm=False,
+        clip_sampler=True,
+        time_dim=128,
+        T=10,
+        M=0,
+        batch_split=1,
+        ddpm_temperature=1.0,
+        beta_schedule='vp',
+        batch_size_dict_key='actions',
+    ),
+)
+
 pi0_base_policy_agent_kwargs_for_parl = BASE_PI_CONFIG["agent_kwargs"].copy()
 pi0_base_policy_agent_kwargs_for_parl.update(
     learning_rate=5e-5,

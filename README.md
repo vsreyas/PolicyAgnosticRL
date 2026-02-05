@@ -159,20 +159,64 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false env -u PYOPENGL_PLATFORM python -m pdb ./tra
 # Clean Training Setup for Residual Actor Learning on top of Pi0.5
 ## Sample Base Trajectories for warmup and future use
 ```
-CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./sample_base_traj.py --config=configs/libero_config.py:pi_residual_td3 --seed=0 --environment_name=libero --reward_scale=1.0 --reward_bias=-0.1 --filter_successful_trajectories=False --config.save_dir="/data/user_data/skowshik/gradacc_2k_base_policy_rollouts" --num_trajectories_to_collect=40 --pi_config_name="pi05_libero_gradacc2_2k" --num_diffusion_samples=16
+CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./sample_base_traj.py --config=configs/libero_config.py:pi_residual_td3 --agent_name=pi_residual_td3 --seed=0 --environment_name=libero --reward_scale=1.0 --reward_bias=-0.1 --filter_successful_trajectories=False --config.save_dir="/data/user_data/skowshik/pi0_libero_base_actions" --num_trajectories_to_collect=40 --pi_config_name="pi0_libero_all_freeze" --num_diffusion_samples=1
+```
 
+```
+CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./sample_base_traj.py --config=configs/libero_config.py:pi_residual_td3_grpo --agent_name=pi_residual_td3_grpo --seed=0 --environment_name=libero --reward_scale=1.0 --reward_bias=-0.1 --filter_successful_trajectories=False --config.save_dir="/data/hf_cache/models/pi05_libero_gradacc2_2k_base_trajectories" --num_trajectories_to_collect=300 --pi_config_name="pi05_libero_gradacc2_2k" --num_diffusion_samples=1
 ```
 
 ## Find trajectory statistics
 ```
-python find_traj_stats.py --tf_record_path="/data/user_data/skowshik/gradacc_2k_base_policy_rollouts/image_replay_buffer/*.tfrecord"
+python find_traj_stats.py --tf_record_path="/data/user_data/skowshik/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_base_rollouts/image_replay_buffer/*.tfrecord"
 ```
 
 ## Warmstart critic and residual actor
-rm -r td3_gradacc2_2k_base_ws_balanced && WANDB_ENTITY=shreyas-kowshik CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./train_pi_residual.py --config=configs/libero_config.py:pi_residual_td3 --seed=0 --task_name="put both moka pots on the stove" --config.batch_size=256 --environment_name=libero --wandb_experiment_name=debug_res_td3_ws --num_edit_samples=4 --num_actions_to_sample=4 --final_step_sparse_reward=False --online_trajectory_collection_frequency 5000000 --num_trajectories_to_collect=1 --config.utd_ratio=4 --config.num_eval_episodes=10 --config.num_episodes_per_video=5 --config.eval_interval=1000000 --reward_scale=1.0 --reward_bias=-0.1 --config.libero_tfrecord_regexp="/data/user_data/skowshik/gradacc_2k_base_policy_rollouts/image_replay_buffer/*.tfrecord" --filter_successful_trajectories=False --config.save_dir="./td3_gradacc2_2k_base_ws_balanced" --scale_success_alpha=2.0 --intermediate_reward_mul_factor 10.0 --warmup_steps 50000 --num_train_steps 50000 --balance_offline_training_data=True --config.save_interval=200
+rm -r pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_ws_CQLQL && WANDB_ENTITY=shreyas-kowshik CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./train_pi_residual.py --config=configs/libero_config.py:pi_residual_td3 --seed=0 --task_name="put both moka pots on the stove" --config.batch_size=256 --environment_name=libero --wandb_experiment_name=calql_debug_v1 --num_edit_samples=4 --num_actions_to_sample=4 --final_step_sparse_reward=False --online_trajectory_collection_frequency 5000000 --num_trajectories_to_collect=1 --config.utd_ratio=4 --config.num_eval_episodes=10 --config.num_episodes_per_video=5 --config.eval_interval=1000000 --reward_scale=1.0 --reward_bias=-0.1 --config.libero_tfrecord_regexp="/data/user_data/skowshik/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_base_rollouts/image_replay_buffer/*.tfrecord" --filter_successful_trajectories=False --config.save_dir="./pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_ws_CQLQL" --scale_success_alpha=2.0 --intermediate_reward_mul_factor 10.0 --warmup_steps 50000 --num_train_steps 50000 --balance_offline_training_data=True --config.save_interval=200 --critic_warmup_type=calql --config.image_replay_buffer_kwargs.load_action_samples=True --config.offline_image_replay_buffer_kwargs.load_action_samples=True --calql_lower_bound=-200.0 --cql_alpha=0.1 --cql_temp=1.0
 
 
 #########################
+### TD3 GRPO
+##### Warmstart Critic
+```
+rm -r pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_ws_sarsa_10_2_no_balance && WANDB_ENTITY=shreyas-kowshik CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./train_pi_residual.py --config=configs/libero_config.py:pi_residual_td3_grpo --agent_name=pi_residual_td3_grpo --pi_config_name=pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k --seed=0 --task_name="put both moka pots on the stove" --config.batch_size=256 --environment_name=libero --wandb_experiment_name=pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_sarsa_ws_no_balance_10_2 --num_edit_samples=4 --num_actions_to_sample=4 --final_step_sparse_reward=False --online_trajectory_collection_frequency 5000000 --num_trajectories_to_collect=1 --config.utd_ratio=1 --config.num_eval_episodes=10 --config.num_episodes_per_video=5 --config.eval_interval=1000000 --reward_scale=1.0 --reward_bias=-0.1 --config.libero_tfrecord_regexp="/data/user_data/skowshik/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_base_rollouts/image_replay_buffer/*.tfrecord" --filter_successful_trajectories=False --config.save_dir="./pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_ws_sarsa_10_2_no_balance" --scale_success_alpha=2.0 --intermediate_reward_mul_factor 10.0 --warmup_steps 50000 --num_train_steps 50000 --balance_offline_training_data=False --config.save_interval=500 --critic_warmup_type=sarsa --config.image_replay_buffer_kwargs.load_action_samples=True --config.offline_image_replay_buffer_kwargs.load_action_samples=True --ws_critic=True --ws_edit_actor=False
+```
+
+```
+rm -r pi05_libero_gradacc2_2k_base_policy_rollouts_ws_sarsa_10_2 && WANDB_ENTITY=shreyas-kowshik CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./train_pi_residual.py --config=configs/libero_config.py:pi_residual_td3_grpo --agent_name=pi_residual_td3_grpo --pi_config_name=pi05_libero_gradacc2_2k --seed=0 --task_name="put both moka pots on the stove" --config.batch_size=256 --environment_name=libero --wandb_experiment_name=pi05_libero_gradacc2_2k_base_policy_rollouts_ws_sarsa_10_2 --num_edit_samples=4 --num_actions_to_sample=4 --final_step_sparse_reward=False --online_trajectory_collection_frequency 5000000 --num_trajectories_to_collect=1 --config.utd_ratio=1 --config.num_eval_episodes=10 --config.num_episodes_per_video=5 --config.eval_interval=1000000 --reward_scale=1.0 --reward_bias=-0.1 --config.libero_tfrecord_regexp="/data/user_data/skowshik/gradacc_2k_base_policy_rollouts/image_replay_buffer/*.tfrecord" --filter_successful_trajectories=False --config.save_dir="./pi05_libero_gradacc2_2k_base_policy_rollouts_ws_sarsa_10_2" --scale_success_alpha=2.0 --intermediate_reward_mul_factor 10.0 --warmup_steps 50000 --num_train_steps 50000 --balance_offline_training_data=True --config.save_interval=500 --critic_warmup_type=sarsa --config.image_replay_buffer_kwargs.load_action_samples=True --config.offline_image_replay_buffer_kwargs.load_action_samples=True --ws_critic=True --ws_edit_actor=False
+```
+
+```
+rm -r pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_ws_calql_10_2 && WANDB_ENTITY=shreyas-kowshik CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./train_pi_residual.py --config=configs/libero_config.py:pi_residual_td3_grpo --agent_name=pi_residual_td3_grpo --pi_config_name=pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k --seed=0 --task_name="put both moka pots on the stove" --config.batch_size=256 --environment_name=libero --wandb_experiment_name=pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_calql_ws_10_2 --num_edit_samples=4 --num_actions_to_sample=4 --final_step_sparse_reward=False --online_trajectory_collection_frequency 5000000 --num_trajectories_to_collect=1 --config.utd_ratio=1 --config.num_eval_episodes=10 --config.num_episodes_per_video=5 --config.eval_interval=1000000 --reward_scale=1.0 --reward_bias=-0.1 --config.libero_tfrecord_regexp="/data/user_data/skowshik/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_base_rollouts/image_replay_buffer/*.tfrecord" --filter_successful_trajectories=False --config.save_dir="./pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_ws_calql_10_2" --scale_success_alpha=2.0 --intermediate_reward_mul_factor 10.0 --warmup_steps 50000 --num_train_steps 50000 --balance_offline_training_data=True --config.save_interval=500 --critic_warmup_type=calql --config.image_replay_buffer_kwargs.load_action_samples=True --config.offline_image_replay_buffer_kwargs.load_action_samples=True --ws_critic=True --ws_edit_actor=False --calql_lower_bound=-300.0 --cql_alpha=0.1 --cql_temp=1.0
+```
+
+##### Warmstart Edit Actor
+```
+rm -r pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_ws_bc_edit_actor && WANDB_ENTITY=shreyas-kowshik CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./train_pi_residual.py --config=configs/libero_config.py:pi_residual_td3_grpo --agent_name=pi_residual_td3_grpo --pi_config_name=pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k --seed=0 --task_name="put both moka pots on the stove" --config.batch_size=256 --environment_name=libero --wandb_experiment_name=pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_bc_edit_actor_ws_clean_v1 --num_edit_samples=4 --num_actions_to_sample=4 --final_step_sparse_reward=False --online_trajectory_collection_frequency 5000000 --num_trajectories_to_collect=1 --config.utd_ratio=1 --config.num_eval_episodes=10 --config.num_episodes_per_video=5 --config.eval_interval=1000000 --reward_scale=1.0 --reward_bias=-0.1 --config.libero_tfrecord_regexp="/data/user_data/skowshik/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_base_rollouts/image_replay_buffer/*.tfrecord" --filter_successful_trajectories=False --config.save_dir="./pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_ws_bc_edit_actor" --scale_success_alpha=2.0 --intermediate_reward_mul_factor 10.0 --warmup_steps 50000 --num_train_steps 50000 --config.save_interval=1000 --critic_warmup_type=sarsa --config.image_replay_buffer_kwargs.load_action_samples=True --config.offline_image_replay_buffer_kwargs.load_action_samples=True --ws_critic=False --ws_edit_actor=True --params_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_ws_sarsa_10_2/checkpoint_9000.pkl" --grpo_beta=50.0 --grpo_weight_threshold=50.0
+```
+#########################
+
+##### Full Training
+```
+rm -r pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_td3_grpo_clean_v1_continued_4.8k_v2_3.4k && WANDB_ENTITY=shreyas-kowshik CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./train_pi_residual.py --config=configs/libero_config.py:pi_residual_td3_grpo --agent_name=pi_residual_td3_grpo --pi_config_name=pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k --seed=0 --task_name="put both moka pots on the stove" --config.batch_size=256 --environment_name=libero --wandb_experiment_name=full_training_td3_grpo_ep5_base_clean_v1_continued_4.8k --num_edit_samples=4 --num_actions_to_sample=4 --final_step_sparse_reward=False --online_trajectory_collection_frequency 500 --num_trajectories_to_collect=5 --config.utd_ratio=8 --config.num_eval_episodes=10 --config.num_episodes_per_video=5 --config.eval_interval=1000 --reward_scale=1.0 --reward_bias=-0.1 --config.libero_tfrecord_regexp="/data/user_data/skowshik/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_base_rollouts/image_replay_buffer/*.tfrecord" --filter_successful_trajectories=True --config.save_dir="./pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_td3_grpo_clean_v1_continued_4.8k_v2_3.4k" --scale_success_alpha=2.0 --intermediate_reward_mul_factor 10.0 --warmup_steps=0 --num_train_steps 50000 --config.save_interval=1000 --critic_warmup_type=sarsa --config.image_replay_buffer_kwargs.load_action_samples=True --config.offline_image_replay_buffer_kwargs.load_action_samples=True --ws_critic=False --ws_edit_actor=False --params_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_td3_grpo_clean_v1_continued_4.8k/checkpoint_3400.pkl" --num_diffusion_samples=16 --grpo_beta=50.0 --grpo_weight_threshold=50.0 --exploration_epsilon=0.2
+```
+
+
+##### Q* Training
+```
+rm -r pi05_libero_gradacc2_2k_q_star_sarsa_10_2 && WANDB_ENTITY=shreyas-kowshik CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./train_pi_residual.py --config=configs/libero_config.py:pi_residual_td3_grpo --agent_name=pi_residual_td3_grpo --pi_config_name=pi05_libero_gradacc2_2k --seed=0 --task_name="put both moka pots on the stove" --config.batch_size=256 --environment_name=libero --wandb_experiment_name=pi05_libero_gradacc2_2k_q_star_sarsa_10_2 --num_edit_samples=4 --num_actions_to_sample=4 --final_step_sparse_reward=False --online_trajectory_collection_frequency 5000000 --num_trajectories_to_collect=1 --config.utd_ratio=1 --config.num_eval_episodes=10 --config.num_episodes_per_video=5 --config.eval_interval=1000000 --reward_scale=1.0 --reward_bias=-0.1 --config.libero_tfrecord_regexp="/data/hf_cache/models/pi05_libero_gradacc2_2k_base_trajectories/image_replay_buffer/*.tfrecord" --filter_successful_trajectories=False --config.save_dir="./pi05_libero_gradacc2_2k_q_star_sarsa_10_2" --scale_success_alpha=2.0 --intermediate_reward_mul_factor 10.0 --warmup_steps 50000 --num_train_steps 50000 --balance_offline_training_data=True --config.save_interval=500 --critic_warmup_type=sarsa --config.image_replay_buffer_kwargs.load_action_samples=True --config.offline_image_replay_buffer_kwargs.load_action_samples=True --ws_critic=True --ws_edit_actor=False
+```
+
+
+##### Evaluation
+Baseline for trained model (base model)
+```
+CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./evaluate_traj.py --config=configs/libero_config.py:pi_residual_td3_grpo --agent_name=pi_residual_td3_grpo --seed=0 --environment_name=libero --reward_scale=1.0 --reward_bias=-0.1 --filter_successful_trajectories=False --config.save_dir="/home/skowshik/vla/codebase/PolicyAgnosticRL/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_vision_init_fullft_action_BASELINE" --num_trajectories_to_collect=50 --pi_config_name="pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_vision_init_fullft_action" --params_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_td3_grpo_clean_v1/checkpoint_4800.pkl" --base_actions=True
+```
+
+```
+CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID=0 python -m pdb ./evaluate_traj.py --config=configs/libero_config.py:pi_residual_td3_grpo --agent_name=pi_residual_td3_grpo --seed=0 --environment_name=libero --reward_scale=1.0 --reward_bias=-0.1 --filter_successful_trajectories=False --config.save_dir="/home/skowshik/vla/codebase/PolicyAgnosticRL/td3_grpo_full_training_clean_v1_7k_evaluation" --num_trajectories_to_collect=50 --pi_config_name="pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k" --params_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_td3_grpo_clean_v1_continued_4.8k_v2_3.4k/checkpoint_7000.pkl"
+```
 
 ## PPO warm start training
 ```
@@ -208,12 +252,13 @@ python visualize_traj_predictions.py \
   --pi_config_name=pi05_libero_gradacc2_2k \
   --tfrecord_path="/data/user_data/skowshik/gradacc_2k_base_policy_rollouts/image_replay_buffer/episode_53.tfrecord" \
   --checkpoint_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/td3_gradacc2_2k_base_ws_balanced/checkpoint_1000.pkl" \
-  --output_dir="./td3_gradacc2_2k_base_ws_balanced_trajvis_1k_ep53" \
+  --output_dir="./td3_gradacc2_2k_base_ws_balanced_trajvis_1k_ep53_rs42" \
   --vis_type=2 \
   --config.image_replay_buffer_kwargs.load_action_samples=True
 ```
 
 ##### Plot grad_q line
+
 ```
 python visualize_traj_predictions.py \
   --config=configs/libero_config.py:pi_residual_td3 \
@@ -221,7 +266,7 @@ python visualize_traj_predictions.py \
   --pi_config_name=pi05_libero_gradacc2_2k \
   --tfrecord_path="/data/user_data/skowshik/gradacc_2k_base_policy_rollouts/image_replay_buffer/episode_53.tfrecord" \
   --checkpoint_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/td3_gradacc2_2k_base_ws_balanced/checkpoint_1000.pkl" \
-  --output_dir="./td3_gradacc2_2k_base_ws_balanced_trajvis_1k_ep53_gradq_lim10" \
+  --output_dir="./td3_gradacc2_2k_base_ws_balanced_trajvis_1k_ep53_gradq_lim10_rs42" \
   --vis_type=2 \
   --config.image_replay_buffer_kwargs.load_action_samples=True \
   --plot_grad_q_line=True \
@@ -229,6 +274,68 @@ python visualize_traj_predictions.py \
   --grad_line_scale_high=10.0
 ```
 
+##### Visualize another model on same states
 ```
-python dump_tf_record.py --tfrecord_path "/home/skowshik/vla/codebase/PolicyAgnosticRL/res_ppo_full_training/seed_0/image_replay_buffer/episode_759.tfrecord" --output_gif_path "./vis_traj_v2.mp4"
+python -m pdb visualize_traj_predictions.py \
+  --config=configs/libero_config.py:pi_residual_td3 \
+  --agent_name=pi_residual_td3 \
+  --pi_config_name=pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k \
+  --tfrecord_path="/data/user_data/skowshik/gradacc_2k_base_policy_rollouts/image_replay_buffer/episode_53.tfrecord" \
+  --checkpoint_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/td3_gradacc2_2k_base_ws_balanced/checkpoint_1000.pkl" \
+  --output_dir="./td3_gradacc2_2k_base_ws_balanced_trajvis_1k_ep53_w_ep5_base_rs42" \
+  --vis_type=2 \
+  --config.image_replay_buffer_kwargs.load_action_samples=True \
+  --generate_action_samples=True \
+  --num_action_samples=16
 ```
+
+##### Visualize Residuals of a trained model on top of base actions
+```
+python visualize_traj_predictions.py \
+  --config=configs/libero_config.py:pi_residual_td3_grpo \
+  --agent_name=pi_residual_td3_grpo \
+  --pi_config_name=pi05_libero_custom_low_mem_ep5_v2 \
+  --tfrecord_path="/data/user_data/skowshik/gradacc_2k_base_policy_rollouts/image_replay_buffer/episode_53.tfrecord" \
+  --checkpoint_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_td3_grpo_v8/checkpoint_7200.pkl" \
+  --output_dir="./td3_grpo_v8_ch7k_ep53" \
+  --vis_type=2 \
+  --config.image_replay_buffer_kwargs.load_action_samples=True \
+  --visualize_residuals=True
+```
+
+```
+python visualize_traj_predictions.py \
+  --config=configs/libero_config.py:pi_residual_td3_grpo \
+  --agent_name=pi_residual_td3_grpo \
+  --pi_config_name=pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k \
+  --tfrecord_path="/data/user_data/skowshik/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_base_rollouts/image_replay_buffer/episode_39.tfrecord" \
+  --checkpoint_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_td3_grpo_clean_v1_continued_4.8k/checkpoint_3400.pkl" \
+  --output_dir="./td3_grpo_clean_v1_v2_3.4k_VIS_TRAJ_39" \
+  --vis_type=2 \
+  --config.image_replay_buffer_kwargs.load_action_samples=True \
+  --visualize_residuals=True \
+  --critic_params_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_ws_sarsa_10_2/checkpoint_9000.pkl"
+```
+
+##### Visualize Grad_q plots of a trained model
+```
+python visualize_grad_q_plots.py \
+    --config=configs/libero_config.py:pi_residual_td3_grpo \
+    --tfrecord_path "/data/user_data/skowshik/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_base_rollouts/image_replay_buffer/episode_39.tfrecord" \
+    --checkpoint_path="/home/skowshik/vla/codebase/PolicyAgnosticRL/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_ws_sarsa_10_2/checkpoint_9000.pkl" \
+    --output_dir ./grad_q_vis_pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_base_rollouts_ep39 \
+    --pi_config_name=pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k \
+    --agent_name pi_residual_td3 \
+    --lim 10.0 \
+    --num_line_points 50 \
+    --eta 0.01 \
+    --num_grad_steps 50 \
+    --plot_type 3 \
+    --timestep -1 \
+    --clip_actions
+```
+
+```
+python dump_tf_record.py --tfrecord_path "/home/skowshik/vla/codebase/PolicyAgnosticRL/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_td3_grpo_v8/seed_0/image_replay_buffer/episode_29.tfrecord" --output_gif_path "./ep29_debug_v8.mp4"
+```
+

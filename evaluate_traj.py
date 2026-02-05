@@ -62,6 +62,11 @@ from jaxrl_m.utils.train_utils import preprocess_action, repack_action
 from jaxrl_m.agents.continuous.expo_pi import ExpoPiLearner, compute_q, compute_q_all
 from jaxrl_m.agents.continuous.expo_pi_cache import ExpoPiLearnerCache
 from jaxrl_m.utils.expo_utils import calc_mc_return_fn
+from jaxrl_m.agents.continuous.pi_vlm_cached import (
+    create_agent,
+    PiResidualTD3Cache,
+    PiResidualPPOCache,
+)
 
 try:
     from jax_smi import initialise_tracking  # type: ignore
@@ -78,6 +83,7 @@ flags.DEFINE_string("environment_name", "", "Environment name.")
 flags.DEFINE_string("wandb_project_name", "PI-0.5-finetuning", "WandB project name.") #"PA-RL""debug"
 flags.DEFINE_string("wandb_experiment_name", "", "WandB experiment name.")
 flags.DEFINE_string("wandb_group", "", "WandB group.")
+flags.DEFINE_string("agent_name", "pi_residual_td3", "Agent name (pi_residual_td3 or pi_residual_ppo).")
 config_flags.DEFINE_config_file(
     "config",
     None,
@@ -119,6 +125,11 @@ flags.DEFINE_integer(
     "num_online_trajectories_per_epoch",
     1,
     "Number of trajectories collected from interaction per online epoch.",
+)
+flags.DEFINE_integer(
+    "num_trajectories_to_collect",
+    None,
+    "Optional override for number of evaluation trajectories.",
 )
 flags.DEFINE_integer(
     "num_warmup_trajectories",
@@ -192,14 +203,19 @@ flags.DEFINE_bool(
     "Filter successful trajectories.",
 )
 flags.DEFINE_bool(
-    "use_base_action_only",
+    "base_actions",
     False,
-    "Use base action only.",
+    "Use base policy actions instead of edited actions.",
 )
 flags.DEFINE_string(
     "pi_config_name",
     "pi05_libero_custom_low_mem_ep5",
     "Name of the PI config to use.",
+)
+flags.DEFINE_float(
+    "perturbation_epsilon",
+    -1.0,
+    "Exploration noise epsilon for action perturbation. If > 0, adds Gaussian noise to actions.",
 )
 
 # 2: 07 2 13
@@ -232,13 +248,17 @@ def sanitize_obs(obs):
 
 
 def get_policy_fn(
-    agent: ExpoPiLearner,
+    agent,
     rng: jax.random.PRNGKey,
     timer: Timer | None = None,
     debug_mode: bool = False,
-    use_deterministic_actions: bool = False,
-    use_base_action_only: bool = False,
+    use_base_actions: bool = False,
+    perturbation_epsilon: float = -1.0,
 ) -> Callable[[Data], np.ndarray]:
+    # Validate perturbation_epsilon
+    if perturbation_epsilon > 0:
+        assert perturbation_epsilon < 1.0, f"perturbation_epsilon must be < 1.0, got {perturbation_epsilon}"
+    
     def policy_fn(observations: Data, *args, **kwargs) -> np.ndarray:
         if not isinstance(observations, dict):
             observations = {"state": observations}
@@ -248,62 +268,54 @@ def get_policy_fn(
             assert "proprio" in observations
             obs_ndim = observations["proprio"].ndim
         
-        # breakpoint()
-
-        if use_base_action_only:
+        if use_base_actions:
             out_dict = jax.device_get(
                 agent.sample_base_actions(
-                    observations, *args, **kwargs, timer=timer, output_action_chunk=True, debug_mode=False,
+                    observations, *args, **kwargs, timer=timer, output_action_chunk=True
                 )
             )
         else:
             out_dict = jax.device_get(
                 agent.sample_actions(
-                    observations, *args, **kwargs, timer=timer, output_action_chunk=True, debug_mode=False, use_deterministic_actions=use_deterministic_actions
+                    observations, *args, **kwargs, timer=timer, output_action_chunk=True, use_deterministic_actions=True
                 )
             )
-        # breakpoint()
-        # out_dict = jax.device_get(
-        #     agent.sample_base_actions_qc(
-        #         observations, *args, **kwargs, timer=timer, output_action_chunk=True, debug_mode=False, num_diffusion_samples=32
-        #     )
-        # )
-
-        return out_dict
-
-    policy_fn = supply_rng(policy_fn, rng=rng)
-
-    return policy_fn
-
-def get_vlm_output_fn(
-    agent: ExpoPiLearner,
-    rng: jax.random.PRNGKey,
-    timer: Timer | None = None,
-    debug_mode: bool = False,
-) -> Callable[[Data], np.ndarray]:
-    def policy_fn(observations: Data, *args, **kwargs) -> np.ndarray:
-        if not isinstance(observations, dict):
-            observations = {"state": observations}
-        if "state" in observations:
-            obs_ndim = observations["state"].ndim
-        else:
-            assert "proprio" in observations
-            obs_ndim = observations["proprio"].ndim
         
-        # breakpoint()
-        out_dict = jax.device_get(
-            agent.get_vlm_output(
-                observations, *args, **kwargs, timer=timer, output_action_chunk=True, debug_mode=debug_mode
-            )
-        )
-        # breakpoint()
+        # Apply action perturbation if perturbation_epsilon > 0
+        if perturbation_epsilon > 0 and 'action' in out_dict:
+            actions = out_dict['action']
+            # Get rng from kwargs (supplied by supply_rng wrapper)
+            rng_key = kwargs.get('rng', None)
+            if rng_key is not None:
+                rng_key, rng_exploration = jax.random.split(rng_key)
+                kwargs['rng'] = rng_key  # Update rng for next call
+                
+                # Normalize actions using agent's normalization (expects batch dimension)
+                # Actions come as (action_horizon, action_dim), add batch dim
+                actions_normalized = agent.actor.norm_actions(actions[None, ...])
+                actions_normalized = actions_normalized[0]  # Remove batch dim
+                
+                # Generate exploration noise
+                exploration_noise = jax.random.normal(
+                    rng_exploration, actions_normalized.shape) * perturbation_epsilon
+                exploration_noise = jnp.clip(exploration_noise, -1.0, 1.0)
+                
+                # Add noise and clip to [0, 1]
+                actions_normalized = actions_normalized + exploration_noise
+                actions_normalized = jnp.clip(actions_normalized, -1.0, 1.0)
+                
+                # Unnormalize using agent's unnormalization (expects batch dimension)
+                actions = agent.actor.unnorm_actions(actions_normalized[None, ...])
+                actions = actions[0]  # Remove batch dim
+                
+                # Update actions in output dict
+                out_dict['action'] = jax.device_get(actions)
 
         return out_dict
 
     policy_fn = supply_rng(policy_fn, rng=rng)
 
     return policy_fn
-
 
 def set_batch_masks(
     batch: Batch, environment_name: str, reward_bias: float, reward_scale: float
@@ -325,66 +337,6 @@ def set_batch_masks(
 def resize_images_to_100x100(images):
     batch_size = images.shape[0]
     return jax.image.resize(images, (batch_size, 100, 100, 3), method="cubic")
-
-def plot_q_values_over_trajectory_time_step(
-    trajectories: List[Dict[str, List[Union[np.ndarray, Dict[str, np.ndarray]]]]],
-    agent: ExpoPiLearnerCache,
-    out_path: str,
-):
-    # trajectories = [trajectories[0]]  # only plot the first trajectory
-    # breakpoint()
-
-    q_vals = []
-    for trajectory_idx, trajectory in enumerate(trajectories):
-        q_vals_traj = []
-        num_vlm_out_vals = len(trajectory['vlm_output'])
-        for vlm_output_idx in range(num_vlm_out_vals):
-            vlm_output = trajectory['vlm_output'][vlm_output_idx].reshape(1, -1)
-            actions_for_vlm_output = trajectory['actions_for_vlm_output'][vlm_output_idx].reshape(1, -1)
-            computed_q = compute_q_all(agent.critic.apply_fn, agent.critic.params, vlm_output, actions_for_vlm_output)
-            q_vals_traj.append(computed_q.mean(axis=0))
-        q_vals.append(q_vals_traj)
-
-    os.makedirs(out_path, exist_ok=True)
-    for trajectory_idx, q_vals_traj in enumerate(q_vals):
-        plt.figure(figsize=(10, 6))
-        plt.plot(q_vals_traj)
-        plt.savefig(os.path.join(out_path, f'q_vals_traj_{trajectory_idx}.png'))
-        plt.close()
-
-def plot_actions_over_trajectory_time_step(
-    trajectories: List[Dict[str, List[Union[np.ndarray, Dict[str, np.ndarray]]]]],
-    agent: ExpoPiLearnerCache,
-    out_path: str,
-):
-    # trajectories = [trajectories[0]]  # only plot the first trajectory
-    # breakpoint()
-
-    action_dim = len(trajectories[0]['action'][0])
-    os.makedirs(out_path, exist_ok=True)
-
-    for trajectory_idx, trajectory in enumerate(trajectories):
-        actions = trajectory['action']
-        base_actions = trajectory['diffusion_action']
-
-        for act_dim in range(action_dim):
-
-            base_actions_traj = []
-            edit_actions_traj = []
-            for step in range(len(actions)):
-                base_actions_traj.append(base_actions[step][act_dim])
-                edit_actions_traj.append(actions[step][act_dim] - base_actions_traj[-1])
-            
-            plt.figure(figsize=(10, 6))
-            plt.plot(base_actions_traj, label='Base Actions')
-            plt.plot(edit_actions_traj, label='Residual Corrections Added (edit_action * edit_action_scale)')
-            plt.xlabel('Time Step')
-            plt.ylabel('Action Value')
-            plt.title(f'Actions over trajectory time step for action dimension {act_dim}')
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig(os.path.join(out_path, f'actions_traj_{trajectory_idx}_act_dim_{act_dim}.png'))
-            plt.close()
 
 def create_gif_from_images(images: List[np.ndarray], output_path: str, duration: int = 100):
     """
@@ -480,8 +432,11 @@ def train_agent(_):
     pi_config = get_config(FLAGS.pi_config_name)
     # breakpoint()
     pi_config.fsdp_devices = 1 # Try out with model parallel
-    pi_config.exp_name = FLAGS.wandb_experiment_name
+    pi_config.exp_name = FLAGS.wandb_experiment_name if FLAGS.wandb_experiment_name else "evaluate_traj"
     pi_config.overwrite = True
+
+    if FLAGS.num_trajectories_to_collect is not None:
+        FLAGS.config.num_eval_episodes = FLAGS.num_trajectories_to_collect
 
     wandb_logger = None
     save_dir = tf.io.gfile.join(
@@ -579,30 +534,23 @@ def train_agent(_):
         # action_horizon=1,
     )
 
-    ### Create EXPO agent #
-    # LOG: sharded batch is used to calibrate batch size in `create` method of `ExpoPiLearner` class #
+    ### Create agent #
     rng, construct_rng = jax.random.split(rng)
     
-    assert FLAGS.params_path is not None
-    pkl_dict = pickle.load(open(FLAGS.params_path, 'rb'))
-    critic_params = pkl_dict['critic_params']
-
-    if 'edit_actor_params' in pkl_dict:
-        edit_actor_params = pkl_dict['edit_actor_params']
-    else:
-        print("\n\n\nNo edit actor params found in checkpoint...\n\n\n")
-        edit_actor_params = None
+    # Build agent kwargs from config and flags
+    # Remove keys that are already passed explicitly to avoid conflicts
+    agent_kwargs = dict(FLAGS.config.agent_kwargs)
+    for key in ['config', 'seed', 'batch_size', 'rng', 'params_path']:
+        agent_kwargs.pop(key, None)
     
-    agent = ExpoPiLearnerCache.create(
+    agent = create_agent(
+        agent_name=FLAGS.agent_name,
         config=pi_config,
         seed=FLAGS.seed,
-        # observations=example_batch,
         batch_size=FLAGS.config.batch_size,
         rng=construct_rng,
-        N=FLAGS.num_actions_to_sample,
-        n_edit_samples=FLAGS.num_edit_samples,
-        critic_params=critic_params,
-        edit_actor_params=edit_actor_params,
+        params_path=FLAGS.params_path,
+        **agent_kwargs,
     )
     # breakpoint()
 
@@ -615,8 +563,8 @@ def train_agent(_):
         agent=agent,
         rng=eval_policy_fn_key,
         timer=timer,
-        use_deterministic_actions=True,
-        use_base_action_only=FLAGS.use_base_action_only,
+        use_base_actions=FLAGS.base_actions,
+        perturbation_epsilon=FLAGS.perturbation_epsilon,
     )
     #########################################################
 
@@ -655,10 +603,10 @@ def train_agent(_):
                         rng=eval_policy_fn_key,
                         timer=timer,
                         debug_mode=False,
-                        use_deterministic_actions=True,
-                        use_base_action_only=FLAGS.use_base_action_only,
+                        use_base_actions=FLAGS.base_actions,
+                        perturbation_epsilon=FLAGS.perturbation_epsilon,
                     )
-                    trajectories, q_vs_mc_returns_vals = evaluate_with_trajectories_libero(
+                    trajectories, _ = evaluate_with_trajectories_libero(
                     eval_policy_fn,
                     eval_env,
                     FLAGS.config.num_eval_episodes,
@@ -670,27 +618,41 @@ def train_agent(_):
             # breakpoint()
 
             if (FLAGS.environment_name == "calvin" or FLAGS.environment_name =='libero') and FLAGS.config.save_video:
-                trajectories_to_save = trajectories[
-                    : FLAGS.config.num_episodes_per_video
-                ]
-                frames = []
-                ind_traj = []
-                for j, traj in enumerate(trajectories_to_save):
-                    trajectory_return = 0
+                # Create success/failure folders
+                success_dir = os.path.join(FLAGS.config.save_dir, "success")
+                failure_dir = os.path.join(FLAGS.config.save_dir, "failure")
+                os.makedirs(success_dir, exist_ok=True)
+                os.makedirs(failure_dir, exist_ok=True)
+                
+                success_episode_ids = []
+                failure_episode_ids = []
+                
+                for j, traj in enumerate(trajectories):
+                    trajectory_return = np.sum(traj["reward"])
+                    # Determine success based on reward (success typically means reward == 1.0 in Libero)
+                    is_success = trajectory_return >= 1.0
+                    
+                    if is_success:
+                        success_episode_ids.append(j)
+                        save_dir_traj = success_dir
+                    else:
+                        failure_episode_ids.append(j)
+                        save_dir_traj = failure_dir
+                    
+                    ind_traj = []
+                    traj_return_accum = 0
                     for transition, reward in zip(
                         traj["observation"], traj["reward"]
                     ):
                         assert transition["image"].shape[-1] == 3
                         if len(transition["image"].shape) == 4:
                             transition["image"] = transition["image"][0]
-                        image = transition["image"]  # .transpose(2, 0, 1)
-                        # Add text for reward and return so far
-                        trajectory_return += reward
-                        # image = np.flipud(image)
+                        image = transition["image"]
+                        traj_return_accum += reward
                         image = np.ascontiguousarray(image) 
                         frame = cv2.putText(
                             image,
-                            f"reward: {reward}. return: {trajectory_return}",
+                            f"reward: {reward}. return: {traj_return_accum}",
                             (10, 10),
                             cv2.FONT_HERSHEY_SIMPLEX,
                             0.3,
@@ -698,14 +660,21 @@ def train_agent(_):
                             1,
                         )
                         ind_traj.append(frame)
-                        frame = frame.transpose(2, 0, 1)
-                        frames.append(frame)
                     
-                    # save_rollout_gif(ind_traj, save_dir, step_i=i, rollout_j=j)
-                    create_gif_from_images(ind_traj, os.path.join(FLAGS.config.save_dir, f'rollout_{i}_{j}.gif'))
-                    ind_traj = []
+                    create_gif_from_images(ind_traj, os.path.join(save_dir_traj, f'rollout_{j}.gif'))
                 
-                del ind_traj, frames
+                # Save CSV with evaluation metrics
+                import csv
+                csv_path = os.path.join(FLAGS.config.save_dir, "evaluation_results.csv")
+                with open(csv_path, 'w', newline='') as csvfile:
+                    writer = csv.writer(csvfile)
+                    writer.writerow(['metric', 'value'])
+                    writer.writerow(['num_eval_episodes', FLAGS.config.num_eval_episodes])
+                    writer.writerow(['success_rate', len(success_episode_ids) / FLAGS.config.num_eval_episodes])
+                    writer.writerow(['success_episode_ids', ','.join(map(str, success_episode_ids))])
+                    writer.writerow(['failure_episode_ids', ','.join(map(str, failure_episode_ids))])
+                print(f"✅ Evaluation results saved to {csv_path}")
+                
                 import gc; gc.collect()
 
             eval_metrics = {
@@ -746,9 +715,6 @@ def train_agent(_):
 
             # breakpoint()
 
-            # Plot relevant metrics #
-            plot_q_values_over_trajectory_time_step(trajectories, agent, FLAGS.config.save_dir)
-            plot_actions_over_trajectory_time_step(trajectories, agent, os.path.join(FLAGS.config.save_dir, 'actions_over_trajectory_time_step'))
             print("Eval metrics: ", eval_metrics)
 
 

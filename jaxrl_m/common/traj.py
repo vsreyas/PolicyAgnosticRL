@@ -77,8 +77,6 @@ class TrajSampler(object):
             curr_episode_q_vs_mc_returns_vals = []
             valid_timesteps_for_action_chunk = []
 
-            breakpoint()
-
             while not done and step < self.max_traj_length:
                 # breakpoint()
                 # from PIL import Image; Image.fromarray(observation['image'].astype('uint8')).save('image.png')

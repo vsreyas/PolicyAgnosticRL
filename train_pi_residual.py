@@ -245,6 +245,61 @@ flags.DEFINE_bool(
     False,
     "Flag for whether we want to load action samples for each state"
 )
+flags.DEFINE_string(
+    "critic_warmup_type",
+    "sarsa",
+    "Type of critic warmup: 'sarsa' for SARSA loss or 'calql' for Cal-QL loss with MC return lower bound."
+)
+flags.DEFINE_float(
+    "calql_lower_bound",
+    -1000.0,
+    "Constant lower bound for Q-values in Cal-QL warmup. Used instead of MC returns."
+)
+flags.DEFINE_float(
+    "cql_alpha",
+    5.0,
+    "CQL regularization strength for Cal-QL warmup."
+)
+flags.DEFINE_float(
+    "cql_temp",
+    1.0,
+    "Temperature for logsumexp in CQL/Cal-QL loss."
+)
+flags.DEFINE_float(
+    "grpo_beta",
+    1.0,
+    "Temperature for advantage weighting in GRPO actor loss."
+)
+flags.DEFINE_float(
+    "grpo_weight_threshold",
+    0.0,
+    "Threshold for zeroing out small weights in GRPO loss (after exponentiation)."
+)
+flags.DEFINE_integer(
+    "num_diffusion_samples",
+    4,
+    "Number of action samples from base policy for GRPO training."
+)
+flags.DEFINE_bool(
+    "ws_critic",
+    False,
+    "Whether to warmstart the critic during warmup phase."
+)
+flags.DEFINE_bool(
+    "ws_edit_actor",
+    False,
+    "Whether to warmstart the edit actor during warmup phase."
+)
+flags.DEFINE_string(
+    "pi_config_name",
+    None,
+    "Name of the PI config to use (required)."
+)
+flags.DEFINE_integer(
+    "num_balanced_trajectories",
+    -1,
+    "Max number of successful and failed trajectories to keep after balancing. -1 means no limit."
+)
 
 ### Try subprocenv ###
 import multiprocessing as mp
@@ -356,6 +411,7 @@ def get_policy_fn(
     rng: jax.random.PRNGKey,
     timer: Timer | None = None,
     deterministic_actions: bool = False,
+    num_diffusion_samples: int = 1,
 ) -> Callable[[Data], np.ndarray]:
     def policy_fn(observations: Data, *args, **kwargs) -> np.ndarray:
         if not isinstance(observations, dict):
@@ -363,7 +419,9 @@ def get_policy_fn(
         
         out_dict = jax.device_get(
             agent.sample_actions(
-                observations, *args, **kwargs, timer=timer, output_action_chunk=True, use_deterministic_actions=deterministic_actions
+                observations, *args, **kwargs, timer=timer, output_action_chunk=True, 
+                use_deterministic_actions=deterministic_actions,
+                num_diffusion_samples=num_diffusion_samples,
             )
         )
 
@@ -376,6 +434,7 @@ def get_policy_fn(
 def get_base_policy_fn(
     agent,
     rng: jax.random.PRNGKey,
+    num_diffusion_samples: int = 1,
 ) -> Callable[[Data], np.ndarray]:
     def policy_fn(observations: Data, *args, **kwargs) -> np.ndarray:
         if not isinstance(observations, dict):
@@ -384,6 +443,7 @@ def get_base_policy_fn(
         out_dict = jax.device_get(
             agent.sample_base_actions(
                 observations, *args, **kwargs,
+                num_diffusion_samples=num_diffusion_samples,
             )
         )
 
@@ -420,13 +480,11 @@ def get_vlm_output_fn(
             assert "proprio" in observations
             obs_ndim = observations["proprio"].ndim
         
-        # breakpoint()
         vlm_output = jax.device_get(
             agent.get_vlm_output(
                 observations, *args, **kwargs, timer=timer, output_action_chunk=True, debug_mode=debug_mode
             )
         )
-        # breakpoint()
 
         return vlm_output
 
@@ -469,19 +527,24 @@ def balance_offline_training_data(offline_dset_paths):
         failed_trajectories = np.random.choice(failed_trajectories, size=len(success_trajectories), replace=False)
         failed_trajectories = list(failed_trajectories)
     
+    # Further limit to num_balanced_trajectories if set
+    if FLAGS.num_balanced_trajectories > 0:
+        if len(success_trajectories) > FLAGS.num_balanced_trajectories:
+            success_trajectories = np.random.choice(success_trajectories, size=FLAGS.num_balanced_trajectories, replace=False)
+            success_trajectories = list(success_trajectories)
+        if len(failed_trajectories) > FLAGS.num_balanced_trajectories:
+            failed_trajectories = np.random.choice(failed_trajectories, size=FLAGS.num_balanced_trajectories, replace=False)
+            failed_trajectories = list(failed_trajectories)
+    
     print("Balanced offline training data: Success trajectories: ", len(success_trajectories), "Failed trajectories: ", len(failed_trajectories))
     print("\n\n\n\n\n")
 
     return success_trajectories + failed_trajectories
 
 def train_agent(_):
-    # breakpoint()
+    # Validate required flags
+    assert FLAGS.pi_config_name is not None, "--pi_config_name must be provided"
     
-    if FLAGS.debug:
-        breakpoint()
-        # Disabling jit might be useful for debugging
-        # jax.config.update("jax_disable_jit", True)
-
     # prevent tensorflow from using GPUs
     tf.config.set_visible_devices([], "GPU")
 
@@ -493,9 +556,7 @@ def train_agent(_):
     assert FLAGS.config.batch_size % num_devices == 0
 
     # Get PI config #
-    # pi_config = get_config("pi05_libero_custom_low_mem")
-    pi_config = get_config("pi05_libero_custom_low_mem_ep5_v2")
-    # breakpoint()
+    pi_config = get_config(FLAGS.pi_config_name)
     pi_config.fsdp_devices = 1 # Try out with model parallel
     pi_config.exp_name = FLAGS.wandb_experiment_name
     pi_config.overwrite = True
@@ -623,9 +684,6 @@ def train_agent(_):
 
     timer = Timer()
 
-    # example_batch = next(offline_train_iterator)
-    # breakpoint()
-
     ### Evaluation Setup ###
     env_data_collection_policy_fn = None  # Will get set later
     rng, eval_policy_fn_key = jax.random.split(rng)
@@ -659,11 +717,13 @@ def train_agent(_):
                     rng=data_collection_rng_key,
                     timer=timer,
                     deterministic_actions=False,
+                    num_diffusion_samples=FLAGS.num_diffusion_samples,
                 )
             else:
                fns_dict["policy_fn"] = get_base_policy_fn(
                     agent=agent,
                     rng=data_collection_rng_key,
+                    num_diffusion_samples=FLAGS.num_diffusion_samples,
                 )
             fns_dict["value_fn"] = get_value_fn(
                 agent=agent,
@@ -705,15 +765,12 @@ def train_agent(_):
 
 
                 traj = trajs[0]
-                # breakpoint()
                 _q_vs_mc_returns_vals = _q_vs_mc_returns_vals[0]
                 timer.tock("trajectory_sampling_time")
                 print(timer.get_total_times(reset=False))
                 # LOG: `traj` statistics #
-                # breakpoint()
                 trajectories.append(traj)
                 q_vs_mc_returns_vals.append(_q_vs_mc_returns_vals)
-                # breakpoint()
 
                 if FLAGS.config.image_observations:
                     # Save trajectory as tfrecord
@@ -728,7 +785,6 @@ def train_agent(_):
                 online_trajectories_added += 1
                 online_env_steps_this_epoch += len(traj["rewards"])
                 
-                # breakpoint()
             
             # Get trajectory statistics
             # LOG: Log some statistics for the collected trajectories #
@@ -754,7 +810,6 @@ def train_agent(_):
             del trajectories, q_vs_mc_returns_vals
             import gc; gc.collect()
             
-            # breakpoint()
 
             # Finished collecting trajectories
             # LOG: Construct buffers using the trajectories #
@@ -830,27 +885,49 @@ def train_agent(_):
             rng, rng_update = jax.random.split(rng)
         
         is_warmup_flag = i < FLAGS.warmup_steps
+        # Combine warmup flag with individual ws_critic and ws_edit_actor flags
+        critic_warmup = is_warmup_flag and FLAGS.ws_critic
+        edit_actor_warmup = is_warmup_flag and FLAGS.ws_edit_actor
+        
         timer.tick("online_iter_total")
         print("Warmup")
         timer.tick("sample_batch_time")
         offline_batch = next(offline_train_iterator)
-        # online_batch = next(online_train_iterator)
-        # batch = concatenate_batches([offline_batch, online_batch])
-        batch = offline_batch
+        online_batch = next(online_train_iterator)
+
+        update_critic = True
+        update_edit_actor = True
+
+        if is_warmup_flag:
+            batch = offline_batch
+
+            if not FLAGS.ws_critic:
+                update_critic = False
+                assert FLAGS.ws_edit_actor, "Edit actor must be warmed up if critic is not warmed up"
+            if not FLAGS.ws_edit_actor:
+                update_edit_actor = False
+                assert FLAGS.ws_critic, "Critic must be warmed up if edit actor is not warmed up"
+        else:
+            batch = concatenate_batches([offline_batch, online_batch])
         timer.tock("sample_batch_time")
         agent, info = agent.update(batch, 
             utd_ratio=FLAGS.config.utd_ratio, 
             timer=timer, 
             seed=rng_update,
-            update_critic=True, 
-            update_edit_actor=True, 
-            critic_warmup=is_warmup_flag,
-            edit_actor_warmup=is_warmup_flag,
+            update_critic=update_critic,
+            update_edit_actor=update_edit_actor,
+            critic_warmup=critic_warmup,
+            critic_warmup_type=FLAGS.critic_warmup_type,
+            calql_lower_bound=FLAGS.calql_lower_bound,
+            edit_actor_warmup=edit_actor_warmup,
             bc_loss_coef=FLAGS.bc_loss_coef,
+            cql_alpha=FLAGS.cql_alpha,
+            cql_temp=FLAGS.cql_temp,
+            grpo_beta=FLAGS.grpo_beta,
+            grpo_weight_threshold=FLAGS.grpo_weight_threshold,
         )
         
         # Log batch statistics #
-        # breakpoint()
         batch_stats = {
             "batch_stats/batch_size": len(batch),
             "batch_stats/masks_mean": np.mean(batch["masks"]),
@@ -877,7 +954,6 @@ def train_agent(_):
         if wandb_logger is not None:
             wandb_logger.log(info, step=i)
         
-        # breakpoint()
         
         timer.tock("online_iter_total")
         print(timer.get_total_times(reset=True))
@@ -886,7 +962,6 @@ def train_agent(_):
         if (
             (i + 1) % FLAGS.config.eval_interval == 0
         ) and eval_env is not None:
-            # breakpoint()
             """eval"""
             logging.info("Evaluating...")
             timer.tick("evaluation/total")

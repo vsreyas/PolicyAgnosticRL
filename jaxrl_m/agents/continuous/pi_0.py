@@ -308,7 +308,8 @@ class PiPolicy(BasePolicy):
             if timer is not None:
                 timer.tick("output_transforms_time")
             # print("actions shape: ", actions.shape)
-            outputs = jax.tree.map(lambda x: np.asarray(x), outputs)
+            # Use np.array() instead of np.asarray() to create writable copies
+            outputs = jax.tree.map(lambda x: np.array(x), outputs)
             if normalized:
                 outputs = self.output_data_transforms_without_unnorm(outputs)
             else:
@@ -605,7 +606,8 @@ class PiPolicy(BasePolicy):
 
             outputs["actions"] = actions # (batch_size, action_horizon, 32)
             # breakpoint()
-            # outputs = jax.tree.map(lambda x: np.asarray(x), outputs)
+            # Use np.array() instead of np.asarray() to create writable copies
+            outputs = jax.tree.map(lambda x: np.array(x), outputs)
 
             # NOTE: The output_data_transforms handles the 32 -> 7 conversion of actions #            
             if timer is not None:
@@ -626,52 +628,6 @@ class PiPolicy(BasePolicy):
             # breakpoint()
             
             return outputs['actions'], vlm_output, obs
-    
-    def sample_actions_with_vlm_output_for_critic_ws(self, rng: PRNGKey, observation: _model.Observation,
-        repeat=1, cache_dir=None, timer=None, argmax=False, 
-        processed_obs=False, normalized=False, return_obs= False, obs_key: str | None = None, infer=True,
-        params: Optional[at.Params] = None,
-    ):
-        batch_size = observation.state.shape[0]
-        
-        if batch_size not in self.sample_actions_with_vlm_output_cache:
-            self.sample_actions_with_vlm_output_cache[batch_size] = self._build_sample_actions_with_vlm_output_jit()
-        
-        forward_fn = self.sample_actions_with_vlm_output_cache[batch_size]
-
-        if repeat > 1:
-            obs = repeat_tree(obs, repeat)
-            obs = flatten_repeat(obs)  
-        outputs = {
-            "state": observation.state,
-        }
-
-        timer.tick("forward_fn_time")
-        params = self.train_state.params
-        actions, vlm_output = forward_fn(params, rng, observation)
-        timer.tock("forward_fn_time")
-
-        outputs["actions"] = actions # (batch_size, action_horizon, 32)
-        # breakpoint()
-        # outputs = jax.tree.map(lambda x: np.asarray(x), outputs)
-
-        # NOTE: The output_data_transforms handles the 32 -> 7 conversion of actions #
-        timer.tick("output_data_transforms_time")
-        if normalized:
-            outputs = self.output_data_transforms_without_unnorm(outputs)
-        else:
-            outputs = self.output_data_transforms(outputs)
-        timer.tock("output_data_transforms_time")
-
-        if repeat > 1:
-            outputs = unflatten_repeat(outputs,repeat)
-
-        if outputs['actions'].shape[0] == 1 and repeat==1:
-            outputs['actions'] = outputs['actions'][0]
-        
-        # breakpoint()
-        
-        return outputs['actions'], vlm_output
     
     def _build_infer_jit(self):
         """

@@ -1,4 +1,6 @@
-"""Starter code from the RLPD repository https://github.com/ikostrikov/rlpd"""
+"""GRPO variant of TD3 for residual policy learning.
+Based on residual_td3.py with GRPO-style actor updates using advantage-weighted regression.
+"""
 
 from functools import partial
 from typing import Dict, Optional, Sequence, Tuple
@@ -6,10 +8,6 @@ from typing import Dict, Optional, Sequence, Tuple
 import flax
 import gym
 import jax
-# jax.config.update("jax_log_compiles", True)
-# jax.config.update("jax_explain_cache_misses", True)
-# jax.config.update("jax_traceback_filtering", "off")  # more context in logs
-
 import jax.numpy as jnp
 import os
 import pickle
@@ -63,7 +61,6 @@ def compute_q(critic_fn, critic_params, observations, actions):
 
     q_values = critic_fn({'params': critic_params},
                          observations, actions, False)
-    # q_values = q_values.min(axis=0)
     q_values = q_values.mean(axis=0)
     return q_values
 
@@ -72,7 +69,6 @@ def compute_q(critic_fn, critic_params, observations, actions):
 def compute_q_all(critic_fn, critic_params, observations, actions):
     q_values = critic_fn({'params': critic_params},
                          observations, actions, False)
-    # q_values = q_values
     return q_values
 
 # ----------------------------------------------------------------------
@@ -88,9 +84,11 @@ def compute_q_all(critic_fn, critic_params, observations, actions):
         "edit_actor_apply_fn",
         "critic_apply_fn",
         "temp_apply_fn",
+        "grpo_beta",
+        "grpo_weight_threshold",
     ),
 )
-def _edit_actor_loss_and_grad(
+def _edit_actor_loss_and_grad_grpo(
     edit_actor,
     actor_params,
     critic_params,
@@ -108,15 +106,23 @@ def _edit_actor_loss_and_grad(
     mc_target,
     success,
     bc_warmup,
+    action_samples,  # (batch_size, num_samples, action_dim)
+    grpo_beta: float,  # Temperature for exp(advantage)
+    grpo_weight_threshold: float,  # Threshold for zeroing out small weights
 ):
-    """Single jitted step for edit_actor: forward + loss + grad."""
+    """GRPO-style actor loss: advantage-weighted regression over action samples."""
+    batch_size = vlm_output.shape[0]
+    num_samples = action_samples.shape[1]
+    action_dim = action_samples.shape[2]
 
     def loss_fn(actor_params):
+        # Get edit actor's predicted actions
         actions = edit_actor_apply_fn(
             {"params": actor_params}, vlm_output, batch_actions)
         edit_actions = actions.copy()
         actions = jnp.clip(actions, -1.0, 1.0)
 
+        # Compute Q-values for the edit actor's actions
         qs = critic_apply_fn(
             {"params": critic_params},
             vlm_output,
@@ -126,6 +132,7 @@ def _edit_actor_loss_and_grad(
         )
         q = qs.mean(axis=0)
 
+        # Compute Q-values for base actions
         qs_base = critic_apply_fn(
             {"params": critic_params},
             vlm_output,
@@ -135,10 +142,59 @@ def _edit_actor_loss_and_grad(
         )
         q_base = qs_base.mean(axis=0)
 
-        # Only apply BC loss to successful trajectories #
-        bc_loss = (jnp.square(batch_actions - actions) * success).mean()
-        q_loss = -q.mean()
-        edit_actor_loss = bc_loss * 1000.0 + (q_loss * (1.0 - bc_warmup))
+        # GRPO: Compute Q-values for all action_samples
+        # action_samples shape: (batch_size, num_samples, action_dim)
+        def compute_q_for_sample(sample_actions):
+            # sample_actions: (batch_size, action_dim)
+            return critic_apply_fn(
+                {"params": critic_params},
+                vlm_output,
+                sample_actions,
+                False,
+                rngs={"dropout": key2},
+            ).mean(axis=0)  # (batch_size,)
+
+        # Transpose to (num_samples, batch_size, action_dim) for vmapping
+        action_samples_transposed = jnp.transpose(action_samples, (1, 0, 2))
+        # Vmap over num_samples
+        qs_samples = jax.vmap(compute_q_for_sample)(action_samples_transposed)
+        # qs_samples shape: (num_samples, batch_size)
+        # Transpose to (batch_size, num_samples)
+        qs_samples = jnp.transpose(qs_samples, (1, 0))
+
+        # Compute advantages: Q - mean(Q) for each state
+        q_mean = qs_samples.mean(axis=1, keepdims=True)  # (batch_size, 1)
+        advantages = qs_samples - q_mean  # (batch_size, num_samples)
+
+        # Compute exp(advantages / beta) weights
+        # weights = jnp.exp(advantages / grpo_beta)  # (batch_size, num_samples)
+        weights = advantages
+        # weights = jnp.clip(weights, -1000.0, 1000.0)
+        # Zero out weights below threshold
+        weights = jnp.where(weights >= grpo_weight_threshold, weights, 0.0)
+        weights = jnp.exp(weights / grpo_beta) - 1.0
+        # Normalize weights (optional, helps with stability)
+        # weights = weights / (weights.sum(axis=1, keepdims=True) + 1e-8)
+
+        # GRPO loss: weighted sum of squared differences to action samples
+        # actions shape: (batch_size, action_dim)
+        # action_samples shape: (batch_size, num_samples, action_dim)
+        actions_expanded = jnp.expand_dims(actions, axis=1)  # (batch_size, 1, action_dim)
+        sq_diff = jnp.square(actions_expanded - action_samples)  # (batch_size, num_samples, action_dim)
+        sq_diff_sum = sq_diff.sum(axis=-1)  # (batch_size, num_samples)
+        
+        # Weighted regression loss
+        grpo_loss = (weights * sq_diff_sum).sum(axis=1).mean()  # scalar
+
+        # BC loss on successful trajectories (unchanged from original)
+        # Explicitly convert success to float to avoid type issues
+        success_float = jnp.float32(success)
+        bc_loss = (jnp.square(batch_actions - actions) * success_float).mean()
+        # bc_loss = (jnp.square(batch_actions - actions)).mean()
+        # jax.debug.breakpoint()
+        
+        # Combine losses
+        edit_actor_loss = bc_loss * 1000.0 + grpo_loss * (1.0 - bc_warmup)
 
         metrics = {
             "edit_q_mean": q.mean(),
@@ -149,9 +205,26 @@ def _edit_actor_loss_and_grad(
             "base_q_max": q_base.max(),
             "edit_actor_loss": edit_actor_loss,
             "bc_loss": bc_loss,
-            "q_loss": q_loss,
+            "grpo_loss": grpo_loss,
             "entropy": 0.0,
-            "bc_warmup": bc_warmup,
+            "grpo_beta": jnp.float32(grpo_beta),
+            "bc_warmup": jnp.float32(bc_warmup),
+            "grpo_advantage_mean": advantages.mean(),
+            "grpo_advantage_std": advantages.std(),
+            "grpo_advantage_max": advantages.max(),
+            "grpo_advantage_min": advantages.min(),
+            "grpo_weights_mean": weights.mean(),
+            "grpo_weights_max": weights.max(),
+            "grpo_weights_min": weights.min(),
+            "grpo_weights_nonzero_frac": (weights > 0).mean(),
+            "grpo_q_samples_mean": qs_samples.mean(),
+            "grpo_q_samples_std": qs_samples.std(),
+            "success_mean": success_float.mean(),
+            "success_sum": success_float.sum(),
+            "success_max": success_float.max(),
+            "success_min": success_float.min(),
+            "has_nan_success": jnp.any(jnp.isnan(success_float)).astype(jnp.float32),
+            "has_nan_loss": jnp.any(jnp.isnan(edit_actor_loss)).astype(jnp.float32),
         }
 
         edit_actions = edit_actions.reshape(-1, 10, 7)
@@ -163,14 +236,10 @@ def _edit_actor_loss_and_grad(
 
         batch_actions_reshaped = batch_actions.reshape(-1, 10, 7)
         for i in range(7):
-            metrics[f"batch_action_{i}_mean"] = batch_actions_reshaped[:, :, i].mean(
-            )
-            metrics[f"batch_action_{i}_std"] = batch_actions_reshaped[:, :, i].std(
-            )
-            metrics[f"batch_action_{i}_max"] = batch_actions_reshaped[:, :, i].max(
-            )
-            metrics[f"batch_action_{i}_min"] = batch_actions_reshaped[:, :, i].min(
-            )
+            metrics[f"batch_action_{i}_mean"] = batch_actions_reshaped[:, :, i].mean()
+            metrics[f"batch_action_{i}_std"] = batch_actions_reshaped[:, :, i].std()
+            metrics[f"batch_action_{i}_max"] = batch_actions_reshaped[:, :, i].max()
+            metrics[f"batch_action_{i}_min"] = batch_actions_reshaped[:, :, i].min()
 
         return edit_actor_loss, metrics
 
@@ -191,8 +260,7 @@ def _critic_loss_and_grad(
     mc_target,
     key,
     critic_apply_fn,
-    # #
-    target_params,  # Subsampled target critic parameters
+    target_params,
     next_vlm_output,
     next_base_actions,
     edit_actor_apply_fn,
@@ -201,7 +269,6 @@ def _critic_loss_and_grad(
     terminals,
     rewards,
     discount,
-    # #
     critic,
     tau,
 ):
@@ -211,9 +278,9 @@ def _critic_loss_and_grad(
     next_actions = r_samples
     next_actions = jnp.clip(next_actions, -1.0, 1.0)
     next_qs = compute_q(target_critic_apply_fn, target_params,
-                        next_vlm_output, next_actions)  # (batch_size, )
+                        next_vlm_output, next_actions)
     masks = 1.0 - terminals
-    target_q = rewards + discount * masks * next_qs  # (batch_size, )
+    target_q = rewards + discount * masks * next_qs
     target_q = jax.lax.stop_gradient(target_q)
 
     def loss_fn(critic_params):
@@ -247,7 +314,7 @@ def _critic_loss_and_grad(
             "q_diff_min": (qs - target_q).min(),
         }
 
-        num_heads = qs.shape[0]  # static at compile time
+        num_heads = qs.shape[0]
         for i in range(num_heads):
             qi = qs[i]
             metrics[f"q{i+1}_mean"] = qi.mean()
@@ -276,24 +343,22 @@ def _sarsa_loss_and_grad(
     mc_target,
     key,
     critic_apply_fn,
-    # #
-    target_params,  # Subsampled target critic parameters
+    target_params,
     next_vlm_output,
     batch_next_actions,
     target_critic_apply_fn,
     terminals,
     rewards,
     discount,
-    # #
     critic,
     tau,
 ):
     """Single jitted step for critic: forward + loss + grad."""
     next_actions = jnp.clip(batch_next_actions, -1.0, 1.0)
     next_qs = compute_q(target_critic_apply_fn, target_params,
-                        next_vlm_output, next_actions)  # (batch_size, )
+                        next_vlm_output, next_actions)
     masks = 1.0 - terminals
-    target_q = rewards + discount * masks * next_qs  # (batch_size, )
+    target_q = rewards + discount * masks * next_qs
     target_q = jax.lax.stop_gradient(target_q)
 
     def loss_fn(critic_params):
@@ -327,7 +392,7 @@ def _sarsa_loss_and_grad(
             "q_diff_min": (qs - target_q).min(),
         }
 
-        num_heads = qs.shape[0]  # static at compile time
+        num_heads = qs.shape[0]
         for i in range(num_heads):
             qi = qs[i]
             metrics[f"q{i+1}_mean"] = qi.mean()
@@ -356,18 +421,15 @@ def _calql_loss_and_grad(
     mc_target,
     key,
     critic_apply_fn,
-    # #
-    target_params,  # Subsampled target critic parameters
+    target_params,
     next_vlm_output,
     batch_next_actions,
     target_critic_apply_fn,
     terminals,
     rewards,
     discount,
-    # #
     critic,
     tau,
-    # Cal-QL specific #
     action_samples,  # (batch_size, num_samples, action_dim)
     cql_alpha: float,
     cql_temp: float,
@@ -381,9 +443,9 @@ def _calql_loss_and_grad(
     # Compute TD target using SARSA-style next actions
     next_actions = jnp.clip(batch_next_actions, -1.0, 1.0)
     next_qs = compute_q(target_critic_apply_fn, target_params,
-                        next_vlm_output, next_actions)  # (batch_size, )
+                        next_vlm_output, next_actions)
     masks = 1.0 - terminals
-    target_q = rewards + discount * masks * next_qs  # (batch_size, )
+    target_q = rewards + discount * masks * next_qs
     target_q = jax.lax.stop_gradient(target_q)
 
     batch_size = actions.shape[0]
@@ -404,10 +466,7 @@ def _calql_loss_and_grad(
 
         # CQL regularization: penalize high Q-values on OOD actions
         # Compute Q-values for action_samples (OOD actions from base policy)
-        # action_samples shape: (batch_size, num_samples, action_dim)
-        # Need to vmap over samples dimension
         def compute_q_for_sample(sample_actions):
-            # sample_actions: (batch_size, action_dim)
             return critic_apply_fn(
                 {"params": critic_params},
                 vlm_output,
@@ -425,21 +484,12 @@ def _calql_loss_and_grad(
         qs_ood = jnp.transpose(qs_ood, (1, 2, 0))
 
         # Cal-QL: Apply constant lower bound
-        # Use constant lower_bound instead of mc_returns
-        # Count how often Q < lower_bound before clamping
         calql_bound_rate = (qs_ood < calql_lower_bound).mean()
-        # Apply max(Q, lower_bound) - this is the key Cal-QL modification
         qs_ood_calibrated = jnp.maximum(qs_ood, calql_lower_bound)
 
-        # Also include dataset Q-values in logsumexp (standard CQL)
-        # qs shape: (num_heads, batch_size) -> (num_heads, batch_size, 1)
-        # qs_expanded = jnp.expand_dims(qs, axis=-1)
-        # Concatenate: (num_heads, batch_size, num_samples + 1)
-        # all_qs = jnp.concatenate([qs_ood_calibrated, qs_expanded], axis=-1)
         all_qs = qs_ood_calibrated
 
         # CQL loss: logsumexp(Q_ood) - Q_data
-        # Apply temperature scaling
         cql_ood_values = (
             jax.scipy.special.logsumexp(all_qs / cql_temp, axis=-1) * cql_temp
         )  # (num_heads, batch_size)
@@ -476,7 +526,7 @@ def _calql_loss_and_grad(
             "q_diff_min": (qs - target_q).min(),
         }
 
-        num_heads = qs.shape[0]  # static at compile time
+        num_heads = qs.shape[0]
         for i in range(num_heads):
             qi = qs[i]
             metrics[f"q{i+1}_mean"] = qi.mean()
@@ -501,11 +551,9 @@ def q_loss(
     critic_params,
     vlm_output,
     actions,
-    # target_q,
     mc_target,
     key,
     critic_apply_fn,
-    # #
     critic,
 ):
     """Single jitted step for critic: forward + loss + grad."""
@@ -535,10 +583,10 @@ def _sample_deterministic_actions(apply_fn, params, observations: np.ndarray, ba
     return means
 
 
-class PiResidualTD3Cache(Agent):
+class PiResidualTD3GRPO(Agent):
     """
-    Update temperature based computation based on SB3: https://stable-baselines3.readthedocs.io/en/v1.0/_modules/stable_baselines3/sac/sac.html?utm_source=chatgpt.com
-    Original implementation seems to be buggy
+    GRPO variant of TD3 for residual policy learning.
+    Uses advantage-weighted regression over action samples for actor updates.
     """
     actor: PiPolicy
     critic: TrainState
@@ -562,21 +610,19 @@ class PiResidualTD3Cache(Agent):
     target_entropy: float
     entropy_scale: bool
     num_qs: int = struct.field(pytree_node=False)
-    num_min_qs: Optional[int] = struct.field(
-        pytree_node=False
-    )  # See M in RedQ https://arxiv.org/abs/2101.05982
+    num_min_qs: Optional[int] = struct.field(pytree_node=False)
     backup_entropy: bool = struct.field(pytree_node=False)
     pi0_hidden_dims: int
     exploration_epsilon: float
-    cql_alpha: float
-    cql_temp: float
+    grpo_beta: float  # GRPO temperature for advantage weighting
+    cql_alpha: float  # CQL regularization weight
+    cql_temp: float  # CQL temperature for logsumexp
 
     @classmethod
     def create(
         cls,
         config: TrainConfig,
         seed: int,
-        # observations: Data,
         batch_size: int,
         action_dim: int = 7,
         state_dim: int = 8,
@@ -589,8 +635,8 @@ class PiResidualTD3Cache(Agent):
         hidden_dims: Sequence[int] = (512, 512, 512, 512),
         discount: float = 0.99,
         tau: float = 0.005,
-        num_qs: int = 2,
-        num_min_qs: Optional[int] = None,
+        num_qs: int = 10,
+        num_min_qs: Optional[int] = 2,
         critic_dropout_rate: Optional[float] = None,
         critic_weight_decay: Optional[float] = None,
         critic_layer_norm: bool = True,
@@ -600,7 +646,6 @@ class PiResidualTD3Cache(Agent):
         init_temperature: float = 1.0,
         backup_entropy: bool = True,
         use_pnorm: bool = False,
-        # NOTE: Make it `True` so that outputs are valid
         adjust_target_entropy: bool = True,
         use_critic_resnet: bool = False,
         time_dim: int = 128,
@@ -622,11 +667,11 @@ class PiResidualTD3Cache(Agent):
         beta_schedule: str = 'vp',
         batch_size_dict_key: str = 'actions',
         entropy_mul_scale_factor: float = 3.0,
-        exploration_epsilon: float = 0.05,
-        cql_alpha: float = 5.0,
-        cql_temp: float = 1.0,
+        exploration_epsilon: float = 0.2,
+        grpo_beta: float = 1.0,  # GRPO temperature
+        cql_alpha: float = 5.0,  # CQL regularization weight
+        cql_temp: float = 1.0,  # CQL temperature for logsumexp
     ):
-        # Assertions
         assert N >= n_edit_samples, f"N must be greater than or equal to n_edit_samples, got N={N} and n_edit_samples={n_edit_samples}"
 
         paligemma_config = _gemma.get_config(config.model.paligemma_variant)
@@ -643,12 +688,10 @@ class PiResidualTD3Cache(Agent):
 
             target_entropy = target_entropy * entropy_mul_scale_factor
 
-        # batch_size = observations[batch_size_dict_key].shape[0]
-
         rng = jax.random.PRNGKey(seed)
         rng, actor_key, critic_key, temp_key = jax.random.split(rng, 4)
 
-        # Load params if `params_path` is provided #
+        # Load params if `params_path` is provided
         critic_params = None
         target_critic_params = None
         edit_actor_params = None
@@ -656,25 +699,17 @@ class PiResidualTD3Cache(Agent):
         if params_path is not None:
             critic_params, target_critic_params, edit_actor_params, temp_params = load_checkpoint(params_path)
 
-        # Init Pi0 model #
+        # Init Pi0 model
         actor = PiPolicy(rng=rng, config=config, is_target=False)
         target_actor = actor
 
         if decay_steps is not None:
             actor_lr = optax.cosine_decay_schedule(actor_lr, decay_steps)
 
-        # Init edit actor #
-        # Edit actor for now will take in pi0 VLM output hidden states, predicted base actions, concatenate them and compute residual action
-        # dummy_observations = jnp.ones((batch_size, pi0_hidden_dims)) # For initializing the edit actor
-        # Inlcude state concatenation as well
+        # Init edit actor
         dummy_observations = jnp.ones(
             (batch_size, pi0_hidden_dims + state_dim))
-        # For initializing the critic
         dummy_actions = jnp.ones((batch_size, action_dim))
-        # edit_actor_base_cls = partial(
-        #     ResidualActor, hidden_dims=hidden_dims, dropout_rate=None, activate_final=True, use_pnorm=use_pnorm, use_layer_norm=True,
-        # )
-        # edit_actor_def = TanhNormal(edit_actor_base_cls, action_dim)
         edit_actor_def = ResidualActor(
             action_dim, hidden_dims=hidden_dims, num_residual_blocks=3)
         edit_observations = jnp.concatenate(
@@ -685,20 +720,18 @@ class PiResidualTD3Cache(Agent):
             edit_actor_params = edit_actor_def.init(
                 actor_key, dummy_observations, dummy_actions)["params"]
         else:
-            print(
-                "\n\n\nInitializing edit actor parameters loaded from checkpoint...\n\n\n")
+            print("\n\n\nInitializing edit actor parameters loaded from checkpoint...\n\n\n")
 
         edit_actor = TrainState.create(
             apply_fn=edit_actor_def.apply,
             params=edit_actor_params,
-            # tx=optax.adam(learning_rate=actor_lr),
             tx=optax.chain(
                 optax.clip_by_global_norm(1.0),
                 optax.adam(learning_rate=actor_lr),
             )
         )
 
-        # Init critic #
+        # Init critic
         critic_base_cls = partial(
             MLP,
             hidden_dims=hidden_dims,
@@ -706,10 +739,8 @@ class PiResidualTD3Cache(Agent):
             dropout_rate=critic_dropout_rate,
             use_layer_norm=critic_layer_norm,
             use_pnorm=use_pnorm,
-            # activations=nn.swish,
             activations=nn.swish,
         )
-        # critic_cls = partial(StateAndStateActionValue, base_cls=critic_base_cls)
         critic_cls = partial(StateActionValue, base_cls=critic_base_cls)
         critic_def = Ensemble(critic_cls, num=num_qs)
 
@@ -720,14 +751,12 @@ class PiResidualTD3Cache(Agent):
         else:
             print("\n\n\nInitializing critic parameters loaded from checkpoint...\n\n\n")
 
-        if critic_weight_decay is not None:
+        if critic_weight_decay is not None and critic_weight_decay > 0:
             tx = optax.adamw(
                 learning_rate=critic_lr,
                 weight_decay=critic_weight_decay,
-                mask=decay_mask_fn,
             )
         else:
-            # tx = optax.adam(learning_rate=critic_lr)
             tx = optax.chain(
                 optax.clip_by_global_norm(1.0),
                 optax.adam(learning_rate=critic_lr),
@@ -741,7 +770,6 @@ class PiResidualTD3Cache(Agent):
 
         # Create target critic with same architecture
         target_critic_def = Ensemble(critic_cls, num=num_min_qs or num_qs)
-        # Use target_critic_params if loaded, otherwise use critic_params
         target_critic_init_params = target_critic_params if target_critic_params is not None else critic_params
         target_critic = TrainState.create(
             apply_fn=target_critic_def.apply,
@@ -775,7 +803,6 @@ class PiResidualTD3Cache(Agent):
             critic=critic,
             target_critic=target_critic,
             target_actor=target_actor,
-            # target_actor_params=target_actor_params,
             edit_actor=edit_actor,
             action_dim=action_dim,
             action_horizon=action_horizon,
@@ -798,48 +825,52 @@ class PiResidualTD3Cache(Agent):
             backup_entropy=backup_entropy,
             pi0_hidden_dims=pi0_hidden_dims,
             exploration_epsilon=exploration_epsilon,
+            grpo_beta=grpo_beta,
             cql_alpha=cql_alpha,
             cql_temp=cql_temp,
         )
 
     def sample_actions(self, _observations: Data, is_target=False, *args, **kwargs):
         '''
-        For given state/observation, samles self.N actions from base policy; For first self.n_edit_samples actions, samples from edit_actor;
-        Combine all (N + n_edit_samples) actions and compute Q-values; Return the action with the highest Q-value;
+        Sample actions from edit actor. Also samples action_samples from base policy
+        for GRPO training.
         '''
         out_dict = {}
 
         seed = kwargs.pop("seed", None)
         seed, rng = jax.random.split(seed)
-        # timer = kwargs.pop("timer", None)
         use_deterministic_actions = kwargs.pop(
             "use_deterministic_actions", False)
         num_action_samples = kwargs.pop("num_action_samples", 1)
-        
-        # Repeat observations to sample `N` actions#
-        # observations = repeat_observations(_observations, self.N, axis=0)
+        num_diffusion_samples = kwargs.pop("num_diffusion_samples", 1)
+
         observations = _observations
 
-        # Do a forward pass to get VLM output #
+        # Do a forward pass to get VLM output
         seed, rng = jax.random.split(seed)
 
         actions, vlm_output, processed_obs = self.actor.sample_actions_with_vlm_output(
             rng, observations)
-        # (1, action_horizon, action_dim) # Unnormalized actions #
         diffusion_actions = actions.copy()
-        # Returned actions are not normalized, normalize before passing to edit actor #
-        # timer.tick("norm_actions_time")
         actions = self.actor.norm_actions(actions)
 
-        # Take mean across tokens as representation from VLM #
-        # (1, pi0_hidden_dims)
+        # Sample additional action samples for GRPO if requested
+        if num_diffusion_samples > 1:
+            rng, rng_diffusion_samples = jax.random.split(rng)
+            batched_obs = add_batch_dim(observations)
+            observations_repeated = repeat_observations_openpi(
+                batched_obs, num_diffusion_samples, axis=0)
+            diffusion_samples, _, _ = self.actor.sample_actions_with_vlm_output(
+                rng_diffusion_samples, observations_repeated)
+            diffusion_samples = self.actor.norm_actions(diffusion_samples)
+        else:
+            diffusion_samples = diffusion_actions
+
+        # Take mean across tokens as representation from VLM
         vlm_output = jnp.mean(vlm_output[0][:, :512, :], axis=1)
-        state = processed_obs['state'][0, :8][None, :8]  # State dimension
-        # (1, pi0_hidden_dims + state_dim)
+        state = processed_obs['state'][0, :8][None, :8]
         vlm_output = jnp.concatenate([vlm_output, state], axis=1)
 
-        # NOTE: In all the computation in this class, self.action_dim = action_horizon * action_dim, so keep that semantic in mind #
-        # This is done so that without any code modification, edit_actor outputs an action chunk #
         seed, rng = jax.random.split(seed)
         actions = actions.reshape(1, self.action_dim)
         r_observations = vlm_output
@@ -858,27 +889,26 @@ class PiResidualTD3Cache(Agent):
         final_action = actions.reshape(
             self.action_horizon, self.action_dim // self.action_horizon)
 
-        # breakpoint()
-
-        # Unnormalize actions before returning #
-        # timer.tick("unnorm_actions_time")
         final_action = self.actor.unnorm_actions(final_action)
-        # timer.tock("unnorm_actions_time")
 
         rng, _ = jax.random.split(rng, 2)
         out_dict = {
-            "actions": final_action,  # (action_horizon, action_dim)
-            "vlm_output": vlm_output[0],  # (pi0_hidden_dims,)
-            # (N, action_horizon, action_dim)
-            "diffusion_actions": diffusion_actions
+            "actions": final_action,
+            "vlm_output": vlm_output[0],
+            "diffusion_actions": diffusion_actions,
         }
+
+        # Add action_samples for GRPO
+        if num_diffusion_samples > 1:
+            out_dict["action_samples"] = diffusion_samples
+        else:
+            out_dict["action_samples"] = diffusion_actions
 
         return out_dict
 
     def sample_base_actions(self, _observations: Data, is_target=False, *args, **kwargs):
         '''
-        For given state/observation, samles self.N actions from base policy; For first self.n_edit_samples actions, samples from edit_actor;
-        Combine all (N + n_edit_samples) actions and compute Q-values; Return the action with the highest Q-value;
+        Sample actions from base policy without edit actor.
         '''
         out_dict = {}
 
@@ -887,8 +917,6 @@ class PiResidualTD3Cache(Agent):
 
         num_action_samples = kwargs.pop("num_diffusion_samples", 1)
 
-        # Repeat observations to sample `N` actions#
-        # observations = repeat_observations(_observations, self.N, axis=0)
         observations = _observations
 
         rng_actions, rng = jax.random.split(seed)
@@ -896,7 +924,7 @@ class PiResidualTD3Cache(Agent):
             rng_actions, observations)
 
         if num_action_samples == 1:
-            diffusion_actions = actions.copy()  # (1, action_horizon, action_dim)
+            diffusion_actions = actions.copy()
         else:
             diffusion_actions = actions.copy()
 
@@ -908,18 +936,15 @@ class PiResidualTD3Cache(Agent):
                 rng_diffusion_samples, observations_repeated)
             diffusion_samples = self.actor.norm_actions(diffusion_samples)
 
-        # Take mean across tokens as representation from VLM #
-        # (1, pi0_hidden_dims)
         vlm_output = jnp.mean(vlm_output[0][:, :512, :], axis=1)
-        state = processed_obs['state'][0, :8][None, :8]  # State dimension
-        # (1, pi0_hidden_dims + state_dim)
+        state = processed_obs['state'][0, :8][None, :8]
         vlm_output = jnp.concatenate([vlm_output, state], axis=1)
         action = diffusion_actions
 
         rng, _ = jax.random.split(rng, 2)
         out_dict = {
-            "actions": action.squeeze(),  # (action_horizon, action_dim)
-            "vlm_output": vlm_output[0],  # (pi0_hidden_dims,)
+            "actions": action.squeeze(),
+            "vlm_output": vlm_output[0],
             "diffusion_actions": diffusion_actions,
         }
 
@@ -931,13 +956,8 @@ class PiResidualTD3Cache(Agent):
         return out_dict
 
     def get_vlm_output(self, _observations: Data, is_target=False, *args, **kwargs):
-        '''
-        For given state/observation, samles self.N actions from base policy; For first self.n_edit_samples actions, samples from edit_actor;
-        Combine all (N + n_edit_samples) actions and compute Q-values; Return the action with the highest Q-value;
-        '''
         seed = kwargs.pop("seed", None)
         seed, rng = jax.random.split(seed)
-        # Do a forward pass to get VLM output #
         seed, rng = jax.random.split(rng)
         if not is_target:
             vlm_output, _, processed_obs = self.actor.get_vlm_output(
@@ -946,26 +966,14 @@ class PiResidualTD3Cache(Agent):
             vlm_output, _, processed_obs = self.target_actor.get_vlm_output(
                 rng, _observations, processed_obs=False, infer=True, return_processed_obs=True)
 
-        # Take mean across tokens as representation from VLM #
-        # (N, pi0_hidden_dims)
         vlm_output = jnp.mean(vlm_output[0][:, :512, :], axis=1)
-        state = processed_obs['state'][0, :8][None, :8]  # State dimension
-        # (1, pi0_hidden_dims + state_dim)
+        state = processed_obs['state'][0, :8][None, :8]
         vlm_output = jnp.concatenate([vlm_output, state], axis=1)
 
         return vlm_output[0]
     
     def compute_q(self, vlm_output: np.ndarray, actions: np.ndarray, *args, **kwargs):
-        """Compute Q-values for given VLM output and actions.
-        
-        Args:
-            vlm_output: VLM output representation (can be batched or single)
-            actions: Actions (can be batched or single)
-            
-        Returns:
-            Q-values from first Q-head (same shape as batch dimension)
-        """
-        # Ensure proper shapes
+        """Compute Q-values for given VLM output and actions."""
         if vlm_output.ndim == 1:
             vlm_output = vlm_output.reshape(1, -1)
         if actions.ndim == 1:
@@ -977,12 +985,53 @@ class PiResidualTD3Cache(Agent):
             vlm_output, 
             actions
         )
-        # Return first Q-head
         return q_values[0]
+
+    def get_edit_action(self, base_actions: np.ndarray, vlm_output: np.ndarray, clip: bool = True) -> np.ndarray:
+        """Compute edit actions given base actions and VLM output.
+        
+        Args:
+            base_actions: Base actions from the policy, shape (batch_size, action_dim) or (action_dim,)
+            vlm_output: VLM output features, shape (batch_size, vlm_dim) or (vlm_dim,)
+            clip: Whether to clip actions to [-1, 1]
+            
+        Returns:
+            edit_actions: Edited actions, same shape as base_actions
+        """
+        # Handle 1D inputs
+        squeeze_output = False
+        if base_actions.ndim == 1:
+            base_actions = base_actions.reshape(1, -1)
+            squeeze_output = True
+        if vlm_output.ndim == 1:
+            vlm_output = vlm_output.reshape(1, -1)
+        
+        # Normalize base actions
+        base_actions = base_actions.reshape(-1, self.action_horizon, self.action_dim // self.action_horizon)
+        base_actions_norm = self.actor.norm_actions(base_actions)
+        base_actions_norm = base_actions_norm.reshape(-1, self.action_dim)
+        
+        # Compute edit actions
+        edit_actions = self.edit_actor.apply_fn(
+            {"params": self.edit_actor.params}, vlm_output, base_actions_norm
+        )
+        
+        if clip:
+            edit_actions = jnp.clip(edit_actions, -1.0, 1.0)
+        
+        # Unnormalize actions
+        # edit_actions = self.actor.unnorm_actions(edit_actions)
+        
+        if squeeze_output:
+            edit_actions = edit_actions[0]
+        
+        return edit_actions
 
     def update_edit_actor(self, batch: Batch, *args, **kwargs) -> Tuple[Agent, Dict[str, float]]:
         seed = kwargs.pop("seed", None)
         bc_warmup = kwargs.pop("bc_warmup", 0.0)
+        grpo_beta = kwargs.pop("grpo_beta", self.grpo_beta)
+        grpo_weight_threshold = kwargs.pop("grpo_weight_threshold", 0.0)
 
         assert seed is not None, "seed must be provided"
         rng = seed
@@ -992,12 +1041,18 @@ class PiResidualTD3Cache(Agent):
         vlm_output = batch['vlm_output']
         base_actions = base_actions.reshape(-1, self.action_dim)
 
-        # Get vlm output for observations #
+        # Get action_samples for GRPO
+        action_samples = batch['action_samples']
+        action_samples = self.actor.norm_actions(action_samples)
+        # Reshape to (batch_size, num_samples, action_dim)
+        action_samples = action_samples.reshape(action_samples.shape[0], action_samples.shape[1], -1)
+
         dropout_rng, rng = jax.random.split(rng)
         rng1, rng = jax.random.split(rng)
         rng2, rng = jax.random.split(rng)
-        # Use JITted version #
-        edit_actor, grads, actor_info = _edit_actor_loss_and_grad(
+        
+        # Use GRPO loss
+        edit_actor, grads, actor_info = _edit_actor_loss_and_grad_grpo(
             self.edit_actor,
             self.edit_actor.params,
             self.critic.params,
@@ -1014,28 +1069,15 @@ class PiResidualTD3Cache(Agent):
             self.temp.apply_fn,
             batch["mc_returns"],
             batch["success"][:, None],
-            bc_warmup,
-        )
-
-        q_loss_rng, rng = jax.random.split(rng)
-        q_loss_grads, q_loss_metrics = q_loss(
-            self.critic.params,
-            vlm_output,
-            base_actions,
-            batch["mc_returns"],
-            q_loss_rng,
-            self.critic.apply_fn,
-            self.critic,
+            float(bc_warmup),
+            action_samples,
+            grpo_beta,
+            grpo_weight_threshold,
         )
 
         actor_info["edit_actor_grad_norm"] = optax.global_norm(grads)
-        # edit_actor = self.edit_actor.apply_gradients(grads=grads)
-        actor_info["edit_actor_param_norm"] = optax.global_norm(
-            edit_actor.params)
+        actor_info["edit_actor_param_norm"] = optax.global_norm(edit_actor.params)
         actor_info["target_entropy"] = self.target_entropy
-
-        actor_info.update(q_loss_metrics)
-        actor_info["q_loss_grad_norm"] = optax.global_norm(q_loss_grads)
 
         return self.replace(edit_actor=edit_actor, rng=rng), actor_info
 
@@ -1050,14 +1092,10 @@ class PiResidualTD3Cache(Agent):
         assert seed is not None, "seed must be provided"
         rng = seed
 
-        # Sample next_actions by sampling from current edit policy #
         next_base_actions = batch['next_diffusion_actions']
         next_base_actions = self.actor.norm_actions(next_base_actions)
-        # (batch_size, pi0_hidden_dims)
         next_vlm_output = batch['next_vlm_output']
         current_vlm_output = batch['vlm_output']
-        # No need to append state here as it is already appended in the batch #
-        # (batch_size, action_horizon * action_dim)
         actions = batch["actions"].reshape(-1, self.action_dim)
         next_base_actions = next_base_actions.reshape(-1, self.action_dim)
         subsample_rng, rng = jax.random.split(rng)
@@ -1065,7 +1103,6 @@ class PiResidualTD3Cache(Agent):
             subsample_rng, self.target_critic.params, self.num_min_qs, self.num_qs
         )
 
-        # Use JITted version #
         timer.tick("critic_loss_and_grad_time")
         rng1, rng = jax.random.split(rng)
         sample_rng, rng = jax.random.split(rng)
@@ -1129,18 +1166,15 @@ class PiResidualTD3Cache(Agent):
                 batch["mc_returns"],
                 rng1,
                 self.critic.apply_fn,
-                # #
                 target_params,
                 next_vlm_output,
                 next_base_actions,
-                sample_rng,
                 self.edit_actor.apply_fn,
                 self.edit_actor.params,
                 self.target_critic.apply_fn,
                 batch["terminals"],
                 batch["rewards"],
                 self.discount,
-                # #
                 self.critic,
                 self.tau,
             )
@@ -1155,8 +1189,7 @@ class PiResidualTD3Cache(Agent):
         timer.tock("incremental_update_time")
 
         info["critic_param_norm"] = optax.global_norm(critic.params)
-        info["target_critic_param_norm"] = optax.global_norm(
-            target_critic.params)
+        info["target_critic_param_norm"] = optax.global_norm(target_critic.params)
 
         return self.replace(critic=critic, target_critic=target_critic, rng=rng), info
 
@@ -1185,6 +1218,8 @@ class PiResidualTD3Cache(Agent):
                 cql_alpha: float = None,
                 cql_temp: float = None,
                 edit_actor_warmup: bool = False,
+                grpo_beta: float = None,
+                grpo_weight_threshold: float = 0.0,
                 *args, **kwargs
             ):
         timer = kwargs.pop("timer", None)
@@ -1192,19 +1227,16 @@ class PiResidualTD3Cache(Agent):
         timer.tick("total_update_time")
         timer.tick("preprocess_time")
 
-        # Preprocess batch at once to save computation #
         batch = self.preproess_batch(_observations.copy())
         state = batch['observations']['proprio'][:, :8].copy()
         next_state = batch['next_observations']['proprio'][:, :8].copy()
 
-        # Filter batch to only keep relevant information #
         relevant_keys = [
             "actions", "rewards", "masks", "mc_returns",
             "terminals", "truncates", "vlm_output", "next_vlm_output", "diffusion_actions", "next_diffusion_actions",
             "next_actions", "success", "action_samples",
         ]
         batch = {k: v for k, v in batch.items() if k in relevant_keys}
-        # Normalization of state has already happened in image_replay_buffer_pi.py #
         batch['state'] = state
         batch['next_state'] = next_state
 
@@ -1227,6 +1259,8 @@ class PiResidualTD3Cache(Agent):
         update_calql = critic_warmup and critic_warmup_type == "calql"
 
         # Use instance defaults if not provided
+        if grpo_beta is None:
+            grpo_beta = self.grpo_beta
         if cql_alpha is None:
             cql_alpha = self.cql_alpha
         if cql_temp is None:
@@ -1236,13 +1270,14 @@ class PiResidualTD3Cache(Agent):
             for _ in range(utd_ratio):
                 data_rng, rng = jax.random.split(rng)
                 new_agent, critic_info = new_agent.update_critic(
-                    batch, timer=timer, seed=data_rng, update_sarsa=update_sarsa, update_calql=update_calql, 
+                    batch, timer=timer, seed=data_rng, update_sarsa=update_sarsa, update_calql=update_calql,
                     calql_lower_bound=calql_lower_bound, cql_alpha=cql_alpha, cql_temp=cql_temp)
 
         if update_edit_actor:
             edit_actor_rng, rng = jax.random.split(rng)
             new_agent, actor_info = new_agent.update_edit_actor(
-                batch, seed=edit_actor_rng, bc_warmup=edit_actor_warmup)
+                batch, seed=edit_actor_rng, bc_warmup=edit_actor_warmup, grpo_beta=grpo_beta,
+                grpo_weight_threshold=grpo_weight_threshold)
             entropy = actor_info["entropy"]
             actor_info = append_substr_to_dict_keys(actor_info, "edit_actor")
         
@@ -1262,8 +1297,8 @@ class PiResidualTD3Cache(Agent):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'wb') as f:
             pickle.dump(checkpoint, f)
-        # logging.info(f"Saved checkpoint to {path}")
         print(f"Saved checkpoint to {path}")
+
 
 def load_checkpoint(path: str):
     checkpoint = pickle.load(open(path, 'rb'))
@@ -1272,7 +1307,6 @@ def load_checkpoint(path: str):
     edit_actor_params = checkpoint['edit_actor_params']
     temp_params = checkpoint['temp_params']
 
-    # If target_critic_params not in checkpoint (old checkpoint), use critic_params
     if target_critic_params is None:
         target_critic_params = critic_params
 

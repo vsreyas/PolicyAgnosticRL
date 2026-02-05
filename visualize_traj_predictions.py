@@ -2,6 +2,7 @@
 
 import os
 import pickle
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -32,6 +33,8 @@ config_flags.DEFINE_config_file(
 )
 flags.DEFINE_string("tfrecord_path", None, "Path to tfrecord file (can be glob pattern).")
 flags.DEFINE_string("checkpoint_path", None, "Path to model checkpoint (.pkl file).")
+flags.DEFINE_string("critic_params_path", None, "Path to critic params (.pkl file) to override checkpoint.")
+flags.DEFINE_string("edit_actor_params_path", None, "Path to edit actor params (.pkl file) to override checkpoint.")
 flags.DEFINE_string("output_dir", "./trajectory_visualization", "Output directory for visualization files.")
 flags.DEFINE_string("task_name", "put both moka pots on the stove", "Task name.")
 flags.DEFINE_string("pi_config_name", "pi05_libero_custom_low_mem_ep5", "PI config name.")
@@ -49,6 +52,10 @@ flags.DEFINE_float("grad_line_scale_low", -0.5, "Low scale for gradient line.")
 flags.DEFINE_float("grad_line_scale_high", 0.5, "High scale for gradient line.")
 flags.DEFINE_bool("generate_action_samples", False, "Generate new action samples from agent.")
 flags.DEFINE_integer("num_action_samples", 100, "Number of action samples to generate per timestep.")
+flags.DEFINE_bool("generate_base_actions", True, "Use sample_base_actions (True) or sample_actions (False) when generating action samples.")
+flags.DEFINE_bool("visualize_residuals", False, "Visualize edit actions (residuals) from the edit actor.")
+flags.DEFINE_integer("num_qs", 10, "Number of Q networks in the ensemble.")
+flags.DEFINE_integer("num_min_qs", 2, "Number of Q networks to use for min computation.")
 
 
 def load_trajectory_from_tfrecord(
@@ -187,7 +194,16 @@ def load_trajectory_from_tfrecord(
     return trajectory
 
 
-def load_model(checkpoint_path: str, pi_config: any, agent_name: str = "pi_residual_ppo", seed: int = 0):
+def load_model(
+    checkpoint_path: str, 
+    pi_config: any, 
+    agent_name: str = "pi_residual_ppo", 
+    seed: int = 0,
+    num_qs: int = 10,
+    num_min_qs: int = 2,
+    critic_params_path: Optional[str] = None,
+    edit_actor_params_path: Optional[str] = None,
+):
     """Load trained residual agent from checkpoint.
 
     Args:
@@ -195,11 +211,58 @@ def load_model(checkpoint_path: str, pi_config: any, agent_name: str = "pi_resid
         pi_config: PI configuration object
         agent_name: Name of agent to load ('pi_residual_td3' or 'pi_residual_ppo')
         seed: Random seed
+        num_qs: Number of Q networks in the ensemble
+        num_min_qs: Number of Q networks to use for min computation
+        critic_params_path: Optional path to critic params file to override checkpoint
+        edit_actor_params_path: Optional path to edit actor params file to override checkpoint
 
     Returns:
         Loaded agent (PiResidualTD3Cache or PiResidualPPOCache)
     """
-    logging.info(f"Loading {agent_name} checkpoint from {checkpoint_path}")
+    # Load base checkpoint and potentially override params
+    final_checkpoint_path = checkpoint_path
+    
+    if critic_params_path is not None or edit_actor_params_path is not None:
+        logging.info("Creating merged checkpoint with overrides...")
+        
+        # Load base checkpoint
+        with open(checkpoint_path, 'rb') as f:
+            checkpoint_dict = pickle.load(f)
+        
+        # Override critic params if provided
+        if critic_params_path is not None:
+            logging.info(f"Overriding critic params from {critic_params_path}")
+            with open(critic_params_path, 'rb') as f:
+                critic_override = pickle.load(f)
+                if 'critic_params' in critic_override:
+                    checkpoint_dict['critic_params'] = critic_override['critic_params']
+                    # Also update target_critic_params
+                    if 'target_critic_params' in critic_override:
+                        checkpoint_dict['target_critic_params'] = critic_override['target_critic_params']
+                    else:
+                        # Use same params for target if not provided separately
+                        checkpoint_dict['target_critic_params'] = critic_override['critic_params']
+                else:
+                    raise ValueError(f"critic_params not found in {critic_params_path}")
+        
+        # Override edit actor params if provided
+        if edit_actor_params_path is not None:
+            logging.info(f"Overriding edit actor params from {edit_actor_params_path}")
+            with open(edit_actor_params_path, 'rb') as f:
+                edit_actor_override = pickle.load(f)
+                if 'edit_actor_params' in edit_actor_override:
+                    checkpoint_dict['edit_actor_params'] = edit_actor_override['edit_actor_params']
+                else:
+                    raise ValueError(f"edit_actor_params not found in {edit_actor_params_path}")
+        
+        # Save merged checkpoint to temporary file
+        temp_file = tempfile.NamedTemporaryFile(mode='wb', suffix='.pkl', delete=False)
+        pickle.dump(checkpoint_dict, temp_file)
+        temp_file.close()
+        final_checkpoint_path = temp_file.name
+        logging.info(f"Created temporary merged checkpoint at {final_checkpoint_path}")
+    
+    logging.info(f"Loading {agent_name} checkpoint from {final_checkpoint_path}")
 
     rng = jax.random.PRNGKey(seed)
 
@@ -209,10 +272,17 @@ def load_model(checkpoint_path: str, pi_config: any, agent_name: str = "pi_resid
         seed=seed,
         batch_size=1,  # batch_size for initialization
         rng=rng,
-        params_path=checkpoint_path,
+        params_path=final_checkpoint_path,
         N=4,
         n_edit_samples=4,
+        num_qs=num_qs,
+        num_min_qs=num_min_qs,
     )
+    
+    # Clean up temporary file if created
+    if final_checkpoint_path != checkpoint_path:
+        os.remove(final_checkpoint_path)
+        logging.info("Cleaned up temporary checkpoint file")
 
     logging.info("Model loaded successfully")
     return agent
@@ -430,6 +500,8 @@ def create_visualization_video_umap(
     grad_line_scale_high: float = 0.5,
     generate_action_samples: bool = False,
     num_action_samples: int = 100,
+    generate_base_actions: bool = True,
+    visualize_residuals: bool = False,
 ) -> None:
     """Create visualization with UMAP action embeddings and Q-values.
     
@@ -445,6 +517,8 @@ def create_visualization_video_umap(
         grad_line_scale_high: High scale for gradient line
         generate_action_samples: Whether to generate new action samples from agent
         num_action_samples: Number of action samples to generate per timestep
+        generate_base_actions: Use sample_base_actions (True) or sample_actions (False)
+        visualize_residuals: Whether to visualize edit actions
     """
     # Create output directory
     output_dir = Path(output_dir)
@@ -498,12 +572,17 @@ def create_visualization_video_umap(
                 'prompt': trajectory['prompt'],
             }
             
-            # Sample base actions from agent with num_action_samples
+            # Sample actions from agent with num_action_samples
             sample_rng, use_rng = jax.random.split(sample_rng)
-            result_dict = agent.sample_base_actions(obs_dict, seed=use_rng, num_diffusion_samples=num_action_samples)
+            if generate_base_actions:
+                result_dict = agent.sample_base_actions(obs_dict, seed=use_rng, num_diffusion_samples=num_action_samples)
+                # Extract action_samples from the returned dictionary
+                base_actions_samples = result_dict['action_samples']  # (num_action_samples, action_horizon, action_dim)
+            else:
+                result_dict = agent.sample_actions(obs_dict, seed=use_rng, use_deterministic_actions=True, num_action_samples=1)
+                # Extract actions from the returned dictionary and add batch dimension
+                base_actions_samples = result_dict['actions'][np.newaxis, ...]  # (1, action_horizon, action_dim)
             
-            # Extract action_samples from the returned dictionary
-            base_actions_samples = result_dict['action_samples']  # (num_action_samples, action_horizon, action_dim)
             generated_action_samples_list.append(base_actions_samples)
         
         action_samples_generated = np.array(generated_action_samples_list)  # (T, num_action_samples, action_horizon, action_dim)
@@ -511,8 +590,26 @@ def create_visualization_video_umap(
     
     # Normalize actions using agent's normalization function (similar to residual_td3.py line 677)
     logging.info("Normalizing actions...")
+    # Keep original diffusion_actions for edit_action computation (get_edit_action normalizes internally)
+    diffusion_actions_original = diffusion_actions.copy()
     # No need to normalize actions as that should be done in the replay buffer
     diffusion_actions = agent.actor.norm_actions(diffusion_actions)  # (T, action_horizon, action_dim)
+    
+    # Compute edit actions if visualize_residuals is enabled
+    edit_actions = None
+    if visualize_residuals:
+        logging.info("Computing edit actions from edit actor...")
+        edit_actions_list = []
+        for t in range(T):
+            # get_edit_action expects (action_dim,) or (batch, action_dim) and vlm_output
+            # diffusion_actions_original is (T, action_horizon, action_dim) - need to flatten
+            diffusion_action_t = diffusion_actions_original[t].reshape(-1)  # (action_horizon * action_dim,)
+            vlm_t = vlm_outputs[t]  # (hidden_dim,)
+            
+            # get_edit_action normalizes internally, returns normalized actions (unnorm commented out)
+            edit_action_t = agent.get_edit_action(diffusion_action_t, vlm_t, clip=True)
+            edit_actions_list.append(np.array(edit_action_t))
+        edit_actions = np.array(edit_actions_list)  # (T, action_horizon * action_dim)
     
     # Reshape actions for Q-value computation: flatten action_horizon * action_dim
     action_samples_flat = action_samples.reshape(T, num_samples, -1)  # (T, num_samples, action_horizon*action_dim)
@@ -539,6 +636,17 @@ def create_visualization_video_umap(
     
     q_action_samples = np.array(q_action_samples)  # (T, num_samples)
     q_diffusion_actions = np.array(q_diffusion_actions)  # (T,)
+    
+    # Compute Q-values for edit actions if visualize_residuals is enabled
+    q_edit_actions = None
+    if visualize_residuals and edit_actions is not None:
+        logging.info("Computing Q-values for edit actions...")
+        q_edit_actions = []
+        for t in range(T):
+            vlm_t = vlm_outputs[t]
+            q_edit_t = agent.compute_q(vlm_t, edit_actions[t])[0]  # scalar
+            q_edit_actions.append(q_edit_t)
+        q_edit_actions = np.array(q_edit_actions)  # (T,)
     
     # Compute Q-values for generated action samples if we generated new ones
     q_action_samples_generated = None
@@ -626,6 +734,12 @@ def create_visualization_video_umap(
     # Embed diffusion actions
     diffusion_actions_embedded = reducer.transform(diffusion_actions_flat)  # (T, 2)
     
+    # Embed edit actions if visualize_residuals is enabled
+    edit_actions_embedded = None
+    if visualize_residuals and edit_actions is not None:
+        logging.info("Embedding edit actions in UMAP space...")
+        edit_actions_embedded = reducer.transform(edit_actions)  # (T, 2)
+    
     # Embed gradient line actions if computed
     if plot_grad_q_line:
         logging.info("Embedding gradient line actions in UMAP space...")
@@ -695,6 +809,12 @@ def create_visualization_video_umap(
                       marker='X', s=200, c='yellow', edgecolors='black', linewidths=2,
                       label=f"Diffusion (Q={q_diffusion_actions[t]:.2f})")
             
+            # Plot edit action if visualize_residuals is enabled
+            if visualize_residuals and edit_actions_embedded is not None and q_edit_actions is not None:
+                ax.scatter(edit_actions_embedded[t, 0], edit_actions_embedded[t, 1],
+                          marker='D', s=200, c='cyan', edgecolors='black', linewidths=2,
+                          label=f"Edit (Q={q_edit_actions[t]:.2f})")
+            
             # Plot gradient line if requested
             if plot_grad_q_line and grad_line_embedded is not None:
                 grad_line_2d_t = grad_line_embedded[t]  # (grad_line_points, 2)
@@ -745,6 +865,11 @@ def create_visualization_video_umap(
         data_to_save['action_samples_generated'] = action_samples_generated_flat  # (T, num_samples_generated, action_horizon*action_dim)
         data_to_save['q_action_samples_generated'] = q_action_samples_generated  # (T, num_samples_generated)
     
+    # Add edit actions if visualize_residuals is enabled
+    if visualize_residuals and edit_actions is not None:
+        data_to_save['edit_actions'] = edit_actions  # (T, action_horizon*action_dim)
+        data_to_save['q_edit_actions'] = q_edit_actions  # (T,)
+    
     # Add gradient line data if computed
     if plot_grad_q_line and grad_line_actions is not None:
         data_to_save['grad_line_actions'] = grad_line_actions  # (T, grad_line_points, action_horizon*action_dim)
@@ -774,13 +899,17 @@ def main(_):
     pi_config.exp_name = "trajectory_visualization"
     pi_config.overwrite = True
 
-    # Load model first
+    # Load model with optional parameter overrides
     logging.info("Loading trained model...")
     agent = load_model(
         checkpoint_path=FLAGS.checkpoint_path,
         pi_config=pi_config,
         agent_name=FLAGS.agent_name,
         seed=FLAGS.seed,
+        num_qs=FLAGS.num_qs,
+        num_min_qs=FLAGS.num_min_qs,
+        critic_params_path=FLAGS.critic_params_path,
+        edit_actor_params_path=FLAGS.edit_actor_params_path,
     )
     
     # Get image_replay_buffer_kwargs from config if available
@@ -828,6 +957,8 @@ def main(_):
             grad_line_scale_high=FLAGS.grad_line_scale_high,
             generate_action_samples=FLAGS.generate_action_samples,
             num_action_samples=FLAGS.num_action_samples,
+            generate_base_actions=FLAGS.generate_base_actions,
+            visualize_residuals=FLAGS.visualize_residuals,
         )
     else:
         raise ValueError(f"Invalid vis_type: {FLAGS.vis_type}. Must be 1 or 2.")

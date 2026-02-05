@@ -3,11 +3,13 @@
 import inspect
 from .residual_td3 import PiResidualTD3Cache
 from .residual_ppo import PiResidualPPOCache
+from .residual_td3_grpo import PiResidualTD3GRPO
 
 # Map agent names to their corresponding classes
 agents_dict = {
     "pi_residual_td3": PiResidualTD3Cache,
     "pi_residual_ppo": PiResidualPPOCache,
+    "pi_residual_td3_grpo": PiResidualTD3GRPO,
 }
 
 
@@ -75,6 +77,7 @@ def create_agent(agent_name, config, seed, batch_size, rng, params_path=None, **
 __all__ = [
     "PiResidualTD3Cache",
     "PiResidualPPOCache",
+    "PiResidualTD3GRPO",
     "agents_dict",
     "create_agent",
 ]

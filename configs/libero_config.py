@@ -20,6 +20,7 @@ from configs.base_config import (
     BASE_EXPO_CONFIG,
     BASE_RESIDUAL_TD3_CONFIG,
     BASE_RESIDUAL_PPO_CONFIG,
+    BASE_RESIDUAL_TD3_GRPO_CONFIG,
 )
 
 SAVE_DIR_PREFIX = os.environ.get("SAVE_DIR_PREFIX", "./")
@@ -202,6 +203,8 @@ def get_config(config_string):
         "use_gae": False,
     }
     pi_residual_td3_config["offline_image_replay_buffer_kwargs"] = dict()
+    for key in pi_residual_td3_config["image_replay_buffer_kwargs"]:
+        pi_residual_td3_config["offline_image_replay_buffer_kwargs"][key] = pi_residual_td3_config["image_replay_buffer_kwargs"][key]
 
     pi_residual_ppo_config = deepcopy(BASE_RESIDUAL_PPO_CONFIG)
     pi_residual_ppo_config["batch_size"] = 256
@@ -217,6 +220,16 @@ def get_config(config_string):
         "use_dummy_advantages": True,
         "load_action_samples": True,
     }
+
+    pi_residual_td3_grpo_config = deepcopy(BASE_RESIDUAL_TD3_GRPO_CONFIG)
+    pi_residual_td3_grpo_config["batch_size"] = 256
+    pi_residual_td3_grpo_config["image_replay_buffer_kwargs"] = {
+        "load_action_samples": True,
+        "use_gae": False,
+    }
+    pi_residual_td3_grpo_config["offline_image_replay_buffer_kwargs"] = {
+        "load_action_samples": True,
+    }
     ###############
 
 
@@ -230,6 +243,7 @@ def get_config(config_string):
         "expo": ml_collections.ConfigDict(expo_config),
         "pi_residual_td3": ml_collections.ConfigDict(pi_residual_td3_config),
         "pi_residual_ppo": ml_collections.ConfigDict(pi_residual_ppo_config),
+        "pi_residual_td3_grpo": ml_collections.ConfigDict(pi_residual_td3_grpo_config),
     }
 
     return possible_structures[config_string]
