@@ -1,22 +1,23 @@
 #!/bin/bash
 
 # List of episode IDs to process
-EPISODE_IDS=(1 10 83 93 53 39)
+EPISODE_IDS=(0 15 2 8 13 19)
 # EPISODE_IDS=(1)
 
 # Base paths
-BASE_DIR="/home/skowshik/vla/codebase/PolicyAgnosticRL/td3_grpo_clean_v1_v2_3.4k_VIS_TRAJ"
+BASE_DIR="/home/skowshik/vla/codebase/PolicyAgnosticRL/critic_EVAL_calql_4_2_ch8k"
 # If `BASE_DIR` does not exist, create it
 if [ ! -d "${BASE_DIR}" ]; then
     mkdir -p "${BASE_DIR}"
 fi
 
-TFRECORD_BASE="/data/user_data/skowshik/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_base_rollouts/image_replay_buffer/"
-TD3_CHECKPOINT="/home/skowshik/vla/codebase/PolicyAgnosticRL/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_ws_sarsa_10_2/checkpoint_9000.pkl"
+TFRECORD_BASE="/data/user_data/skowshik/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_base_rollouts_EVAL/image_replay_buffer/"
+# TD3_CHECKPOINT="/home/skowshik/vla/codebase/PolicyAgnosticRL/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_ws_sarsa_10_2/checkpoint_9000.pkl"
 # Append BASE_DIR to the output base name
-OUT_BASE_NAME="${BASE_DIR}/chkpt3.4k"
-PI_CONFIG_NAME="pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k"
-TD3_GRPO_CHECKPOINT="/home/skowshik/vla/codebase/PolicyAgnosticRL/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_td3_grpo_clean_v1_continued_4.8k/checkpoint_3400.pkl"
+OUT_BASE_NAME="${BASE_DIR}/ch8k"
+# PI_CONFIG_NAME="pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k"
+PI_CONFIG_NAME="pi05_libero_gradacc2_2k"
+TD3_GRPO_CHECKPOINT="/home/skowshik/vla/codebase/PolicyAgnosticRL/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_ws_calql_10_2_clean_v2_balance/checkpoint_8000.pkl"
 
 # Loop through each episode
 for EPISODE_ID in "${EPISODE_IDS[@]}"; do
@@ -108,11 +109,10 @@ for EPISODE_ID in "${EPISODE_IDS[@]}"; do
       --pi_config_name=$PI_CONFIG_NAME \
       --tfrecord_path="${TFRECORD_PATH}" \
       --checkpoint_path="${TD3_GRPO_CHECKPOINT}" \
-      --output_dir="${OUT_BASE_NAME}${EPISODE_ID}_grpo_residuals" \
+      --output_dir="${OUT_BASE_NAME}${EPISODE_ID}" \
       --vis_type=2 \
       --config.image_replay_buffer_kwargs.load_action_samples=True \
-      --visualize_residuals=True \
-      --critic_params_path="${TD3_CHECKPOINT}"
+      --num_qs=4 \
 
     echo "Completed Episode ${EPISODE_ID}"
     echo ""

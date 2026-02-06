@@ -1014,7 +1014,7 @@ class PiResidualTD3Cache(Agent):
             self.temp.apply_fn,
             batch["mc_returns"],
             batch["success"][:, None],
-            bc_warmup,
+            float(bc_warmup),
         )
 
         q_loss_rng, rng = jax.random.split(rng)
@@ -1133,7 +1133,6 @@ class PiResidualTD3Cache(Agent):
                 target_params,
                 next_vlm_output,
                 next_base_actions,
-                sample_rng,
                 self.edit_actor.apply_fn,
                 self.edit_actor.params,
                 self.target_critic.apply_fn,
@@ -1185,6 +1184,7 @@ class PiResidualTD3Cache(Agent):
                 cql_alpha: float = None,
                 cql_temp: float = None,
                 edit_actor_warmup: bool = False,
+                edit_actor_utd_ratio: int = 1,
                 *args, **kwargs
             ):
         timer = kwargs.pop("timer", None)
@@ -1240,9 +1240,10 @@ class PiResidualTD3Cache(Agent):
                     calql_lower_bound=calql_lower_bound, cql_alpha=cql_alpha, cql_temp=cql_temp)
 
         if update_edit_actor:
-            edit_actor_rng, rng = jax.random.split(rng)
-            new_agent, actor_info = new_agent.update_edit_actor(
-                batch, seed=edit_actor_rng, bc_warmup=edit_actor_warmup)
+            for _ in range(edit_actor_utd_ratio):
+                edit_actor_rng, rng = jax.random.split(rng)
+                new_agent, actor_info = new_agent.update_edit_actor(
+                    batch, seed=edit_actor_rng, bc_warmup=edit_actor_warmup)
             entropy = actor_info["entropy"]
             actor_info = append_substr_to_dict_keys(actor_info, "edit_actor")
         

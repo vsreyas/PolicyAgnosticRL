@@ -265,6 +265,11 @@ flags.DEFINE_float(
     1.0,
     "Temperature for logsumexp in CQL/Cal-QL loss."
 )
+flags.DEFINE_integer(
+    "calql_random_actions",
+    0,
+    "Number of random actions in [-1, 1] to sample for Cal-QL OOD pessimism loss."
+)
 flags.DEFINE_float(
     "grpo_beta",
     1.0,
@@ -279,6 +284,11 @@ flags.DEFINE_integer(
     "num_diffusion_samples",
     4,
     "Number of action samples from base policy for GRPO training."
+)
+flags.DEFINE_integer(
+    "edit_actor_utd_ratio",
+    1,
+    "Update-to-data ratio for the edit actor."
 )
 flags.DEFINE_bool(
     "ws_critic",
@@ -635,6 +645,7 @@ def train_agent(_):
         state_replay_buffer = None
 
     rng = jax.random.PRNGKey(FLAGS.seed)
+    np.random.seed(FLAGS.seed)  # Seed NumPy for reproducible dataset balancing
 
     if dataset is not None:
         offline_train_iterator = dataset.iterator(
@@ -711,10 +722,11 @@ def train_agent(_):
             data_collection_rng_key, rng = jax.random.split(rng)
             
             fns_dict = {}
+            policy_rng_key, value_rng_key = jax.random.split(data_collection_rng_key)
             if i >= FLAGS.warmup_steps:
                 fns_dict["policy_fn"] = get_policy_fn(
                     agent=agent,
-                    rng=data_collection_rng_key,
+                    rng=policy_rng_key,
                     timer=timer,
                     deterministic_actions=False,
                     num_diffusion_samples=FLAGS.num_diffusion_samples,
@@ -722,12 +734,12 @@ def train_agent(_):
             else:
                fns_dict["policy_fn"] = get_base_policy_fn(
                     agent=agent,
-                    rng=data_collection_rng_key,
+                    rng=policy_rng_key,
                     num_diffusion_samples=FLAGS.num_diffusion_samples,
                 )
             fns_dict["value_fn"] = get_value_fn(
                 agent=agent,
-                rng=data_collection_rng_key,
+                rng=value_rng_key,
                 timer=timer,
             )
 
@@ -857,6 +869,8 @@ def train_agent(_):
             import gc; gc.collect()
 
             #########################################################
+            buffer_rng, rng = jax.random.split(rng)
+            # buffer_seed = int(jax.random.randint(buffer_rng, (), 0, 2**31))
             image_replay_buffer = ImageReplayBufferPi(
                 data_paths=data_paths,
                 seed=FLAGS.seed,
@@ -882,7 +896,7 @@ def train_agent(_):
                 batch_size=FLAGS.config.batch_size
             )
 
-            rng, rng_update = jax.random.split(rng)
+        rng, rng_update = jax.random.split(rng)
         
         is_warmup_flag = i < FLAGS.warmup_steps
         # Combine warmup flag with individual ws_critic and ws_edit_actor flags
@@ -910,9 +924,9 @@ def train_agent(_):
         else:
             batch = concatenate_batches([offline_batch, online_batch])
         timer.tock("sample_batch_time")
-        agent, info = agent.update(batch, 
-            utd_ratio=FLAGS.config.utd_ratio, 
-            timer=timer, 
+        agent, info = agent.update(batch,
+            utd_ratio=FLAGS.config.utd_ratio,
+            timer=timer,
             seed=rng_update,
             update_critic=update_critic,
             update_edit_actor=update_edit_actor,
@@ -923,8 +937,10 @@ def train_agent(_):
             bc_loss_coef=FLAGS.bc_loss_coef,
             cql_alpha=FLAGS.cql_alpha,
             cql_temp=FLAGS.cql_temp,
+            calql_random_actions=FLAGS.calql_random_actions,
             grpo_beta=FLAGS.grpo_beta,
             grpo_weight_threshold=FLAGS.grpo_weight_threshold,
+            edit_actor_utd_ratio=FLAGS.edit_actor_utd_ratio,
         )
         
         # Log batch statistics #

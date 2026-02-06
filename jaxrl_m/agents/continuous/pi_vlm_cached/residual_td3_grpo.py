@@ -116,6 +116,9 @@ def _edit_actor_loss_and_grad_grpo(
     action_dim = action_samples.shape[2]
 
     def loss_fn(actor_params):
+        # Split key2 for different critic calls to avoid RNG reuse
+        key_q, key_qbase, key_samples = jax.random.split(key2, 3)
+
         # Get edit actor's predicted actions
         actions = edit_actor_apply_fn(
             {"params": actor_params}, vlm_output, batch_actions)
@@ -128,7 +131,7 @@ def _edit_actor_loss_and_grad_grpo(
             vlm_output,
             actions,
             False,
-            rngs={"dropout": key2},
+            rngs={"dropout": key_q},
         )
         q = qs.mean(axis=0)
 
@@ -138,26 +141,27 @@ def _edit_actor_loss_and_grad_grpo(
             vlm_output,
             batch_actions,
             False,
-            rngs={"dropout": key2},
+            rngs={"dropout": key_qbase},
         )
         q_base = qs_base.mean(axis=0)
 
         # GRPO: Compute Q-values for all action_samples
         # action_samples shape: (batch_size, num_samples, action_dim)
-        def compute_q_for_sample(sample_actions):
+        sample_keys = jax.random.split(key_samples, num_samples)
+        def compute_q_for_sample(sample_actions, sample_key):
             # sample_actions: (batch_size, action_dim)
             return critic_apply_fn(
                 {"params": critic_params},
                 vlm_output,
                 sample_actions,
                 False,
-                rngs={"dropout": key2},
+                rngs={"dropout": sample_key},
             ).mean(axis=0)  # (batch_size,)
 
         # Transpose to (num_samples, batch_size, action_dim) for vmapping
         action_samples_transposed = jnp.transpose(action_samples, (1, 0, 2))
-        # Vmap over num_samples
-        qs_samples = jax.vmap(compute_q_for_sample)(action_samples_transposed)
+        # Vmap over num_samples with unique RNG keys
+        qs_samples = jax.vmap(compute_q_for_sample)(action_samples_transposed, sample_keys)
         # qs_samples shape: (num_samples, batch_size)
         # Transpose to (batch_size, num_samples)
         qs_samples = jnp.transpose(qs_samples, (1, 0))
@@ -412,7 +416,7 @@ def _sarsa_loss_and_grad(
     return critic, target_critic_params, grads, metrics
 
 
-@partial(jax.jit, static_argnames=("critic_apply_fn", "target_critic_apply_fn", "tau", "cql_alpha", "cql_temp", "calql_lower_bound"))
+@partial(jax.jit, static_argnames=("critic_apply_fn", "target_critic_apply_fn", "tau", "cql_alpha", "cql_temp", "calql_lower_bound", "calql_random_actions"))
 def _calql_loss_and_grad(
     critic_params,
     target_critic_params,
@@ -434,6 +438,7 @@ def _calql_loss_and_grad(
     cql_alpha: float,
     cql_temp: float,
     calql_lower_bound: float,
+    calql_random_actions: int = 0,
 ):
     """Cal-QL loss: TD loss + CQL regularization with constant lower bound.
     
@@ -449,16 +454,30 @@ def _calql_loss_and_grad(
     target_q = jax.lax.stop_gradient(target_q)
 
     batch_size = actions.shape[0]
+    action_dim = actions.shape[1]
+
+    # Sample random actions in [-1, 1] if requested
+    if calql_random_actions > 0:
+        random_key, key = jax.random.split(key)
+        random_actions = jax.random.uniform(
+            random_key, (batch_size, calql_random_actions, action_dim), minval=-1.0, maxval=1.0
+        )
+        # Concatenate with existing action_samples
+        action_samples = jnp.concatenate([action_samples, random_actions], axis=1)
+
     num_samples = action_samples.shape[1]
 
     def loss_fn(critic_params):
+        # Split key for different uses to avoid RNG reuse
+        key_data, key_ood_base = jax.random.split(key)
+
         # Q-values on dataset actions
         qs = critic_apply_fn(
             {"params": critic_params},
             vlm_output,
             actions,
             False,
-            rngs={"dropout": key},
+            rngs={"dropout": key_data},
         )  # (num_heads, batch_size)
 
         # TD loss
@@ -466,19 +485,20 @@ def _calql_loss_and_grad(
 
         # CQL regularization: penalize high Q-values on OOD actions
         # Compute Q-values for action_samples (OOD actions from base policy)
-        def compute_q_for_sample(sample_actions):
+        sample_keys = jax.random.split(key_ood_base, num_samples)
+        def compute_q_for_sample(sample_actions, sample_key):
             return critic_apply_fn(
                 {"params": critic_params},
                 vlm_output,
                 sample_actions,
                 False,
-                rngs={"dropout": key},
+                rngs={"dropout": sample_key},
             )  # (num_heads, batch_size)
 
         # Transpose to (num_samples, batch_size, action_dim) for vmapping
         action_samples_transposed = jnp.transpose(action_samples, (1, 0, 2))
-        # Vmap over num_samples
-        qs_ood = jax.vmap(compute_q_for_sample)(action_samples_transposed)
+        # Vmap over num_samples with unique RNG keys
+        qs_ood = jax.vmap(compute_q_for_sample)(action_samples_transposed, sample_keys)
         # qs_ood shape: (num_samples, num_heads, batch_size)
         # Transpose to (num_heads, batch_size, num_samples)
         qs_ood = jnp.transpose(qs_ood, (1, 2, 0))
@@ -957,8 +977,7 @@ class PiResidualTD3GRPO(Agent):
 
     def get_vlm_output(self, _observations: Data, is_target=False, *args, **kwargs):
         seed = kwargs.pop("seed", None)
-        seed, rng = jax.random.split(seed)
-        seed, rng = jax.random.split(rng)
+        rng, _ = jax.random.split(seed)
         if not is_target:
             vlm_output, _, processed_obs = self.actor.get_vlm_output(
                 rng, _observations, processed_obs=False, infer=True, return_processed_obs=True)
@@ -1089,6 +1108,7 @@ class PiResidualTD3GRPO(Agent):
         calql_lower_bound = kwargs.pop("calql_lower_bound", -1000.0)
         cql_alpha = kwargs.pop("cql_alpha", self.cql_alpha)
         cql_temp = kwargs.pop("cql_temp", self.cql_temp)
+        calql_random_actions = kwargs.pop("calql_random_actions", 0)
         assert seed is not None, "seed must be provided"
         rng = seed
 
@@ -1105,7 +1125,6 @@ class PiResidualTD3GRPO(Agent):
 
         timer.tick("critic_loss_and_grad_time")
         rng1, rng = jax.random.split(rng)
-        sample_rng, rng = jax.random.split(rng)
 
         if update_calql:
             # Cal-QL warmup: use action_samples as OOD actions with constant lower bound
@@ -1135,6 +1154,7 @@ class PiResidualTD3GRPO(Agent):
                 cql_alpha,
                 cql_temp,
                 calql_lower_bound,
+                calql_random_actions,
             )
 
         elif update_sarsa:
@@ -1207,19 +1227,21 @@ class PiResidualTD3GRPO(Agent):
         return batch
 
     def update(
-                self, 
-                _observations: Data, 
-                utd_ratio: int, 
-                update_critic: bool = True, 
-                update_edit_actor: bool = True, 
+                self,
+                _observations: Data,
+                utd_ratio: int,
+                update_critic: bool = True,
+                update_edit_actor: bool = True,
                 critic_warmup: bool = False,
                 critic_warmup_type: str = "sarsa",  # "sarsa" or "calql"
                 calql_lower_bound: float = -1000.0,
                 cql_alpha: float = None,
                 cql_temp: float = None,
+                calql_random_actions: int = 0,
                 edit_actor_warmup: bool = False,
                 grpo_beta: float = None,
                 grpo_weight_threshold: float = 0.0,
+                edit_actor_utd_ratio: int = 1,
                 *args, **kwargs
             ):
         timer = kwargs.pop("timer", None)
@@ -1266,18 +1288,20 @@ class PiResidualTD3GRPO(Agent):
         if cql_temp is None:
             cql_temp = self.cql_temp
 
-        if update_critic:        
+        if update_critic:
             for _ in range(utd_ratio):
                 data_rng, rng = jax.random.split(rng)
                 new_agent, critic_info = new_agent.update_critic(
                     batch, timer=timer, seed=data_rng, update_sarsa=update_sarsa, update_calql=update_calql,
-                    calql_lower_bound=calql_lower_bound, cql_alpha=cql_alpha, cql_temp=cql_temp)
+                    calql_lower_bound=calql_lower_bound, cql_alpha=cql_alpha, cql_temp=cql_temp,
+                    calql_random_actions=calql_random_actions)
 
         if update_edit_actor:
-            edit_actor_rng, rng = jax.random.split(rng)
-            new_agent, actor_info = new_agent.update_edit_actor(
-                batch, seed=edit_actor_rng, bc_warmup=edit_actor_warmup, grpo_beta=grpo_beta,
-                grpo_weight_threshold=grpo_weight_threshold)
+            for _ in range(edit_actor_utd_ratio):
+                edit_actor_rng, rng = jax.random.split(rng)
+                new_agent, actor_info = new_agent.update_edit_actor(
+                    batch, seed=edit_actor_rng, bc_warmup=edit_actor_warmup, grpo_beta=grpo_beta,
+                    grpo_weight_threshold=grpo_weight_threshold)
             entropy = actor_info["entropy"]
             actor_info = append_substr_to_dict_keys(actor_info, "edit_actor")
         
