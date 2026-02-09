@@ -178,6 +178,35 @@ class ResidualActor(nn.Module):
         out_actions = (tanh_actions * gating_signal) + (input_act * (1.0 - gating_signal))
         return out_actions
 
+class ResidualTanhEditActor(nn.Module):
+    """
+    Encapsulated a single actor network that takes in observations and actions and outputs a final action with a correction
+    """
+    action_dim: int
+    hidden_dims: Sequence[int] = (512, 512)
+    num_residual_blocks: int = 3
+    activation: Callable[[jnp.ndarray], jnp.ndarray] = nn.swish
+
+    @nn.compact
+    def __call__(
+        self, observations: jnp.ndarray, actions: jnp.ndarray, *args, **kwargs
+    ) -> jnp.ndarray:
+        out_obs = MLP(self.hidden_dims, activations=self.activation, activate_final=True, use_layer_norm=True)(observations)
+        out_obs = MLP([self.action_dim], activations=self.activation, activate_final=False, use_layer_norm=True)(out_obs)
+        # gating_signal = nn.sigmoid(out_obs)
+        # out_obs = out_obs * gating_signal
+
+        # out_act = MLPResNetBlock(self.action_dim, act=self.activation, use_layer_norm=True)(actions)
+        for idx in range(self.num_residual_blocks):
+            # out_act = out_act + out_obs
+            actions = MLPResNetBlock(self.action_dim, act=self.activation, use_layer_norm=True)(actions)
+
+            if idx < self.num_residual_blocks - 1:
+                actions = actions + out_obs
+        
+        tanh_actions = nn.tanh(actions)
+        
+        return tanh_actions
 
 class StateValue(nn.Module):
     base_cls: nn.Module

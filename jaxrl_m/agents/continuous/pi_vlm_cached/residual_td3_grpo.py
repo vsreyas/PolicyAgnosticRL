@@ -30,6 +30,7 @@ from jaxrl_m.utils.expo_utils import (
     StateActionValue,
     StateAndStateActionValue,
     ResidualActor,
+    ResidualTanhEditActor,
     Ensemble,
     subsample_ensemble,
     Agent,
@@ -71,6 +72,133 @@ def compute_q_all(critic_fn, critic_params, observations, actions):
                          observations, actions, False)
     return q_values
 
+
+@partial(jax.jit, static_argnames=('critic_fn', 'num_steps'))
+def _gradient_ascent_actions(critic_fn, critic_params, vlm_output, start_action, eta_ascent, num_steps: int, zero_grad_gripper):
+    """Perform gradient ascent on actions to maximize Q-value.
+
+    Args:
+        critic_fn: Critic network apply function
+        critic_params: Critic network parameters
+        vlm_output: VLM output features (1, vlm_dim)
+        start_action: Initial action (action_dim,)
+        eta_ascent: Step size for gradient ascent
+        num_steps: Number of gradient ascent steps
+        zero_grad_gripper: Scalar (0/1). If 1, zero out gradient for gripper dimension.
+
+    Returns:
+        Final action after gradient ascent (action_dim,)
+    """
+    def q_scalar(action):
+        # Compute Q-value for a single action
+        q = compute_q(critic_fn, critic_params, vlm_output, action.reshape(1, -1))
+        # return q[0]
+        return q.mean(axis=0)
+
+    grad_fn = jax.grad(q_scalar)
+
+    def ascent_step(i, action):
+        g = grad_fn(action)
+        g = g.reshape(10, 7)
+        g = g.at[:, -1].set(g[:, -1] * (1.0 - zero_grad_gripper))
+        g = g.reshape(-1)
+        action = action + eta_ascent * g
+        action = jnp.clip(action, -1.0, 1.0)
+        return action
+
+    final_action = jax.lax.fori_loop(0, num_steps, ascent_step, start_action)
+    return final_action
+
+
+@partial(jax.jit, static_argnames=('critic_fn', 'num_steps', 'beta', 'epsilon'))
+def _rmsprop_ascent_actions(critic_fn, critic_params, vlm_output, start_action, eta_ascent, num_steps: int, beta: float = 0.99, epsilon: float = 1e-8):
+    """Perform RMSProp-based gradient ascent on actions to maximize Q-value.
+
+    Args:
+        critic_fn: Critic network apply function
+        critic_params: Critic network parameters
+        vlm_output: VLM output features (1, vlm_dim)
+        start_action: Initial action (action_dim,)
+        eta_ascent: Step size for gradient ascent
+        num_steps: Number of gradient ascent steps
+        beta: Decay rate for moving average of squared gradients
+        epsilon: Small constant for numerical stability
+
+    Returns:
+        Final action after RMSProp ascent (action_dim,)
+    """
+    def q_scalar(action):
+        # Compute Q-value for a single action
+        q = compute_q(critic_fn, critic_params, vlm_output, action.reshape(1, -1))
+        return q.mean(axis=0)
+        # return q[0]
+
+    grad_fn = jax.grad(q_scalar)
+
+    def ascent_step(carry, i):
+        action, v = carry
+        g = grad_fn(action)
+        v = beta * v + (1.0 - beta) * jnp.square(g)
+        action = action + eta_ascent * g / (jnp.sqrt(v) + epsilon)
+        action = jnp.clip(action, -1.0, 1.0)
+        return (action, v), None
+
+    # Initialize v (running average of squared gradients) to zeros
+    v_init = jnp.zeros_like(start_action)
+    (final_action, _), _ = jax.lax.scan(ascent_step, (start_action, v_init), jnp.arange(num_steps))
+    return final_action
+
+
+@partial(jax.jit, static_argnames=('critic_fn', 'num_steps', 'beta1', 'beta2', 'epsilon'))
+def _adam_ascent_actions(critic_fn, critic_params, vlm_output, start_action, eta_ascent, num_steps: int, beta1: float = 0.9, beta2: float = 0.999, epsilon: float = 1e-8):
+    """Perform Adam-based gradient ascent on actions to maximize Q-value.
+
+    Args:
+        critic_fn: Critic network apply function
+        critic_params: Critic network parameters
+        vlm_output: VLM output features (1, vlm_dim)
+        start_action: Initial action (action_dim,)
+        eta_ascent: Step size for gradient ascent
+        num_steps: Number of gradient ascent steps
+        beta1: Decay rate for first moment estimate
+        beta2: Decay rate for second moment estimate
+        epsilon: Small constant for numerical stability
+
+    Returns:
+        Final action after Adam ascent (action_dim,)
+    """
+    def q_scalar(action):
+        # Compute Q-value for a single action
+        q = compute_q(critic_fn, critic_params, vlm_output, action.reshape(1, -1))
+        return q.mean(axis=0)
+
+    grad_fn = jax.grad(q_scalar)
+
+    def ascent_step(carry, i):
+        action, m, v = carry
+        t = i + 1  # Step count starts from 1
+        g = grad_fn(action)
+
+        # Update biased first and second moment estimates
+        m = beta1 * m + (1.0 - beta1) * g
+        v = beta2 * v + (1.0 - beta2) * jnp.square(g)
+
+        # Compute bias-corrected moment estimates
+        m_hat = m / (1.0 - jnp.power(beta1, t))
+        v_hat = v / (1.0 - jnp.power(beta2, t))
+
+        # Update action
+        action = action + eta_ascent * m_hat / (jnp.sqrt(v_hat) + epsilon)
+        action = jnp.clip(action, -1.0, 1.0)
+
+        return (action, m, v), None
+
+    # Initialize m and v (first and second moment estimates) to zeros
+    m_init = jnp.zeros_like(start_action)
+    v_init = jnp.zeros_like(start_action)
+    (final_action, _, _), _ = jax.lax.scan(ascent_step, (start_action, m_init, v_init), jnp.arange(num_steps))
+    return final_action
+
 # ----------------------------------------------------------------------
 # Jitted inner steps for edit-actor and critic updates
 # ----------------------------------------------------------------------
@@ -84,11 +212,9 @@ def compute_q_all(critic_fn, critic_params, observations, actions):
         "edit_actor_apply_fn",
         "critic_apply_fn",
         "temp_apply_fn",
-        "grpo_beta",
-        "grpo_weight_threshold",
     ),
 )
-def _edit_actor_loss_and_grad_grpo(
+def _edit_actor_loss_and_grad_residual_q(
     edit_actor,
     actor_params,
     critic_params,
@@ -106,99 +232,37 @@ def _edit_actor_loss_and_grad_grpo(
     mc_target,
     success,
     bc_warmup,
-    action_samples,  # (batch_size, num_samples, action_dim)
-    grpo_beta: float,  # Temperature for exp(advantage)
-    grpo_weight_threshold: float,  # Threshold for zeroing out small weights
 ):
-    """GRPO-style actor loss: advantage-weighted regression over action samples."""
-    batch_size = vlm_output.shape[0]
-    num_samples = action_samples.shape[1]
-    action_dim = action_samples.shape[2]
+    """TD3-style actor loss with residual actions: maximizes Q(base + scale * edit)."""
 
     def loss_fn(actor_params):
-        # Split key2 for different critic calls to avoid RNG reuse
-        key_q, key_qbase, key_samples = jax.random.split(key2, 3)
-
-        # Get edit actor's predicted actions
-        actions = edit_actor_apply_fn(
+        edit_actions = edit_actor_apply_fn(
             {"params": actor_params}, vlm_output, batch_actions)
-        edit_actions = actions.copy()
+        actions = batch_actions + edit_action_scale * edit_actions
         actions = jnp.clip(actions, -1.0, 1.0)
 
-        # Compute Q-values for the edit actor's actions
         qs = critic_apply_fn(
             {"params": critic_params},
             vlm_output,
             actions,
             False,
-            rngs={"dropout": key_q},
+            rngs={"dropout": key2},
         )
         q = qs.mean(axis=0)
 
-        # Compute Q-values for base actions
         qs_base = critic_apply_fn(
             {"params": critic_params},
             vlm_output,
             batch_actions,
             False,
-            rngs={"dropout": key_qbase},
+            rngs={"dropout": key2},
         )
         q_base = qs_base.mean(axis=0)
 
-        # GRPO: Compute Q-values for all action_samples
-        # action_samples shape: (batch_size, num_samples, action_dim)
-        sample_keys = jax.random.split(key_samples, num_samples)
-        def compute_q_for_sample(sample_actions, sample_key):
-            # sample_actions: (batch_size, action_dim)
-            return critic_apply_fn(
-                {"params": critic_params},
-                vlm_output,
-                sample_actions,
-                False,
-                rngs={"dropout": sample_key},
-            ).mean(axis=0)  # (batch_size,)
-
-        # Transpose to (num_samples, batch_size, action_dim) for vmapping
-        action_samples_transposed = jnp.transpose(action_samples, (1, 0, 2))
-        # Vmap over num_samples with unique RNG keys
-        qs_samples = jax.vmap(compute_q_for_sample)(action_samples_transposed, sample_keys)
-        # qs_samples shape: (num_samples, batch_size)
-        # Transpose to (batch_size, num_samples)
-        qs_samples = jnp.transpose(qs_samples, (1, 0))
-
-        # Compute advantages: Q - mean(Q) for each state
-        q_mean = qs_samples.mean(axis=1, keepdims=True)  # (batch_size, 1)
-        advantages = qs_samples - q_mean  # (batch_size, num_samples)
-
-        # Compute exp(advantages / beta) weights
-        # weights = jnp.exp(advantages / grpo_beta)  # (batch_size, num_samples)
-        weights = advantages
-        # weights = jnp.clip(weights, -1000.0, 1000.0)
-        # Zero out weights below threshold
-        weights = jnp.where(weights >= grpo_weight_threshold, weights, 0.0)
-        weights = jnp.exp(weights / grpo_beta) - 1.0
-        # Normalize weights (optional, helps with stability)
-        # weights = weights / (weights.sum(axis=1, keepdims=True) + 1e-8)
-
-        # GRPO loss: weighted sum of squared differences to action samples
-        # actions shape: (batch_size, action_dim)
-        # action_samples shape: (batch_size, num_samples, action_dim)
-        actions_expanded = jnp.expand_dims(actions, axis=1)  # (batch_size, 1, action_dim)
-        sq_diff = jnp.square(actions_expanded - action_samples)  # (batch_size, num_samples, action_dim)
-        sq_diff_sum = sq_diff.sum(axis=-1)  # (batch_size, num_samples)
-        
-        # Weighted regression loss
-        grpo_loss = (weights * sq_diff_sum).sum(axis=1).mean()  # scalar
-
-        # BC loss on successful trajectories (unchanged from original)
-        # Explicitly convert success to float to avoid type issues
-        success_float = jnp.float32(success)
-        bc_loss = (jnp.square(batch_actions - actions) * success_float).mean()
-        # bc_loss = (jnp.square(batch_actions - actions)).mean()
-        # jax.debug.breakpoint()
-        
-        # Combine losses
-        edit_actor_loss = bc_loss * 1000.0 + grpo_loss * (1.0 - bc_warmup)
+        q_loss = -q.mean()
+        zero_reg = 10.0 * jnp.square(edit_actions).mean()
+        edit_actor_loss = q_loss # + zero_reg
+        # edit_actor_loss = zero_reg
 
         metrics = {
             "edit_q_mean": q.mean(),
@@ -208,35 +272,19 @@ def _edit_actor_loss_and_grad_grpo(
             "base_q_min": q_base.min(),
             "base_q_max": q_base.max(),
             "edit_actor_loss": edit_actor_loss,
-            "bc_loss": bc_loss,
-            "grpo_loss": grpo_loss,
+            "q_loss": q_loss,
             "entropy": 0.0,
-            "grpo_beta": jnp.float32(grpo_beta),
             "bc_warmup": jnp.float32(bc_warmup),
-            "grpo_advantage_mean": advantages.mean(),
-            "grpo_advantage_std": advantages.std(),
-            "grpo_advantage_max": advantages.max(),
-            "grpo_advantage_min": advantages.min(),
-            "grpo_weights_mean": weights.mean(),
-            "grpo_weights_max": weights.max(),
-            "grpo_weights_min": weights.min(),
-            "grpo_weights_nonzero_frac": (weights > 0).mean(),
-            "grpo_q_samples_mean": qs_samples.mean(),
-            "grpo_q_samples_std": qs_samples.std(),
-            "success_mean": success_float.mean(),
-            "success_sum": success_float.sum(),
-            "success_max": success_float.max(),
-            "success_min": success_float.min(),
-            "has_nan_success": jnp.any(jnp.isnan(success_float)).astype(jnp.float32),
-            "has_nan_loss": jnp.any(jnp.isnan(edit_actor_loss)).astype(jnp.float32),
+            "edit_action_scale": edit_action_scale,
+            "zero_reg_loss": zero_reg,
         }
 
-        edit_actions = edit_actions.reshape(-1, 10, 7)
+        edit_actions_reshaped = edit_actions.reshape(-1, 10, 7)
         for i in range(7):
-            metrics[f"edit_action_{i}_mean"] = edit_actions[:, :, i].mean()
-            metrics[f"edit_action_{i}_std"] = edit_actions[:, :, i].std()
-            metrics[f"edit_action_{i}_max"] = edit_actions[:, :, i].max()
-            metrics[f"edit_action_{i}_min"] = edit_actions[:, :, i].min()
+            metrics[f"edit_action_{i}_mean"] = edit_actions_reshaped[:, :, i].mean()
+            metrics[f"edit_action_{i}_std"] = edit_actions_reshaped[:, :, i].std()
+            metrics[f"edit_action_{i}_max"] = edit_actions_reshaped[:, :, i].max()
+            metrics[f"edit_action_{i}_min"] = edit_actions_reshaped[:, :, i].min()
 
         batch_actions_reshaped = batch_actions.reshape(-1, 10, 7)
         for i in range(7):
@@ -253,6 +301,84 @@ def _edit_actor_loss_and_grad_grpo(
     edit_actor = edit_actor.apply_gradients(grads=grads)
 
     return edit_actor, grads, metrics
+
+
+# @partial(
+#     jax.jit,
+#     static_argnames=(
+#         "entropy_scale",
+#         "edit_action_scale",
+#         "edit_actor_apply_fn",
+#         "critic_apply_fn",
+#         "temp_apply_fn",
+#         "grpo_beta",
+#         "grpo_weight_threshold",
+#     ),
+# )
+# def _edit_actor_loss_and_grad_grpo(
+#     edit_actor,
+#     actor_params,
+#     critic_params,
+#     temp_params,
+#     vlm_output,
+#     batch_actions,
+#     dropout_key,
+#     key,
+#     key2,
+#     entropy_scale: float,
+#     edit_action_scale: float,
+#     edit_actor_apply_fn,
+#     critic_apply_fn,
+#     temp_apply_fn,
+#     mc_target,
+#     success,
+#     bc_warmup,
+#     action_samples,  # (batch_size, num_samples, action_dim)
+#     grpo_beta: float,  # Temperature for exp(advantage)
+#     grpo_weight_threshold: float,  # Threshold for zeroing out small weights
+# ):
+#     """GRPO-style actor loss: advantage-weighted regression over action samples."""
+#     batch_size = vlm_output.shape[0]
+#     num_samples = action_samples.shape[1]
+#     action_dim = action_samples.shape[2]
+#
+#     def loss_fn(actor_params):
+#         key_q, key_qbase, key_samples = jax.random.split(key2, 3)
+#         actions = edit_actor_apply_fn(
+#             {"params": actor_params}, vlm_output, batch_actions)
+#         edit_actions = actions.copy()
+#         actions = jnp.clip(actions, -1.0, 1.0)
+#         qs = critic_apply_fn(
+#             {"params": critic_params}, vlm_output, actions, False, rngs={"dropout": key_q})
+#         q = qs.mean(axis=0)
+#         qs_base = critic_apply_fn(
+#             {"params": critic_params}, vlm_output, batch_actions, False, rngs={"dropout": key_qbase})
+#         q_base = qs_base.mean(axis=0)
+#         sample_keys = jax.random.split(key_samples, num_samples)
+#         def compute_q_for_sample(sample_actions, sample_key):
+#             return critic_apply_fn(
+#                 {"params": critic_params}, vlm_output, sample_actions, False,
+#                 rngs={"dropout": sample_key}).mean(axis=0)
+#         action_samples_transposed = jnp.transpose(action_samples, (1, 0, 2))
+#         qs_samples = jax.vmap(compute_q_for_sample)(action_samples_transposed, sample_keys)
+#         qs_samples = jnp.transpose(qs_samples, (1, 0))
+#         q_mean = qs_samples.mean(axis=1, keepdims=True)
+#         advantages = qs_samples - q_mean
+#         weights = advantages
+#         weights = jnp.where(weights >= grpo_weight_threshold, weights, 0.0)
+#         weights = jnp.exp(weights / grpo_beta) - 1.0
+#         actions_expanded = jnp.expand_dims(actions, axis=1)
+#         sq_diff = jnp.square(actions_expanded - action_samples)
+#         sq_diff_sum = sq_diff.sum(axis=-1)
+#         grpo_loss = (weights * sq_diff_sum).sum(axis=1).mean()
+#         success_float = jnp.float32(success)
+#         bc_loss = (jnp.square(batch_actions - actions) * success_float).mean()
+#         edit_actor_loss = bc_loss * 1000.0 + grpo_loss * (1.0 - bc_warmup)
+#         metrics = { ... }
+#         return edit_actor_loss, metrics
+#     (loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(actor_params)
+#     edit_actor = edit_actor.apply_gradients(grads=grads)
+#     return edit_actor, grads, metrics
 
 
 @partial(jax.jit, static_argnames=("critic_apply_fn", "edit_actor_apply_fn", "target_critic_apply_fn", "tau"))
@@ -356,6 +482,8 @@ def _sarsa_loss_and_grad(
     discount,
     critic,
     tau,
+    success,
+    success_weight,
 ):
     """Single jitted step for critic: forward + loss + grad."""
     next_actions = jnp.clip(batch_next_actions, -1.0, 1.0)
@@ -374,7 +502,9 @@ def _sarsa_loss_and_grad(
             rngs={"dropout": key},
         )
 
-        critic_loss_td = optax.losses.huber_loss(qs, target_q).mean()
+        per_sample_loss = optax.losses.huber_loss(qs, target_q)  # (num_heads, batch_size)
+        sample_weights = success * success_weight + (1.0 - success) * (1.0 - success_weight)
+        critic_loss_td = (per_sample_loss * sample_weights[None, :]).mean()
         critic_loss_mc = ((qs - mc_target) ** 2).mean()
         critic_loss = critic_loss_td
 
@@ -382,6 +512,7 @@ def _sarsa_loss_and_grad(
             "sarsa_critic_loss": critic_loss,
             "sarsa_critic_loss_td": critic_loss_td,
             "sarsa_critic_loss_mc": critic_loss_mc,
+            "sarsa_success_weight": success_weight,
             "q_mean": qs.mean(),
             "q_std": qs.std(),
             "q_max": qs.max(),
@@ -637,6 +768,7 @@ class PiResidualTD3GRPO(Agent):
     grpo_beta: float  # GRPO temperature for advantage weighting
     cql_alpha: float  # CQL regularization weight
     cql_temp: float  # CQL temperature for logsumexp
+    residual_bc_actor: bool = struct.field(pytree_node=False)
 
     @classmethod
     def create(
@@ -650,7 +782,7 @@ class PiResidualTD3GRPO(Agent):
         pi0_hidden_dims: int = 4096,
         rng: PRNGKey | None = None,
         actor_lr: float = 3e-4,
-        critic_lr: float = 1e-3,
+        critic_lr: float = 3e-4,
         temp_lr: float = 3e-4,
         hidden_dims: Sequence[int] = (512, 512, 512, 512),
         discount: float = 0.99,
@@ -676,7 +808,7 @@ class PiResidualTD3GRPO(Agent):
         batch_split: int = 1,
         M: int = 0,
         n_edit_samples: int = 4,
-        edit_action_scale: float = 3.0,
+        edit_action_scale: float = 0.3,
         actor_layer_norm: bool = True,
         clip_sampler: bool = True,
         decay_steps: Optional[int] = int(3e6),
@@ -691,6 +823,7 @@ class PiResidualTD3GRPO(Agent):
         grpo_beta: float = 1.0,  # GRPO temperature
         cql_alpha: float = 5.0,  # CQL regularization weight
         cql_temp: float = 1.0,  # CQL temperature for logsumexp
+        residual_bc_actor: bool = False,
     ):
         assert N >= n_edit_samples, f"N must be greater than or equal to n_edit_samples, got N={N} and n_edit_samples={n_edit_samples}"
 
@@ -730,7 +863,7 @@ class PiResidualTD3GRPO(Agent):
         dummy_observations = jnp.ones(
             (batch_size, pi0_hidden_dims + state_dim))
         dummy_actions = jnp.ones((batch_size, action_dim))
-        edit_actor_def = ResidualActor(
+        edit_actor_def = ResidualTanhEditActor(
             action_dim, hidden_dims=hidden_dims, num_residual_blocks=3)
         edit_observations = jnp.concatenate(
             [dummy_observations, jnp.ones((batch_size, action_dim))], axis=1)
@@ -848,6 +981,7 @@ class PiResidualTD3GRPO(Agent):
             grpo_beta=grpo_beta,
             cql_alpha=cql_alpha,
             cql_temp=cql_temp,
+            residual_bc_actor=residual_bc_actor,
         )
 
     def sample_actions(self, _observations: Data, is_target=False, *args, **kwargs):
@@ -895,7 +1029,7 @@ class PiResidualTD3GRPO(Agent):
         actions = actions.reshape(1, self.action_dim)
         r_observations = vlm_output
         
-        actions = _sample_deterministic_actions(
+        edit_actions = _sample_deterministic_actions(
             self.edit_actor.apply_fn, self.edit_actor.params, r_observations, actions)
 
         if not use_deterministic_actions:
@@ -903,10 +1037,13 @@ class PiResidualTD3GRPO(Agent):
             exploration_noise = jax.random.normal(
                 rng_exploration, actions.shape) * self.exploration_epsilon
             exploration_noise = jnp.clip(exploration_noise, -1.0, 1.0)
-            actions = actions + exploration_noise
+            edit_actions = edit_actions + exploration_noise
 
-        actions = jnp.clip(actions, -1.0, 1.0)
-        final_action = actions.reshape(
+        # edit_actions = jnp.clip(edit_actions, -1.0, 1.0)
+        
+        final_action = actions + self.edit_action_scale * edit_actions
+        final_action = jnp.clip(final_action, -1.0, 1.0)
+        final_action = final_action.reshape(
             self.action_horizon, self.action_dim // self.action_horizon)
 
         final_action = self.actor.unnorm_actions(final_action)
@@ -997,14 +1134,312 @@ class PiResidualTD3GRPO(Agent):
             vlm_output = vlm_output.reshape(1, -1)
         if actions.ndim == 1:
             actions = actions.reshape(1, -1)
-            
+
         q_values = compute_q_all(
-            self.critic.apply_fn, 
-            self.critic.params, 
-            vlm_output, 
+            self.critic.apply_fn,
+            self.critic.params,
+            vlm_output,
             actions
         )
         return q_values[0]
+
+    def sample_base_actions_gradq(self, _observations: Data, eta_ascent: float = 0.01, num_ascent_steps: int = 50,
+                                    optimizer_type: str = "gradient_ascent",
+                                    rmsprop_beta: float = 0.9, rmsprop_epsilon: float = 1e-8,
+                                    adam_beta1: float = 0.9, adam_beta2: float = 0.999, adam_epsilon: float = 1e-8,
+                                    zero_grad_gripper: bool = False,
+                                    *args, **kwargs):
+        """Sample base actions and ascend them using gradient of Q-function.
+
+        Args:
+            _observations: Observations from environment
+            eta_ascent: Step size for gradient ascent
+            num_ascent_steps: Number of gradient ascent steps
+            optimizer_type: Type of optimizer to use ("gradient_ascent", "rmsprop", "adam")
+            rmsprop_beta: Decay rate for RMSProp moving average
+            rmsprop_epsilon: Small constant for RMSProp numerical stability
+            adam_beta1: First moment decay rate for Adam
+            adam_beta2: Second moment decay rate for Adam
+            adam_epsilon: Small constant for Adam numerical stability
+            zero_grad_gripper: If True, zero out gradient for gripper (last of 7) dimension
+
+        Returns:
+            Dictionary with ascended actions and metadata
+        """
+        # First sample base actions
+        out_dict = self.sample_base_actions(_observations, *args, **kwargs)
+
+        # Get the base action and vlm_output
+        base_action = out_dict["actions"]  # (action_horizon, action_dim)
+        vlm_output = out_dict["vlm_output"]  # (vlm_dim,)
+
+        # Normalize and flatten the action for gradient ascent
+        base_action_norm = self.actor.norm_actions(base_action.reshape(1, self.action_horizon, -1))
+        start_action = jnp.array(base_action_norm.reshape(-1))  # Flatten to (action_dim,)
+        vlm_output_expanded = jnp.array(vlm_output.reshape(1, -1))
+
+        # Perform JIT-compiled gradient ascent with selected optimizer
+        zero_grad_gripper_scalar = jnp.float32(zero_grad_gripper)
+        if optimizer_type == "gradient_ascent":
+            final_action_flat = _gradient_ascent_actions(
+                self.critic.apply_fn,
+                self.critic.params,
+                vlm_output_expanded,
+                start_action,
+                eta_ascent,
+                num_ascent_steps,
+                zero_grad_gripper_scalar
+            )
+        elif optimizer_type == "rmsprop":
+            final_action_flat = _rmsprop_ascent_actions(
+                self.critic.apply_fn,
+                self.critic.params,
+                vlm_output_expanded,
+                start_action,
+                eta_ascent,
+                num_ascent_steps,
+                rmsprop_beta,
+                rmsprop_epsilon
+            )
+        elif optimizer_type == "adam":
+            final_action_flat = _adam_ascent_actions(
+                self.critic.apply_fn,
+                self.critic.params,
+                vlm_output_expanded,
+                start_action,
+                eta_ascent,
+                num_ascent_steps,
+                adam_beta1,
+                adam_beta2,
+                adam_epsilon
+            )
+        else:
+            raise ValueError(f"Unknown optimizer_type: {optimizer_type}. Must be one of: gradient_ascent, rmsprop, adam")
+
+        # Debug: Print norm between final and start actions
+        # action_diff_norm = jnp.linalg.norm(final_action_flat - start_action)
+        # print(f"[DEBUG] Action diff norm (final - start): {action_diff_norm}")
+
+        # Reshape back to (action_horizon, action_dim)
+        final_action = final_action_flat.reshape(self.action_horizon, self.action_dim // self.action_horizon)
+
+        # Unnormalize actions before returning
+        final_action = self.actor.unnorm_actions(final_action)
+
+        out_dict["actions"] = final_action
+        return out_dict
+
+    def sample_bon_actions(self, _observations: Data, bon_actions: int = 4, *args, **kwargs):
+        """Sample multiple base actions and select the best one based on Q-values (no gradient ascent).
+
+        This implements a Best-of-N (BON) approach where we:
+        1. Sample 'bon_actions' different actions from the base policy (batched)
+        2. Subsample num_min_qs Q networks from num_qs
+        3. Compute Q values using min(Q1(s,a), Q2(s,a)) for all sampled actions
+        4. Select the action with the highest Q value
+
+        Args:
+            _observations: Observations from environment
+            bon_actions: Number of actions to sample from base policy
+
+        Returns:
+            Dictionary with best action and metadata
+        """
+        seed = kwargs.get("seed", None)
+        rng = seed
+
+        # Repeat observations bon_actions times for batched sampling
+        batched_obs = add_batch_dim(_observations)
+        observations_repeated = repeat_observations_openpi(batched_obs, bon_actions, axis=0)
+
+        # Sample bon_actions different actions from base policy in a single batched call
+        sample_rng, rng = jax.random.split(rng)
+        sampled_actions, vlm_output, processed_obs = self.actor.sample_actions_with_vlm_output(
+            sample_rng, observations_repeated
+        )
+        # sampled_actions shape: (bon_actions, action_horizon, action_dim)
+
+        # Normalize actions
+        sampled_actions_norm = self.actor.norm_actions(sampled_actions)
+        # Flatten actions: (bon_actions, action_dim_total)
+        sampled_actions_flat = sampled_actions_norm.reshape(bon_actions, -1)
+
+        # Get VLM output (use the first one since they're all the same observation)
+        vlm_output_single = jnp.mean(vlm_output[0][0:1, :512, :], axis=1)  # Take only first, shape (1, vlm_dim)
+        state = processed_obs['state'][0, :8][None, :8]
+        vlm_output_final = jnp.concatenate([vlm_output_single, state], axis=1)  # (1, vlm_dim + state_dim)
+
+        # Subsample num_min_qs Q networks from num_qs
+        subsample_rng, rng = jax.random.split(rng)
+        subsampled_critic_params = subsample_ensemble(
+            subsample_rng, self.critic.params, self.num_min_qs, self.num_qs
+        )
+
+        # Compute Q-values for all sampled actions in a batched manner
+        # Expand vlm_output to match batch size
+        vlm_output_repeated = jnp.repeat(vlm_output_final, bon_actions, axis=0)  # (bon_actions, vlm_dim)
+
+        # Compute Q values using subsampled critics
+        # Use target_critic.apply_fn because it's designed to work with num_min_qs critics
+        qs = compute_q_all(
+            self.target_critic.apply_fn,
+            subsampled_critic_params,
+            vlm_output_repeated,
+            sampled_actions_flat
+        )  # (num_min_qs, bon_actions)
+
+        # Take minimum across the Q networks for each action
+        q_min_values = jnp.min(qs, axis=0)  # (bon_actions,)
+
+        # Select the action with the highest Q value
+        best_action_idx = jnp.argmax(q_min_values)
+        best_action_flat = sampled_actions_flat[best_action_idx]
+        best_q_value = q_min_values[best_action_idx]
+
+        # Reshape back to (action_horizon, action_dim)
+        final_action = best_action_flat.reshape(self.action_horizon, self.action_dim // self.action_horizon)
+
+        # Unnormalize actions before returning
+        final_action = self.actor.unnorm_actions(final_action)
+
+        out_dict = {
+            "actions": final_action,
+            "vlm_output": vlm_output_final[0],
+            "diffusion_actions": sampled_actions[0],  # Return first sampled action as diffusion_actions
+            "action_samples": sampled_actions,  # Return all sampled actions
+            "bon_q_values": q_min_values,
+            "bon_best_q_value": best_q_value,
+            "bon_best_idx": best_action_idx,
+        }
+
+        return out_dict
+
+    def sample_bon_actions_gradq(self, _observations: Data, bon_actions: int = 4,
+                                  eta_ascent: float = 0.01, num_ascent_steps: int = 50,
+                                  optimizer_type: str = "gradient_ascent",
+                                  rmsprop_beta: float = 0.9, rmsprop_epsilon: float = 1e-8,
+                                  adam_beta1: float = 0.9, adam_beta2: float = 0.999, adam_epsilon: float = 1e-8,
+                                  *args, **kwargs):
+        """Sample multiple base actions, ascend each, and select the best one based on Q-values.
+
+        This implements a Best-of-N (BON) approach where we:
+        1. Sample 'bon_actions' different actions from the base policy (batched)
+        2. Perform gradient ascent on each action separately (vmapped)
+        3. Subsample num_min_qs Q networks from num_qs
+        4. Compute Q values using min(Q1(s,a), Q2(s,a)) for all ascended actions
+        5. Select the action with the highest Q value
+
+        Args:
+            _observations: Observations from environment
+            bon_actions: Number of actions to sample from base policy
+            eta_ascent: Step size for gradient ascent
+            num_ascent_steps: Number of gradient ascent steps
+            optimizer_type: Type of optimizer to use ("gradient_ascent", "rmsprop", "adam")
+            rmsprop_beta: Decay rate for RMSProp moving average
+            rmsprop_epsilon: Small constant for RMSProp numerical stability
+            adam_beta1: First moment decay rate for Adam
+            adam_beta2: Second moment decay rate for Adam
+            adam_epsilon: Small constant for Adam numerical stability
+
+        Returns:
+            Dictionary with best ascended action and metadata
+        """
+        seed = kwargs.get("seed", None)
+        rng = seed
+
+        # Repeat observations bon_actions times for batched sampling
+        batched_obs = add_batch_dim(_observations)
+        observations_repeated = repeat_observations_openpi(batched_obs, bon_actions, axis=0)
+
+        # Sample bon_actions different actions from base policy in a single batched call
+        sample_rng, rng = jax.random.split(rng)
+        kwargs_sample = {**kwargs, "seed": sample_rng}
+        sampled_actions, vlm_output, processed_obs = self.actor.sample_actions_with_vlm_output(
+            sample_rng, observations_repeated
+        )
+        # sampled_actions shape: (bon_actions, action_horizon, action_dim)
+
+        # Normalize actions for gradient ascent
+        sampled_actions_norm = self.actor.norm_actions(sampled_actions)
+        # Flatten actions: (bon_actions, action_dim_total)
+        sampled_actions_flat = sampled_actions_norm.reshape(bon_actions, -1)
+
+        # Get VLM output (use the first one since they're all the same observation)
+        vlm_output_single = jnp.mean(vlm_output[0][0:1, :512, :], axis=1)  # Take only first, shape (1, vlm_dim)
+        state = processed_obs['state'][0, :8][None, :8]
+        vlm_output_final = jnp.concatenate([vlm_output_single, state], axis=1)  # (1, vlm_dim + state_dim)
+
+        # Select the ascent function based on optimizer_type
+        if optimizer_type == "gradient_ascent":
+            ascent_fn = _gradient_ascent_actions
+            ascent_args = (eta_ascent, num_ascent_steps)
+        elif optimizer_type == "rmsprop":
+            ascent_fn = _rmsprop_ascent_actions
+            ascent_args = (eta_ascent, num_ascent_steps, rmsprop_beta, rmsprop_epsilon)
+        elif optimizer_type == "adam":
+            ascent_fn = _adam_ascent_actions
+            ascent_args = (eta_ascent, num_ascent_steps, adam_beta1, adam_beta2, adam_epsilon)
+        else:
+            raise ValueError(f"Unknown optimizer_type: {optimizer_type}. Must be one of: gradient_ascent, rmsprop, adam")
+
+        # Vmap the ascent function over all sampled actions
+        # Create a vectorized version that processes all actions in parallel
+        def ascend_single_action(start_action):
+            return ascent_fn(
+                self.critic.apply_fn,
+                self.critic.params,
+                vlm_output_final,
+                start_action,
+                *ascent_args
+            )
+
+        ascended_actions_flat = jax.vmap(ascend_single_action)(sampled_actions_flat)
+        # ascended_actions_flat shape: (bon_actions, action_dim_total)
+
+        # Subsample num_min_qs Q networks from num_qs
+        subsample_rng, rng = jax.random.split(rng)
+        subsampled_critic_params = subsample_ensemble(
+            subsample_rng, self.critic.params, self.num_min_qs, self.num_qs
+        )
+
+        # Compute Q-values for all ascended actions in a batched manner
+        # Expand vlm_output to match batch size
+        vlm_output_repeated = jnp.repeat(vlm_output_final, bon_actions, axis=0)  # (bon_actions, vlm_dim)
+
+        # Compute Q values using subsampled critics with compute_q_all
+        # Use target_critic.apply_fn because it's designed to work with num_min_qs critics
+        qs = compute_q_all(
+            self.target_critic.apply_fn,
+            subsampled_critic_params,
+            vlm_output_repeated,
+            ascended_actions_flat
+        )  # (num_min_qs, bon_actions)
+
+        # Take minimum across the Q networks for each action
+        q_min_values = jnp.min(qs, axis=0)  # (bon_actions,)
+
+        # Select the action with the highest Q value
+        best_action_idx = jnp.argmax(q_min_values)
+        best_action_flat = ascended_actions_flat[best_action_idx]
+        best_q_value = q_min_values[best_action_idx]
+
+        # Reshape back to (action_horizon, action_dim)
+        final_action = best_action_flat.reshape(self.action_horizon, self.action_dim // self.action_horizon)
+
+        # Unnormalize actions before returning
+        final_action = self.actor.unnorm_actions(final_action)
+
+        out_dict = {
+            "actions": final_action,
+            "vlm_output": vlm_output_final[0],
+            "diffusion_actions": sampled_actions[0],  # Return first sampled action as diffusion_actions
+            "action_samples": sampled_actions,  # Return all sampled actions
+            "bon_q_values": q_min_values,
+            "bon_best_q_value": best_q_value,
+            "bon_best_idx": best_action_idx,
+        }
+
+        return out_dict
 
     def get_edit_action(self, base_actions: np.ndarray, vlm_output: np.ndarray, clip: bool = True) -> np.ndarray:
         """Compute edit actions given base actions and VLM output.
@@ -1049,8 +1484,6 @@ class PiResidualTD3GRPO(Agent):
     def update_edit_actor(self, batch: Batch, *args, **kwargs) -> Tuple[Agent, Dict[str, float]]:
         seed = kwargs.pop("seed", None)
         bc_warmup = kwargs.pop("bc_warmup", 0.0)
-        grpo_beta = kwargs.pop("grpo_beta", self.grpo_beta)
-        grpo_weight_threshold = kwargs.pop("grpo_weight_threshold", 0.0)
 
         assert seed is not None, "seed must be provided"
         rng = seed
@@ -1060,18 +1493,12 @@ class PiResidualTD3GRPO(Agent):
         vlm_output = batch['vlm_output']
         base_actions = base_actions.reshape(-1, self.action_dim)
 
-        # Get action_samples for GRPO
-        action_samples = batch['action_samples']
-        action_samples = self.actor.norm_actions(action_samples)
-        # Reshape to (batch_size, num_samples, action_dim)
-        action_samples = action_samples.reshape(action_samples.shape[0], action_samples.shape[1], -1)
-
         dropout_rng, rng = jax.random.split(rng)
         rng1, rng = jax.random.split(rng)
         rng2, rng = jax.random.split(rng)
-        
-        # Use GRPO loss
-        edit_actor, grads, actor_info = _edit_actor_loss_and_grad_grpo(
+
+        # Residual Q-maximizing loss: new_action = base + scale * edit, maximize Q(new_action)
+        edit_actor, grads, actor_info = _edit_actor_loss_and_grad_residual_q(
             self.edit_actor,
             self.edit_actor.params,
             self.critic.params,
@@ -1089,9 +1516,6 @@ class PiResidualTD3GRPO(Agent):
             batch["mc_returns"],
             batch["success"][:, None],
             float(bc_warmup),
-            action_samples,
-            grpo_beta,
-            grpo_weight_threshold,
         )
 
         actor_info["edit_actor_grad_norm"] = optax.global_norm(grads)
@@ -1109,6 +1533,7 @@ class PiResidualTD3GRPO(Agent):
         cql_alpha = kwargs.pop("cql_alpha", self.cql_alpha)
         cql_temp = kwargs.pop("cql_temp", self.cql_temp)
         calql_random_actions = kwargs.pop("calql_random_actions", 0)
+        success_weight = kwargs.pop("success_weight", 0.5)
         assert seed is not None, "seed must be provided"
         rng = seed
 
@@ -1175,6 +1600,8 @@ class PiResidualTD3GRPO(Agent):
                 self.discount,
                 self.critic,
                 self.tau,
+                batch["success"],
+                success_weight,
             )
 
         else:
@@ -1226,6 +1653,30 @@ class PiResidualTD3GRPO(Agent):
 
         return batch
 
+    @staticmethod
+    def _resolve_critic_update_type(critic_warmup, critic_warmup_type, online_critic_update_type):
+        """Factory method to determine critic update flags from parameters.
+
+        Returns:
+            (update_sarsa, update_calql) boolean tuple.
+        """
+        if critic_warmup:
+            if critic_warmup_type == "sarsa":
+                return True, False
+            elif critic_warmup_type == "calql":
+                return False, True
+            else:
+                raise ValueError(f"Unknown critic_warmup_type: {critic_warmup_type}. Must be 'sarsa' or 'calql'.")
+        elif online_critic_update_type is not None:
+            if online_critic_update_type == "sarsa":
+                return True, False
+            elif online_critic_update_type == "calql":
+                return False, True
+            else:
+                raise ValueError(f"Unknown online_critic_update_type: {online_critic_update_type}. Must be 'sarsa' or 'calql'.")
+        else:
+            return False, False
+
     def update(
                 self,
                 _observations: Data,
@@ -1242,6 +1693,8 @@ class PiResidualTD3GRPO(Agent):
                 grpo_beta: float = None,
                 grpo_weight_threshold: float = 0.0,
                 edit_actor_utd_ratio: int = 1,
+                online_critic_update_type: Optional[str] = None,
+                success_weight: float = 0.5,
                 *args, **kwargs
             ):
         timer = kwargs.pop("timer", None)
@@ -1276,9 +1729,9 @@ class PiResidualTD3GRPO(Agent):
         actor_update_info = {}
         actor_info = {}
 
-        # Determine warmup type
-        update_sarsa = critic_warmup and critic_warmup_type == "sarsa"
-        update_calql = critic_warmup and critic_warmup_type == "calql"
+        # Determine critic update type via factory method
+        update_sarsa, update_calql = self._resolve_critic_update_type(
+            critic_warmup, critic_warmup_type, online_critic_update_type)
 
         # Use instance defaults if not provided
         if grpo_beta is None:
@@ -1294,17 +1747,16 @@ class PiResidualTD3GRPO(Agent):
                 new_agent, critic_info = new_agent.update_critic(
                     batch, timer=timer, seed=data_rng, update_sarsa=update_sarsa, update_calql=update_calql,
                     calql_lower_bound=calql_lower_bound, cql_alpha=cql_alpha, cql_temp=cql_temp,
-                    calql_random_actions=calql_random_actions)
+                    calql_random_actions=calql_random_actions, success_weight=success_weight)
 
         if update_edit_actor:
             for _ in range(edit_actor_utd_ratio):
                 edit_actor_rng, rng = jax.random.split(rng)
                 new_agent, actor_info = new_agent.update_edit_actor(
-                    batch, seed=edit_actor_rng, bc_warmup=edit_actor_warmup, grpo_beta=grpo_beta,
-                    grpo_weight_threshold=grpo_weight_threshold)
+                    batch, seed=edit_actor_rng, bc_warmup=edit_actor_warmup)
             entropy = actor_info["entropy"]
             actor_info = append_substr_to_dict_keys(actor_info, "edit_actor")
-        
+
         timer.tock("total_update_time")
         print(timer.get_total_times(reset=False))
 

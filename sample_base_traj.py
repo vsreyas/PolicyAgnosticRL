@@ -189,6 +189,71 @@ flags.DEFINE_string(
     "pi05_libero_custom_low_mem",
     "Name of the PI config to use.",
 )
+flags.DEFINE_bool(
+    "do_ascent",
+    False,
+    "Use gradient ascent on base actions via sample_base_actions_gradq.",
+)
+flags.DEFINE_float(
+    "eta_ascent",
+    0.01,
+    "Step size for gradient ascent.",
+)
+flags.DEFINE_integer(
+    "num_ascent_steps",
+    50,
+    "Number of gradient ascent steps.",
+)
+flags.DEFINE_string(
+    "action_optimizer",
+    "gradient_ascent",
+    "Type of optimizer to use for action optimization: 'gradient_ascent', 'rmsprop', or 'adam'.",
+)
+flags.DEFINE_float(
+    "rmsprop_beta",
+    0.9,
+    "Decay rate for RMSProp moving average of squared gradients.",
+)
+flags.DEFINE_float(
+    "rmsprop_epsilon",
+    1e-8,
+    "Small constant for numerical stability in RMSProp.",
+)
+flags.DEFINE_float(
+    "adam_beta1",
+    0.9,
+    "First moment decay rate for Adam optimizer.",
+)
+flags.DEFINE_float(
+    "adam_beta2",
+    0.999,
+    "Second moment decay rate for Adam optimizer.",
+)
+flags.DEFINE_float(
+    "adam_epsilon",
+    1e-8,
+    "Small constant for numerical stability in Adam optimizer.",
+)
+flags.DEFINE_bool(
+    "use_bon",
+    False,
+    "Use Best-of-N (BON) action sampling with gradient ascent.",
+)
+flags.DEFINE_bool(
+    "use_bon_no_gradq",
+    False,
+    "Use Best-of-N (BON) action sampling without gradient ascent (rank sampled actions directly).",
+)
+flags.DEFINE_integer(
+    "bon_actions",
+    4,
+    "Number of actions to sample for Best-of-N selection.",
+)
+flags.DEFINE_bool(
+    "zero_grad_gripper",
+    False,
+    "If True, zero out gradient for gripper dimension during gradient ascent on actions.",
+)
 
 # 2: 07 2 13
 BASE_POLICY_TYPE_TO_CLASS = {
@@ -226,6 +291,19 @@ def get_policy_fn(
     debug_mode: bool = False,
     num_diffusion_samples: int = 1,
     normalize_diffusion_actions: bool = False,
+    do_ascent: bool = False,
+    use_bon: bool = False,
+    use_bon_no_gradq: bool = False,
+    bon_actions: int = 4,
+    eta_ascent: float = 0.01,
+    num_ascent_steps: int = 50,
+    optimizer_type: str = "gradient_ascent",
+    rmsprop_beta: float = 0.9,
+    rmsprop_epsilon: float = 1e-8,
+    adam_beta1: float = 0.9,
+    adam_beta2: float = 0.999,
+    adam_epsilon: float = 1e-8,
+    zero_grad_gripper: bool = False,
 ) -> Callable[[Data], np.ndarray]:
     def policy_fn(observations: Data, *args, **kwargs) -> np.ndarray:
         if not isinstance(observations, dict):
@@ -235,13 +313,54 @@ def get_policy_fn(
         else:
             assert "proprio" in observations
             obs_ndim = observations["proprio"].ndim
-        
+
         # breakpoint()
-        out_dict = jax.device_get(
-            agent.sample_base_actions(
-                observations, *args, **kwargs, timer=timer, output_action_chunk=True, num_diffusion_samples=num_diffusion_samples, normalize_diffusion_actions=normalize_diffusion_actions,
+        if use_bon_no_gradq:
+            # Use Best-of-N sampling without gradient ascent (rank sampled actions directly)
+            out_dict = jax.device_get(
+                agent.sample_bon_actions(
+                    observations, *args, **kwargs, timer=timer, output_action_chunk=True,
+                    bon_actions=bon_actions,
+                )
             )
-        )
+        elif use_bon:
+            # Use Best-of-N sampling with gradient ascent
+            out_dict = jax.device_get(
+                agent.sample_bon_actions_gradq(
+                    observations, *args, **kwargs, timer=timer, output_action_chunk=True,
+                    bon_actions=bon_actions,
+                    eta_ascent=eta_ascent, num_ascent_steps=num_ascent_steps,
+                    optimizer_type=optimizer_type,
+                    rmsprop_beta=rmsprop_beta, rmsprop_epsilon=rmsprop_epsilon,
+                    adam_beta1=adam_beta1, adam_beta2=adam_beta2, adam_epsilon=adam_epsilon,
+                )
+            )
+        elif do_ascent:
+            out_dict = jax.device_get(
+                agent.sample_base_actions_gradq(
+                    observations, *args, **kwargs, timer=timer, output_action_chunk=True,
+                    num_diffusion_samples=num_diffusion_samples, normalize_diffusion_actions=normalize_diffusion_actions,
+                    eta_ascent=eta_ascent, num_ascent_steps=num_ascent_steps,
+                    optimizer_type=optimizer_type,
+                    rmsprop_beta=rmsprop_beta, rmsprop_epsilon=rmsprop_epsilon,
+                    adam_beta1=adam_beta1, adam_beta2=adam_beta2, adam_epsilon=adam_epsilon,
+                    zero_grad_gripper=zero_grad_gripper,
+                )
+            )
+
+            # # DEBUG #
+            # # TODO: Remove this after debugging #
+            # actions = out_dict["actions"].copy()
+            # diffusion_actions = out_dict["diffusion_actions"].copy()
+            # actions[:, -1] = diffusion_actions[:, -1]
+            # out_dict["actions"] = diffusion_actions
+        else:
+            out_dict = jax.device_get(
+                agent.sample_base_actions(
+                    observations, *args, **kwargs, timer=timer, output_action_chunk=True,
+                    num_diffusion_samples=num_diffusion_samples, normalize_diffusion_actions=normalize_diffusion_actions,
+                )
+            )
         # breakpoint()
 
         return out_dict
@@ -401,6 +520,19 @@ def train_agent(_):
                     debug_mode=True,
                     num_diffusion_samples=FLAGS.num_diffusion_samples,
                     normalize_diffusion_actions=FLAGS.normalize_diffusion_actions,
+                    do_ascent=FLAGS.do_ascent,
+                    use_bon=FLAGS.use_bon,
+                    use_bon_no_gradq=FLAGS.use_bon_no_gradq,
+                    bon_actions=FLAGS.bon_actions,
+                    eta_ascent=FLAGS.eta_ascent,
+                    num_ascent_steps=FLAGS.num_ascent_steps,
+                    optimizer_type=FLAGS.action_optimizer,
+                    rmsprop_beta=FLAGS.rmsprop_beta,
+                    rmsprop_epsilon=FLAGS.rmsprop_epsilon,
+                    adam_beta1=FLAGS.adam_beta1,
+                    adam_beta2=FLAGS.adam_beta2,
+                    adam_epsilon=FLAGS.adam_epsilon,
+                    zero_grad_gripper=FLAGS.zero_grad_gripper,
                 )
                 vlm_output_fn = get_vlm_output_fn(
                     agent=agent,

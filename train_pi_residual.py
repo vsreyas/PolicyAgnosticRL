@@ -250,6 +250,11 @@ flags.DEFINE_string(
     "sarsa",
     "Type of critic warmup: 'sarsa' for SARSA loss or 'calql' for Cal-QL loss with MC return lower bound."
 )
+flags.DEFINE_string(
+    "online_critic_update_type",
+    None,
+    "Critic update type during online (non-warmup) training: 'sarsa', 'calql', or None for default TD3 critic."
+)
 flags.DEFINE_float(
     "calql_lower_bound",
     -1000.0,
@@ -309,6 +314,26 @@ flags.DEFINE_integer(
     "num_balanced_trajectories",
     -1,
     "Max number of successful and failed trajectories to keep after balancing. -1 means no limit."
+)
+flags.DEFINE_bool(
+    "do_ascent",
+    False,
+    "Use gradient ascent on base actions via sample_base_actions_gradq.",
+)
+flags.DEFINE_float(
+    "eta_ascent",
+    0.01,
+    "Step size for gradient ascent.",
+)
+flags.DEFINE_integer(
+    "num_ascent_steps",
+    50,
+    "Number of gradient ascent steps.",
+)
+flags.DEFINE_bool(
+    "critic_balance_classes",
+    False,
+    "Balance successful and unsuccessful trajectories in critic loss using success ratio weighting.",
 )
 
 ### Try subprocenv ###
@@ -422,18 +447,31 @@ def get_policy_fn(
     timer: Timer | None = None,
     deterministic_actions: bool = False,
     num_diffusion_samples: int = 1,
+    do_ascent: bool = False,
+    eta_ascent: float = 0.01,
+    num_ascent_steps: int = 50,
 ) -> Callable[[Data], np.ndarray]:
     def policy_fn(observations: Data, *args, **kwargs) -> np.ndarray:
         if not isinstance(observations, dict):
             observations = {"state": observations}
-        
-        out_dict = jax.device_get(
-            agent.sample_actions(
-                observations, *args, **kwargs, timer=timer, output_action_chunk=True, 
-                use_deterministic_actions=deterministic_actions,
-                num_diffusion_samples=num_diffusion_samples,
+
+        if do_ascent:
+            out_dict = jax.device_get(
+                agent.sample_base_actions_gradq(
+                    observations, *args, **kwargs, timer=timer, output_action_chunk=True,
+                    num_diffusion_samples=num_diffusion_samples,
+                    eta_ascent=eta_ascent, num_ascent_steps=num_ascent_steps,
+                    optimizer_type="gradient_ascent",
+                )
             )
-        )
+        else:
+            out_dict = jax.device_get(
+                agent.sample_actions(
+                    observations, *args, **kwargs, timer=timer, output_action_chunk=True,
+                    use_deterministic_actions=deterministic_actions,
+                    num_diffusion_samples=num_diffusion_samples,
+                )
+            )
 
         return out_dict
 
@@ -703,6 +741,9 @@ def train_agent(_):
         rng=eval_policy_fn_key,
         timer=timer,
         deterministic_actions=True,
+        do_ascent=FLAGS.do_ascent,
+        eta_ascent=FLAGS.eta_ascent,
+        num_ascent_steps=FLAGS.num_ascent_steps,
     )
     #########################################################
 
@@ -710,6 +751,7 @@ def train_agent(_):
     num_trajectories_to_collect = FLAGS.num_trajectories_to_collect
     online_env_steps = 0
     online_trajectories_added = 0
+    success_weight = 0.5  # 0.5 means uniform weighting; updated when critic_balance_classes is True
 
     ### Online training ###
     for i in range(FLAGS.num_train_steps):
@@ -719,33 +761,38 @@ def train_agent(_):
         ### Collect Trajectories ###
         if i % FLAGS.online_trajectory_collection_frequency == 0:
             print("Collecting trajectories...")
-            data_collection_rng_key, rng = jax.random.split(rng)
-            
-            fns_dict = {}
-            policy_rng_key, value_rng_key = jax.random.split(data_collection_rng_key)
-            if i >= FLAGS.warmup_steps:
-                fns_dict["policy_fn"] = get_policy_fn(
-                    agent=agent,
-                    rng=policy_rng_key,
-                    timer=timer,
-                    deterministic_actions=False,
-                    num_diffusion_samples=FLAGS.num_diffusion_samples,
-                )
-            else:
-               fns_dict["policy_fn"] = get_base_policy_fn(
-                    agent=agent,
-                    rng=policy_rng_key,
-                    num_diffusion_samples=FLAGS.num_diffusion_samples,
-                )
-            fns_dict["value_fn"] = get_value_fn(
-                agent=agent,
-                rng=value_rng_key,
-                timer=timer,
-            )
 
             trajectories = []
             q_vs_mc_returns_vals = []
             for traj_index in range(num_trajectories_to_collect):
+                # Fresh RNG keys per trajectory
+                data_collection_rng_key, rng = jax.random.split(rng)
+                policy_rng_key, value_rng_key = jax.random.split(data_collection_rng_key)
+
+                fns_dict = {}
+                if i >= FLAGS.warmup_steps:
+                    fns_dict["policy_fn"] = get_policy_fn(
+                        agent=agent,
+                        rng=policy_rng_key,
+                        timer=timer,
+                        deterministic_actions=False,
+                        num_diffusion_samples=FLAGS.num_diffusion_samples,
+                        do_ascent=FLAGS.do_ascent,
+                        eta_ascent=FLAGS.eta_ascent,
+                        num_ascent_steps=FLAGS.num_ascent_steps,
+                    )
+                else:
+                    fns_dict["policy_fn"] = get_base_policy_fn(
+                        agent=agent,
+                        rng=policy_rng_key,
+                        num_diffusion_samples=FLAGS.num_diffusion_samples,
+                    )
+                fns_dict["value_fn"] = get_value_fn(
+                    agent=agent,
+                    rng=value_rng_key,
+                    timer=timer,
+                )
+
                 timer.tick("trajectory_sampling_time")
 
                 sampled_trajectories_successfully = False
@@ -819,6 +866,18 @@ def train_agent(_):
                     step=i,
                 )
             
+            if FLAGS.critic_balance_classes:
+                num_successful = sum(1 for t in trajectories if np.max(t["rewards"]) > 0)
+                num_failed = len(trajectories) - num_successful
+                # Inverse frequency weights, normalized to sum to 1
+                w_success = len(trajectories) / max(num_successful, 1)
+                w_fail = len(trajectories) / max(num_failed, 1)
+                w_total = w_success + w_fail
+                success_weight = float(np.clip(w_success / w_total, 0.1, 0.9))
+                print(f"Critic balance classes: success_weight={success_weight:.3f}, fail_weight={1.0 - success_weight:.3f} ({num_successful}/{len(trajectories)} successful)")
+                if wandb_logger is not None:
+                    wandb_logger.log({"train_env/success_weight": success_weight}, step=i)
+
             del trajectories, q_vs_mc_returns_vals
             import gc; gc.collect()
             
@@ -922,14 +981,19 @@ def train_agent(_):
                 update_edit_actor = False
                 assert FLAGS.ws_critic, "Critic must be warmed up if edit actor is not warmed up"
         else:
-            batch = concatenate_batches([offline_batch, online_batch])
+            if FLAGS.on_policy:
+                batch = online_batch
+            else:
+                batch = concatenate_batches([offline_batch, online_batch])
         timer.tock("sample_batch_time")
         agent, info = agent.update(batch,
             utd_ratio=FLAGS.config.utd_ratio,
             timer=timer,
             seed=rng_update,
             update_critic=update_critic,
-            update_edit_actor=update_edit_actor,
+            # update_critic=False, # Hardcode for debugging, TODO: Remove this #
+            # update_edit_actor=update_edit_actor,
+            update_edit_actor=False, # Hardcode for debugging, TODO: Remove this #
             critic_warmup=critic_warmup,
             critic_warmup_type=FLAGS.critic_warmup_type,
             calql_lower_bound=FLAGS.calql_lower_bound,
@@ -941,6 +1005,8 @@ def train_agent(_):
             grpo_beta=FLAGS.grpo_beta,
             grpo_weight_threshold=FLAGS.grpo_weight_threshold,
             edit_actor_utd_ratio=FLAGS.edit_actor_utd_ratio,
+            online_critic_update_type=FLAGS.online_critic_update_type,
+            success_weight=success_weight,
         )
         
         # Log batch statistics #
@@ -1012,6 +1078,9 @@ def train_agent(_):
                             rng=eval_policy_fn_key,
                             timer=timer,
                             deterministic_actions=True,
+                            do_ascent=FLAGS.do_ascent,
+                            eta_ascent=FLAGS.eta_ascent,
+                            num_ascent_steps=FLAGS.num_ascent_steps,
                         )
 
                         evaluated_trajectories_successfully = False

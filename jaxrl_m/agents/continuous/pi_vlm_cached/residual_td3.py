@@ -75,6 +75,38 @@ def compute_q_all(critic_fn, critic_params, observations, actions):
     # q_values = q_values
     return q_values
 
+
+@partial(jax.jit, static_argnames=('critic_fn', 'num_steps'))
+def _gradient_ascent_actions(critic_fn, critic_params, vlm_output, start_action, eta_ascent, num_steps: int):
+    """Perform gradient ascent on actions to maximize Q-value.
+
+    Args:
+        critic_fn: Critic network apply function
+        critic_params: Critic network parameters
+        vlm_output: VLM output features (1, vlm_dim)
+        start_action: Initial action (action_dim,)
+        eta_ascent: Step size for gradient ascent
+        num_steps: Number of gradient ascent steps
+
+    Returns:
+        Final action after gradient ascent (action_dim,)
+    """
+    def q_scalar(action):
+        # Compute Q-value for a single action
+        q = compute_q(critic_fn, critic_params, vlm_output, action.reshape(1, -1))
+        return q[0]
+
+    grad_fn = jax.grad(q_scalar)
+
+    def ascent_step(i, action):
+        g = grad_fn(action)
+        action = action + eta_ascent * g
+        action = jnp.clip(action, -1.0, 1.0)
+        return action
+
+    final_action = jax.lax.fori_loop(0, num_steps, ascent_step, start_action)
+    return final_action
+
 # ----------------------------------------------------------------------
 # Jitted inner steps for edit-actor and critic updates
 # ----------------------------------------------------------------------
@@ -957,11 +989,11 @@ class PiResidualTD3Cache(Agent):
     
     def compute_q(self, vlm_output: np.ndarray, actions: np.ndarray, *args, **kwargs):
         """Compute Q-values for given VLM output and actions.
-        
+
         Args:
             vlm_output: VLM output representation (can be batched or single)
             actions: Actions (can be batched or single)
-            
+
         Returns:
             Q-values from first Q-head (same shape as batch dimension)
         """
@@ -970,15 +1002,57 @@ class PiResidualTD3Cache(Agent):
             vlm_output = vlm_output.reshape(1, -1)
         if actions.ndim == 1:
             actions = actions.reshape(1, -1)
-            
+
         q_values = compute_q_all(
-            self.critic.apply_fn, 
-            self.critic.params, 
-            vlm_output, 
+            self.critic.apply_fn,
+            self.critic.params,
+            vlm_output,
             actions
         )
         # Return first Q-head
         return q_values[0]
+
+    def sample_base_actions_gradq(self, _observations: Data, eta_ascent: float = 0.01, num_ascent_steps: int = 10, *args, **kwargs):
+        """Sample base actions and ascend them using gradient of Q-function.
+
+        Args:
+            _observations: Observations from environment
+            eta_ascent: Step size for gradient ascent
+            num_ascent_steps: Number of gradient ascent steps
+
+        Returns:
+            Dictionary with ascended actions and metadata
+        """
+        # First sample base actions
+        out_dict = self.sample_base_actions(_observations, *args, **kwargs)
+
+        # Get the base action and vlm_output
+        base_action = out_dict["actions"]  # (action_horizon, action_dim)
+        vlm_output = out_dict["vlm_output"]  # (vlm_dim,)
+
+        # Normalize and flatten the action for gradient ascent
+        base_action_norm = self.actor.norm_actions(base_action.reshape(1, self.action_horizon, -1))
+        start_action = jnp.array(base_action_norm.reshape(-1))  # Flatten to (action_dim,)
+        vlm_output_expanded = jnp.array(vlm_output.reshape(1, -1))
+
+        # Perform JIT-compiled gradient ascent
+        final_action_flat = _gradient_ascent_actions(
+            self.critic.apply_fn,
+            self.critic.params,
+            vlm_output_expanded,
+            start_action,
+            eta_ascent,
+            num_ascent_steps
+        )
+
+        # Reshape back to (action_horizon, action_dim)
+        final_action = final_action_flat.reshape(self.action_horizon, self.action_dim // self.action_horizon)
+
+        # Unnormalize actions before returning
+        final_action = self.actor.unnorm_actions(final_action)
+
+        out_dict["actions"] = final_action
+        return out_dict
 
     def update_edit_actor(self, batch: Batch, *args, **kwargs) -> Tuple[Agent, Dict[str, float]]:
         seed = kwargs.pop("seed", None)

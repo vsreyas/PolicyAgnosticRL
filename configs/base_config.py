@@ -637,7 +637,7 @@ BASE_RESIDUAL_TD3_GRPO_CONFIG = dict(
         decay_steps=int(3e6),
         
         # Critic params
-        num_qs=4,
+        num_qs=10,
         num_min_qs=2,
         critic_dropout_rate=0.0,
         critic_weight_decay=0.0,
