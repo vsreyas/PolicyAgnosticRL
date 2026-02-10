@@ -991,9 +991,7 @@ def train_agent(_):
             timer=timer,
             seed=rng_update,
             update_critic=update_critic,
-            # update_critic=False, # Hardcode for debugging, TODO: Remove this #
-            # update_edit_actor=update_edit_actor,
-            update_edit_actor=False, # Hardcode for debugging, TODO: Remove this #
+            update_edit_actor=update_edit_actor,
             critic_warmup=critic_warmup,
             critic_warmup_type=FLAGS.critic_warmup_type,
             calql_lower_bound=FLAGS.calql_lower_bound,

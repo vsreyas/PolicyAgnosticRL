@@ -254,6 +254,11 @@ flags.DEFINE_bool(
     False,
     "If True, zero out gradient for gripper dimension during gradient ascent on actions.",
 )
+flags.DEFINE_bool(
+    "use_bon_gradq_v2",
+    False,
+    "Use Best-of-N v2: rank sampled actions first, then gradient ascend only the best one.",
+)
 
 # 2: 07 2 13
 BASE_POLICY_TYPE_TO_CLASS = {
@@ -294,6 +299,7 @@ def get_policy_fn(
     do_ascent: bool = False,
     use_bon: bool = False,
     use_bon_no_gradq: bool = False,
+    use_bon_gradq_v2: bool = False,
     bon_actions: int = 4,
     eta_ascent: float = 0.01,
     num_ascent_steps: int = 50,
@@ -323,6 +329,19 @@ def get_policy_fn(
                     bon_actions=bon_actions,
                 )
             )
+        elif use_bon_gradq_v2:
+            # Use Best-of-N v2: rank first, then gradient ascend only the best action
+            out_dict = jax.device_get(
+                agent.sample_bon_actions_gradq_v2(
+                    observations, *args, **kwargs, timer=timer, output_action_chunk=True,
+                    bon_actions=bon_actions,
+                    eta_ascent=eta_ascent, num_ascent_steps=num_ascent_steps,
+                    optimizer_type=optimizer_type,
+                    rmsprop_beta=rmsprop_beta, rmsprop_epsilon=rmsprop_epsilon,
+                    adam_beta1=adam_beta1, adam_beta2=adam_beta2, adam_epsilon=adam_epsilon,
+                    zero_grad_gripper=zero_grad_gripper,
+                )
+            )
         elif use_bon:
             # Use Best-of-N sampling with gradient ascent
             out_dict = jax.device_get(
@@ -333,6 +352,7 @@ def get_policy_fn(
                     optimizer_type=optimizer_type,
                     rmsprop_beta=rmsprop_beta, rmsprop_epsilon=rmsprop_epsilon,
                     adam_beta1=adam_beta1, adam_beta2=adam_beta2, adam_epsilon=adam_epsilon,
+                    zero_grad_gripper=zero_grad_gripper,
                 )
             )
         elif do_ascent:
@@ -523,6 +543,7 @@ def train_agent(_):
                     do_ascent=FLAGS.do_ascent,
                     use_bon=FLAGS.use_bon,
                     use_bon_no_gradq=FLAGS.use_bon_no_gradq,
+                    use_bon_gradq_v2=FLAGS.use_bon_gradq_v2,
                     bon_actions=FLAGS.bon_actions,
                     eta_ascent=FLAGS.eta_ascent,
                     num_ascent_steps=FLAGS.num_ascent_steps,

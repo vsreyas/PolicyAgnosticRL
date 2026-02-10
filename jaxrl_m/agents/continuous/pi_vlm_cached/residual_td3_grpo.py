@@ -31,6 +31,7 @@ from jaxrl_m.utils.expo_utils import (
     StateAndStateActionValue,
     ResidualActor,
     ResidualTanhEditActor,
+    MLPTanhEditActor,
     Ensemble,
     subsample_ensemble,
     Agent,
@@ -103,7 +104,7 @@ def _gradient_ascent_actions(critic_fn, critic_params, vlm_output, start_action,
         g = g.at[:, -1].set(g[:, -1] * (1.0 - zero_grad_gripper))
         g = g.reshape(-1)
         action = action + eta_ascent * g
-        action = jnp.clip(action, -1.0, 1.0)
+        # action = jnp.clip(action, -1.0, 1.0)
         return action
 
     final_action = jax.lax.fori_loop(0, num_steps, ascent_step, start_action)
@@ -189,7 +190,7 @@ def _adam_ascent_actions(critic_fn, critic_params, vlm_output, start_action, eta
 
         # Update action
         action = action + eta_ascent * m_hat / (jnp.sqrt(v_hat) + epsilon)
-        action = jnp.clip(action, -1.0, 1.0)
+        # action = jnp.clip(action, -1.0, 1.0)
 
         return (action, m, v), None
 
@@ -238,6 +239,9 @@ def _edit_actor_loss_and_grad_residual_q(
     def loss_fn(actor_params):
         edit_actions = edit_actor_apply_fn(
             {"params": actor_params}, vlm_output, batch_actions)
+        edit_actions = edit_actions.reshape(-1, 10, 7)
+        edit_actions = edit_actions.at[:, :, -1].set(0.0)
+        edit_actions = edit_actions.reshape(batch_actions.shape)
         actions = batch_actions + edit_action_scale * edit_actions
         actions = jnp.clip(actions, -1.0, 1.0)
 
@@ -824,6 +828,8 @@ class PiResidualTD3GRPO(Agent):
         cql_alpha: float = 5.0,  # CQL regularization weight
         cql_temp: float = 1.0,  # CQL temperature for logsumexp
         residual_bc_actor: bool = False,
+        load_critic_params: bool = True,
+        load_edit_actor_params: bool = False,
     ):
         assert N >= n_edit_samples, f"N must be greater than or equal to n_edit_samples, got N={N} and n_edit_samples={n_edit_samples}"
 
@@ -863,12 +869,19 @@ class PiResidualTD3GRPO(Agent):
         dummy_observations = jnp.ones(
             (batch_size, pi0_hidden_dims + state_dim))
         dummy_actions = jnp.ones((batch_size, action_dim))
-        edit_actor_def = ResidualTanhEditActor(
-            action_dim, hidden_dims=hidden_dims, num_residual_blocks=3)
+        # edit_actor_def = ResidualTanhEditActor(
+        #     action_dim, hidden_dims=hidden_dims, num_residual_blocks=3)
+        edit_actor_def = MLPTanhEditActor(
+            action_dim=action_dim,
+            hidden_dims=hidden_dims,
+            activation=nn.swish,
+            use_layer_norm=True,
+            use_pnorm=use_pnorm,
+        )
         edit_observations = jnp.concatenate(
             [dummy_observations, jnp.ones((batch_size, action_dim))], axis=1)
 
-        if edit_actor_params is None:
+        if edit_actor_params is None or not load_edit_actor_params:
             print("\n\n\nInitializing edit actor parameters from scratch...\n\n\n")
             edit_actor_params = edit_actor_def.init(
                 actor_key, dummy_observations, dummy_actions)["params"]
@@ -897,7 +910,7 @@ class PiResidualTD3GRPO(Agent):
         critic_cls = partial(StateActionValue, base_cls=critic_base_cls)
         critic_def = Ensemble(critic_cls, num=num_qs)
 
-        if critic_params is None:
+        if critic_params is None or not load_critic_params:
             print("\n\n\nInitializing critic parameters from scratch...\n\n\n")
             critic_params = critic_def.init(
                 critic_key, dummy_observations, dummy_actions)["params"]
@@ -1031,6 +1044,9 @@ class PiResidualTD3GRPO(Agent):
         
         edit_actions = _sample_deterministic_actions(
             self.edit_actor.apply_fn, self.edit_actor.params, r_observations, actions)
+        edit_actions = edit_actions.reshape(-1, 10, 7)
+        edit_actions = edit_actions.at[:, :, -1].set(0.0)
+        edit_actions = edit_actions.reshape(actions.shape)
 
         if not use_deterministic_actions:
             rng, rng_exploration = jax.random.split(rng)
@@ -1319,6 +1335,7 @@ class PiResidualTD3GRPO(Agent):
                                   optimizer_type: str = "gradient_ascent",
                                   rmsprop_beta: float = 0.9, rmsprop_epsilon: float = 1e-8,
                                   adam_beta1: float = 0.9, adam_beta2: float = 0.999, adam_epsilon: float = 1e-8,
+                                  zero_grad_gripper: bool = False,
                                   *args, **kwargs):
         """Sample multiple base actions, ascend each, and select the best one based on Q-values.
 
@@ -1340,6 +1357,7 @@ class PiResidualTD3GRPO(Agent):
             adam_beta1: First moment decay rate for Adam
             adam_beta2: Second moment decay rate for Adam
             adam_epsilon: Small constant for Adam numerical stability
+            zero_grad_gripper: If True, zero out gradient for gripper (last of 7) dimension
 
         Returns:
             Dictionary with best ascended action and metadata
@@ -1370,9 +1388,10 @@ class PiResidualTD3GRPO(Agent):
         vlm_output_final = jnp.concatenate([vlm_output_single, state], axis=1)  # (1, vlm_dim + state_dim)
 
         # Select the ascent function based on optimizer_type
+        zero_grad_gripper_scalar = jnp.float32(zero_grad_gripper)
         if optimizer_type == "gradient_ascent":
             ascent_fn = _gradient_ascent_actions
-            ascent_args = (eta_ascent, num_ascent_steps)
+            ascent_args = (eta_ascent, num_ascent_steps, zero_grad_gripper_scalar)
         elif optimizer_type == "rmsprop":
             ascent_fn = _rmsprop_ascent_actions
             ascent_args = (eta_ascent, num_ascent_steps, rmsprop_beta, rmsprop_epsilon)
@@ -1436,6 +1455,144 @@ class PiResidualTD3GRPO(Agent):
             "action_samples": sampled_actions,  # Return all sampled actions
             "bon_q_values": q_min_values,
             "bon_best_q_value": best_q_value,
+            "bon_best_idx": best_action_idx,
+        }
+
+        return out_dict
+
+    def sample_bon_actions_gradq_v2(self, _observations: Data, bon_actions: int = 4,
+                                     eta_ascent: float = 0.01, num_ascent_steps: int = 50,
+                                     optimizer_type: str = "gradient_ascent",
+                                     rmsprop_beta: float = 0.9, rmsprop_epsilon: float = 1e-8,
+                                     adam_beta1: float = 0.9, adam_beta2: float = 0.999, adam_epsilon: float = 1e-8,
+                                     zero_grad_gripper: bool = False,
+                                     *args, **kwargs):
+        """Sample multiple base actions, select the best via Q-ranking, then gradient ascend the best.
+
+        Unlike sample_bon_actions_gradq which ascends ALL sampled actions before ranking,
+        this version:
+        1. Samples 'bon_actions' different actions from the base policy (batched)
+        2. Subsamples num_min_qs Q networks from num_qs
+        3. Ranks the sampled actions using min(Q) across subsampled networks
+        4. Selects the action with the highest Q value
+        5. Performs gradient ascent only on the selected best action
+
+        Args:
+            _observations: Observations from environment
+            bon_actions: Number of actions to sample from base policy
+            eta_ascent: Step size for gradient ascent
+            num_ascent_steps: Number of gradient ascent steps
+            optimizer_type: Type of optimizer to use ("gradient_ascent", "rmsprop", "adam")
+            rmsprop_beta: Decay rate for RMSProp moving average
+            rmsprop_epsilon: Small constant for RMSProp numerical stability
+            adam_beta1: First moment decay rate for Adam
+            adam_beta2: Second moment decay rate for Adam
+            adam_epsilon: Small constant for Adam numerical stability
+            zero_grad_gripper: If True, zero out gradient for gripper (last of 7) dimension
+
+        Returns:
+            Dictionary with best ascended action and metadata
+        """
+        seed = kwargs.get("seed", None)
+        rng = seed
+
+        # Repeat observations bon_actions times for batched sampling
+        batched_obs = add_batch_dim(_observations)
+        observations_repeated = repeat_observations_openpi(batched_obs, bon_actions, axis=0)
+
+        # Sample bon_actions different actions from base policy in a single batched call
+        sample_rng, rng = jax.random.split(rng)
+        sampled_actions, vlm_output, processed_obs = self.actor.sample_actions_with_vlm_output(
+            sample_rng, observations_repeated
+        )
+        # sampled_actions shape: (bon_actions, action_horizon, action_dim)
+
+        # Normalize actions
+        sampled_actions_norm = self.actor.norm_actions(sampled_actions)
+        # Flatten actions: (bon_actions, action_dim_total)
+        sampled_actions_flat = sampled_actions_norm.reshape(bon_actions, -1)
+
+        # Get VLM output (use the first one since they're all the same observation)
+        vlm_output_single = jnp.mean(vlm_output[0][0:1, :512, :], axis=1)  # Take only first, shape (1, vlm_dim)
+        state = processed_obs['state'][0, :8][None, :8]
+        vlm_output_final = jnp.concatenate([vlm_output_single, state], axis=1)  # (1, vlm_dim + state_dim)
+
+        # --- Step 1: Rank sampled actions using subsampled Q networks ---
+        subsample_rng, rng = jax.random.split(rng)
+        subsampled_critic_params = subsample_ensemble(
+            subsample_rng, self.critic.params, self.num_min_qs, self.num_qs
+        )
+
+        # Expand vlm_output to match batch size
+        vlm_output_repeated = jnp.repeat(vlm_output_final, bon_actions, axis=0)  # (bon_actions, vlm_dim)
+
+        # Compute Q values using subsampled critics
+        qs = compute_q_all(
+            self.target_critic.apply_fn,
+            subsampled_critic_params,
+            vlm_output_repeated,
+            sampled_actions_flat
+        )  # (num_min_qs, bon_actions)
+
+        # Take minimum across the Q networks for each action
+        q_min_values = jnp.min(qs, axis=0)  # (bon_actions,)
+
+        # Select the action with the highest Q value
+        best_action_idx = jnp.argmax(q_min_values)
+        best_action_flat = sampled_actions_flat[best_action_idx]
+        best_q_value_before = q_min_values[best_action_idx]
+
+        # --- Step 2: Gradient ascend only the best action ---
+        zero_grad_gripper_scalar = jnp.float32(zero_grad_gripper)
+        if optimizer_type == "gradient_ascent":
+            final_action_flat = _gradient_ascent_actions(
+                self.critic.apply_fn,
+                self.critic.params,
+                vlm_output_final,
+                best_action_flat,
+                eta_ascent,
+                num_ascent_steps,
+                zero_grad_gripper_scalar
+            )
+        elif optimizer_type == "rmsprop":
+            final_action_flat = _rmsprop_ascent_actions(
+                self.critic.apply_fn,
+                self.critic.params,
+                vlm_output_final,
+                best_action_flat,
+                eta_ascent,
+                num_ascent_steps,
+                rmsprop_beta,
+                rmsprop_epsilon
+            )
+        elif optimizer_type == "adam":
+            final_action_flat = _adam_ascent_actions(
+                self.critic.apply_fn,
+                self.critic.params,
+                vlm_output_final,
+                best_action_flat,
+                eta_ascent,
+                num_ascent_steps,
+                adam_beta1,
+                adam_beta2,
+                adam_epsilon
+            )
+        else:
+            raise ValueError(f"Unknown optimizer_type: {optimizer_type}. Must be one of: gradient_ascent, rmsprop, adam")
+
+        # Reshape back to (action_horizon, action_dim)
+        final_action = final_action_flat.reshape(self.action_horizon, self.action_dim // self.action_horizon)
+
+        # Unnormalize actions before returning
+        final_action = self.actor.unnorm_actions(final_action)
+
+        out_dict = {
+            "actions": final_action,
+            "vlm_output": vlm_output_final[0],
+            "diffusion_actions": sampled_actions[0],  # Return first sampled action as diffusion_actions
+            "action_samples": sampled_actions,  # Return all sampled actions
+            "bon_q_values": q_min_values,
+            "bon_best_q_value_before_ascent": best_q_value_before,
             "bon_best_idx": best_action_idx,
         }
 

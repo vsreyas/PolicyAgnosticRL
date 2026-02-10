@@ -178,6 +178,22 @@ class ResidualActor(nn.Module):
         out_actions = (tanh_actions * gating_signal) + (input_act * (1.0 - gating_signal))
         return out_actions
 
+class MLPTanhEditActor(nn.Module):
+    """Simple MLP backbone followed by tanh. Takes observations and actions as input."""
+    action_dim: int
+    hidden_dims: Sequence[int] = (512, 512, 512, 512)
+    activation: Callable[[jnp.ndarray], jnp.ndarray] = nn.swish
+    use_layer_norm: bool = True
+    use_pnorm: bool = False
+
+    @nn.compact
+    def __call__(self, observations: jnp.ndarray, actions: jnp.ndarray, *args, **kwargs) -> jnp.ndarray:
+        x = jnp.concatenate([observations, actions], axis=-1)
+        x = MLP(self.hidden_dims, activations=self.activation, activate_final=True,
+                use_layer_norm=self.use_layer_norm, use_pnorm=self.use_pnorm)(x)
+        x = nn.Dense(self.action_dim, kernel_init=default_init())(x)
+        return jnp.tanh(x)
+
 class ResidualTanhEditActor(nn.Module):
     """
     Encapsulated a single actor network that takes in observations and actions and outputs a final action with a correction
