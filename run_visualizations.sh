@@ -5,7 +5,7 @@ EPISODE_IDS=(0 15 2 8 13 19)
 # EPISODE_IDS=(1)
 
 # Base paths
-BASE_DIR="/home/skowshik/vla/codebase/PolicyAgnosticRL/critic_EVAL_sarsa_10_2_clean_v2_init_online_train_critic_balance_online_5k_ch1k"
+BASE_DIR="/home/skowshik/vla/codebase/PolicyAgnosticRL/critic_EVAL_sarsa_10_2_6dim-clean_v1-4k"
 # If `BASE_DIR` does not exist, create it
 if [ ! -d "${BASE_DIR}" ]; then
     mkdir -p "${BASE_DIR}"
@@ -14,10 +14,10 @@ fi
 TFRECORD_BASE="/data/user_data/skowshik/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_base_rollouts_EVAL/image_replay_buffer/"
 # TD3_CHECKPOINT="/home/skowshik/vla/codebase/PolicyAgnosticRL/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_ws_sarsa_10_2/checkpoint_9000.pkl"
 # Append BASE_DIR to the output base name
-OUT_BASE_NAME="${BASE_DIR}/ch1k"
+OUT_BASE_NAME="${BASE_DIR}/ch4k"
 PI_CONFIG_NAME="pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k"
 # PI_CONFIG_NAME="pi05_libero_gradacc2_2k"
-TD3_GRPO_CHECKPOINT="/data/hf_cache/models/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_ws_sarsa_10_2_clean_v2_balance_8k_init-gradq_ascent_policy-minimal_intuition-5k_online_steps-critic_balance/checkpoint_1000.pkl"
+TD3_GRPO_CHECKPOINT="/data/hf_cache/models/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_ws_sarsa_10_2_6dim-clean_v1/checkpoint_4000.pkl"
 
 # Loop through each episode
 for EPISODE_ID in "${EPISODE_IDS[@]}"; do

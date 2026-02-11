@@ -100,9 +100,7 @@ def _gradient_ascent_actions(critic_fn, critic_params, vlm_output, start_action,
 
     def ascent_step(i, action):
         g = grad_fn(action)
-        g = g.reshape(10, 7)
-        g = g.at[:, -1].set(g[:, -1] * (1.0 - zero_grad_gripper))
-        g = g.reshape(-1)
+        # Actions are now gripper-stripped (60-dim), no gripper zeroing needed
         action = action + eta_ascent * g
         # action = jnp.clip(action, -1.0, 1.0)
         return action
@@ -239,9 +237,7 @@ def _edit_actor_loss_and_grad_residual_q(
     def loss_fn(actor_params):
         edit_actions = edit_actor_apply_fn(
             {"params": actor_params}, vlm_output, batch_actions)
-        edit_actions = edit_actions.reshape(-1, 10, 7)
-        edit_actions = edit_actions.at[:, :, -1].set(0.0)
-        edit_actions = edit_actions.reshape(batch_actions.shape)
+        # Actions are now gripper-stripped (60-dim), no gripper zeroing needed
         actions = batch_actions + edit_action_scale * edit_actions
         actions = jnp.clip(actions, -1.0, 1.0)
 
@@ -283,15 +279,15 @@ def _edit_actor_loss_and_grad_residual_q(
             "zero_reg_loss": zero_reg,
         }
 
-        edit_actions_reshaped = edit_actions.reshape(-1, 10, 7)
-        for i in range(7):
+        edit_actions_reshaped = edit_actions.reshape(-1, 10, 6)
+        for i in range(6):
             metrics[f"edit_action_{i}_mean"] = edit_actions_reshaped[:, :, i].mean()
             metrics[f"edit_action_{i}_std"] = edit_actions_reshaped[:, :, i].std()
             metrics[f"edit_action_{i}_max"] = edit_actions_reshaped[:, :, i].max()
             metrics[f"edit_action_{i}_min"] = edit_actions_reshaped[:, :, i].min()
 
-        batch_actions_reshaped = batch_actions.reshape(-1, 10, 7)
-        for i in range(7):
+        batch_actions_reshaped = batch_actions.reshape(-1, 10, 6)
+        for i in range(6):
             metrics[f"batch_action_{i}_mean"] = batch_actions_reshaped[:, :, i].mean()
             metrics[f"batch_action_{i}_std"] = batch_actions_reshaped[:, :, i].std()
             metrics[f"batch_action_{i}_max"] = batch_actions_reshaped[:, :, i].max()
@@ -750,6 +746,7 @@ class PiResidualTD3GRPO(Agent):
     edit_actor: TrainState
     temp: TrainState
     action_dim: int = struct.field(pytree_node=False)
+    critic_action_dim: int = struct.field(pytree_node=False)
     state_dim: int = struct.field(pytree_node=False)
     action_horizon: int = struct.field(pytree_node=False)
     T: int = struct.field(pytree_node=False)
@@ -829,7 +826,7 @@ class PiResidualTD3GRPO(Agent):
         cql_temp: float = 1.0,  # CQL temperature for logsumexp
         residual_bc_actor: bool = False,
         load_critic_params: bool = True,
-        load_edit_actor_params: bool = False,
+        load_edit_actor_params: bool = True,
     ):
         assert N >= n_edit_samples, f"N must be greater than or equal to n_edit_samples, got N={N} and n_edit_samples={n_edit_samples}"
 
@@ -837,6 +834,7 @@ class PiResidualTD3GRPO(Agent):
         pi0_hidden_dims = paligemma_config.width
         action_horizon = config.model.action_horizon
         action_dim = action_dim * action_horizon
+        critic_action_dim = action_dim - action_horizon  # (7-1)*10 = 60, excludes gripper
 
         if target_entropy is None:
             target_entropy = -action_dim / 2.0
@@ -861,6 +859,7 @@ class PiResidualTD3GRPO(Agent):
         # Init Pi0 model
         actor = PiPolicy(rng=rng, config=config, is_target=False)
         target_actor = actor
+        # breakpoint()
 
         if decay_steps is not None:
             actor_lr = optax.cosine_decay_schedule(actor_lr, decay_steps)
@@ -868,18 +867,19 @@ class PiResidualTD3GRPO(Agent):
         # Init edit actor
         dummy_observations = jnp.ones(
             (batch_size, pi0_hidden_dims + state_dim))
-        dummy_actions = jnp.ones((batch_size, action_dim))
+        dummy_actions = jnp.ones((batch_size, critic_action_dim))
+        # breakpoint()
         # edit_actor_def = ResidualTanhEditActor(
         #     action_dim, hidden_dims=hidden_dims, num_residual_blocks=3)
         edit_actor_def = MLPTanhEditActor(
-            action_dim=action_dim,
+            action_dim=critic_action_dim,
             hidden_dims=hidden_dims,
             activation=nn.swish,
             use_layer_norm=True,
             use_pnorm=use_pnorm,
         )
         edit_observations = jnp.concatenate(
-            [dummy_observations, jnp.ones((batch_size, action_dim))], axis=1)
+            [dummy_observations, jnp.ones((batch_size, critic_action_dim))], axis=1)
 
         if edit_actor_params is None or not load_edit_actor_params:
             print("\n\n\nInitializing edit actor parameters from scratch...\n\n\n")
@@ -971,6 +971,7 @@ class PiResidualTD3GRPO(Agent):
             target_actor=target_actor,
             edit_actor=edit_actor,
             action_dim=action_dim,
+            critic_action_dim=critic_action_dim,
             action_horizon=action_horizon,
             state_dim=state_dim,
             T=T,
@@ -1039,28 +1040,31 @@ class PiResidualTD3GRPO(Agent):
         vlm_output = jnp.concatenate([vlm_output, state], axis=1)
 
         seed, rng = jax.random.split(seed)
-        actions = actions.reshape(1, self.action_dim)
+        per_step = self.action_dim // self.action_horizon  # 7
+        actions = actions.reshape(1, self.action_horizon, per_step)
+        gripper_actions = actions[:, :, -1:]  # (1, 10, 1) - save gripper from base
+        actions_no_grip = actions[:, :, :-1].reshape(1, self.critic_action_dim)  # (1, 60)
         r_observations = vlm_output
-        
+
         edit_actions = _sample_deterministic_actions(
-            self.edit_actor.apply_fn, self.edit_actor.params, r_observations, actions)
-        edit_actions = edit_actions.reshape(-1, 10, 7)
-        edit_actions = edit_actions.at[:, :, -1].set(0.0)
-        edit_actions = edit_actions.reshape(actions.shape)
+            self.edit_actor.apply_fn, self.edit_actor.params, r_observations, actions_no_grip)
+        # edit_actions is (1, 60) - no gripper dimension
 
         if not use_deterministic_actions:
             rng, rng_exploration = jax.random.split(rng)
             exploration_noise = jax.random.normal(
-                rng_exploration, actions.shape) * self.exploration_epsilon
+                rng_exploration, edit_actions.shape) * self.exploration_epsilon
             exploration_noise = jnp.clip(exploration_noise, -1.0, 1.0)
             edit_actions = edit_actions + exploration_noise
 
-        # edit_actions = jnp.clip(edit_actions, -1.0, 1.0)
-        
-        final_action = actions + self.edit_action_scale * edit_actions
+        # Add residual only to first 6 dims per step, keep gripper from base
+        final_no_grip = actions_no_grip + self.edit_action_scale * edit_actions
+        final_no_grip = jnp.clip(final_no_grip, -1.0, 1.0)
+        final_no_grip = final_no_grip.reshape(1, self.action_horizon, -1)  # (1, 10, 6)
+        final_action = jnp.concatenate([final_no_grip, gripper_actions], axis=-1)  # (1, 10, 7)
         final_action = jnp.clip(final_action, -1.0, 1.0)
         final_action = final_action.reshape(
-            self.action_horizon, self.action_dim // self.action_horizon)
+            self.action_horizon, per_step)
 
         final_action = self.actor.unnorm_actions(final_action)
 
@@ -1145,11 +1149,22 @@ class PiResidualTD3GRPO(Agent):
         return vlm_output[0]
     
     def compute_q(self, vlm_output: np.ndarray, actions: np.ndarray, *args, **kwargs):
-        """Compute Q-values for given VLM output and actions."""
+        """Compute Q-values for given VLM output and actions.
+
+        Actions can be full (70-dim) or already gripper-stripped (60-dim).
+        If full, gripper will be stripped automatically.
+        """
         if vlm_output.ndim == 1:
             vlm_output = vlm_output.reshape(1, -1)
         if actions.ndim == 1:
             actions = actions.reshape(1, -1)
+
+        # Strip gripper if full action dim is passed
+        if actions.shape[-1] == self.action_dim:
+            per_step = self.action_dim // self.action_horizon
+            actions = actions.reshape(-1, self.action_horizon, per_step)[:, :, :-1].reshape(-1, self.critic_action_dim)
+
+        # breakpoint()
 
         q_values = compute_q_all(
             self.critic.apply_fn,
@@ -1189,9 +1204,12 @@ class PiResidualTD3GRPO(Agent):
         base_action = out_dict["actions"]  # (action_horizon, action_dim)
         vlm_output = out_dict["vlm_output"]  # (vlm_dim,)
 
-        # Normalize and flatten the action for gradient ascent
+        # Normalize and flatten the action, strip gripper for gradient ascent
+        per_step = self.action_dim // self.action_horizon  # 7
         base_action_norm = self.actor.norm_actions(base_action.reshape(1, self.action_horizon, -1))
-        start_action = jnp.array(base_action_norm.reshape(-1))  # Flatten to (action_dim,)
+        base_action_reshaped = base_action_norm.reshape(self.action_horizon, per_step)
+        gripper_actions = base_action_reshaped[:, -1:]  # (10, 1) - save gripper from base
+        start_action = jnp.array(base_action_reshaped[:, :-1].reshape(-1))  # (60,)
         vlm_output_expanded = jnp.array(vlm_output.reshape(1, -1))
 
         # Perform JIT-compiled gradient ascent with selected optimizer
@@ -1236,8 +1254,9 @@ class PiResidualTD3GRPO(Agent):
         # action_diff_norm = jnp.linalg.norm(final_action_flat - start_action)
         # print(f"[DEBUG] Action diff norm (final - start): {action_diff_norm}")
 
-        # Reshape back to (action_horizon, action_dim)
-        final_action = final_action_flat.reshape(self.action_horizon, self.action_dim // self.action_horizon)
+        # Reshape and restore gripper from base action
+        final_no_grip = final_action_flat.reshape(self.action_horizon, -1)  # (10, 6)
+        final_action = jnp.concatenate([final_no_grip, gripper_actions], axis=-1)  # (10, 7)
 
         # Unnormalize actions before returning
         final_action = self.actor.unnorm_actions(final_action)
@@ -1277,8 +1296,10 @@ class PiResidualTD3GRPO(Agent):
 
         # Normalize actions
         sampled_actions_norm = self.actor.norm_actions(sampled_actions)
-        # Flatten actions: (bon_actions, action_dim_total)
-        sampled_actions_flat = sampled_actions_norm.reshape(bon_actions, -1)
+        per_step = self.action_dim // self.action_horizon  # 7
+        # Keep full flat for final selection, strip gripper for Q computation
+        sampled_actions_flat = sampled_actions_norm.reshape(bon_actions, -1)  # (bon_actions, 70)
+        sampled_actions_no_grip = sampled_actions_norm.reshape(bon_actions, self.action_horizon, per_step)[:, :, :-1].reshape(bon_actions, -1)  # (bon_actions, 60)
 
         # Get VLM output (use the first one since they're all the same observation)
         vlm_output_single = jnp.mean(vlm_output[0][0:1, :512, :], axis=1)  # Take only first, shape (1, vlm_dim)
@@ -1295,25 +1316,24 @@ class PiResidualTD3GRPO(Agent):
         # Expand vlm_output to match batch size
         vlm_output_repeated = jnp.repeat(vlm_output_final, bon_actions, axis=0)  # (bon_actions, vlm_dim)
 
-        # Compute Q values using subsampled critics
-        # Use target_critic.apply_fn because it's designed to work with num_min_qs critics
+        # Compute Q values using subsampled critics (60-dim actions, no gripper)
         qs = compute_q_all(
             self.target_critic.apply_fn,
             subsampled_critic_params,
             vlm_output_repeated,
-            sampled_actions_flat
+            sampled_actions_no_grip
         )  # (num_min_qs, bon_actions)
 
         # Take minimum across the Q networks for each action
         q_min_values = jnp.min(qs, axis=0)  # (bon_actions,)
 
-        # Select the action with the highest Q value
+        # Select the action with the highest Q value (use full 70-dim for output)
         best_action_idx = jnp.argmax(q_min_values)
         best_action_flat = sampled_actions_flat[best_action_idx]
         best_q_value = q_min_values[best_action_idx]
 
-        # Reshape back to (action_horizon, action_dim)
-        final_action = best_action_flat.reshape(self.action_horizon, self.action_dim // self.action_horizon)
+        # Reshape back to (action_horizon, action_dim) - full 7-dim per step
+        final_action = best_action_flat.reshape(self.action_horizon, per_step)
 
         # Unnormalize actions before returning
         final_action = self.actor.unnorm_actions(final_action)
@@ -1379,8 +1399,11 @@ class PiResidualTD3GRPO(Agent):
 
         # Normalize actions for gradient ascent
         sampled_actions_norm = self.actor.norm_actions(sampled_actions)
-        # Flatten actions: (bon_actions, action_dim_total)
-        sampled_actions_flat = sampled_actions_norm.reshape(bon_actions, -1)
+        per_step = self.action_dim // self.action_horizon  # 7
+        sampled_reshaped = sampled_actions_norm.reshape(bon_actions, self.action_horizon, per_step)
+        sampled_gripper = sampled_reshaped[:, :, -1:]  # (bon_actions, 10, 1) - save gripper
+        # Strip gripper for ascent: (bon_actions, 60)
+        sampled_actions_no_grip = sampled_reshaped[:, :, :-1].reshape(bon_actions, -1)
 
         # Get VLM output (use the first one since they're all the same observation)
         vlm_output_single = jnp.mean(vlm_output[0][0:1, :512, :], axis=1)  # Take only first, shape (1, vlm_dim)
@@ -1401,8 +1424,7 @@ class PiResidualTD3GRPO(Agent):
         else:
             raise ValueError(f"Unknown optimizer_type: {optimizer_type}. Must be one of: gradient_ascent, rmsprop, adam")
 
-        # Vmap the ascent function over all sampled actions
-        # Create a vectorized version that processes all actions in parallel
+        # Vmap the ascent function over all sampled actions (60-dim, no gripper)
         def ascend_single_action(start_action):
             return ascent_fn(
                 self.critic.apply_fn,
@@ -1412,8 +1434,8 @@ class PiResidualTD3GRPO(Agent):
                 *ascent_args
             )
 
-        ascended_actions_flat = jax.vmap(ascend_single_action)(sampled_actions_flat)
-        # ascended_actions_flat shape: (bon_actions, action_dim_total)
+        ascended_actions_no_grip = jax.vmap(ascend_single_action)(sampled_actions_no_grip)
+        # ascended_actions_no_grip shape: (bon_actions, 60)
 
         # Subsample num_min_qs Q networks from num_qs
         subsample_rng, rng = jax.random.split(rng)
@@ -1422,16 +1444,14 @@ class PiResidualTD3GRPO(Agent):
         )
 
         # Compute Q-values for all ascended actions in a batched manner
-        # Expand vlm_output to match batch size
         vlm_output_repeated = jnp.repeat(vlm_output_final, bon_actions, axis=0)  # (bon_actions, vlm_dim)
 
-        # Compute Q values using subsampled critics with compute_q_all
-        # Use target_critic.apply_fn because it's designed to work with num_min_qs critics
+        # Compute Q values using 60-dim ascended actions
         qs = compute_q_all(
             self.target_critic.apply_fn,
             subsampled_critic_params,
             vlm_output_repeated,
-            ascended_actions_flat
+            ascended_actions_no_grip
         )  # (num_min_qs, bon_actions)
 
         # Take minimum across the Q networks for each action
@@ -1439,11 +1459,12 @@ class PiResidualTD3GRPO(Agent):
 
         # Select the action with the highest Q value
         best_action_idx = jnp.argmax(q_min_values)
-        best_action_flat = ascended_actions_flat[best_action_idx]
         best_q_value = q_min_values[best_action_idx]
 
-        # Reshape back to (action_horizon, action_dim)
-        final_action = best_action_flat.reshape(self.action_horizon, self.action_dim // self.action_horizon)
+        # Restore gripper from base action for the best ascended action
+        best_ascended_no_grip = ascended_actions_no_grip[best_action_idx].reshape(self.action_horizon, -1)  # (10, 6)
+        best_gripper = sampled_gripper[best_action_idx]  # (10, 1)
+        final_action = jnp.concatenate([best_ascended_no_grip, best_gripper], axis=-1)  # (10, 7)
 
         # Unnormalize actions before returning
         final_action = self.actor.unnorm_actions(final_action)
@@ -1509,15 +1530,18 @@ class PiResidualTD3GRPO(Agent):
 
         # Normalize actions
         sampled_actions_norm = self.actor.norm_actions(sampled_actions)
-        # Flatten actions: (bon_actions, action_dim_total)
-        sampled_actions_flat = sampled_actions_norm.reshape(bon_actions, -1)
+        per_step = self.action_dim // self.action_horizon  # 7
+        sampled_reshaped = sampled_actions_norm.reshape(bon_actions, self.action_horizon, per_step)
+        sampled_gripper = sampled_reshaped[:, :, -1:]  # (bon_actions, 10, 1)
+        # Strip gripper for Q computation and ascent: (bon_actions, 60)
+        sampled_actions_no_grip = sampled_reshaped[:, :, :-1].reshape(bon_actions, -1)
 
         # Get VLM output (use the first one since they're all the same observation)
         vlm_output_single = jnp.mean(vlm_output[0][0:1, :512, :], axis=1)  # Take only first, shape (1, vlm_dim)
         state = processed_obs['state'][0, :8][None, :8]
         vlm_output_final = jnp.concatenate([vlm_output_single, state], axis=1)  # (1, vlm_dim + state_dim)
 
-        # --- Step 1: Rank sampled actions using subsampled Q networks ---
+        # --- Step 1: Rank sampled actions using subsampled Q networks (60-dim) ---
         subsample_rng, rng = jax.random.split(rng)
         subsampled_critic_params = subsample_ensemble(
             subsample_rng, self.critic.params, self.num_min_qs, self.num_qs
@@ -1526,12 +1550,12 @@ class PiResidualTD3GRPO(Agent):
         # Expand vlm_output to match batch size
         vlm_output_repeated = jnp.repeat(vlm_output_final, bon_actions, axis=0)  # (bon_actions, vlm_dim)
 
-        # Compute Q values using subsampled critics
+        # Compute Q values using subsampled critics (60-dim actions)
         qs = compute_q_all(
             self.target_critic.apply_fn,
             subsampled_critic_params,
             vlm_output_repeated,
-            sampled_actions_flat
+            sampled_actions_no_grip
         )  # (num_min_qs, bon_actions)
 
         # Take minimum across the Q networks for each action
@@ -1539,17 +1563,18 @@ class PiResidualTD3GRPO(Agent):
 
         # Select the action with the highest Q value
         best_action_idx = jnp.argmax(q_min_values)
-        best_action_flat = sampled_actions_flat[best_action_idx]
+        best_action_no_grip = sampled_actions_no_grip[best_action_idx]  # (60,)
+        best_gripper = sampled_gripper[best_action_idx]  # (10, 1)
         best_q_value_before = q_min_values[best_action_idx]
 
-        # --- Step 2: Gradient ascend only the best action ---
+        # --- Step 2: Gradient ascend only the best action (60-dim, no gripper) ---
         zero_grad_gripper_scalar = jnp.float32(zero_grad_gripper)
         if optimizer_type == "gradient_ascent":
             final_action_flat = _gradient_ascent_actions(
                 self.critic.apply_fn,
                 self.critic.params,
                 vlm_output_final,
-                best_action_flat,
+                best_action_no_grip,
                 eta_ascent,
                 num_ascent_steps,
                 zero_grad_gripper_scalar
@@ -1559,7 +1584,7 @@ class PiResidualTD3GRPO(Agent):
                 self.critic.apply_fn,
                 self.critic.params,
                 vlm_output_final,
-                best_action_flat,
+                best_action_no_grip,
                 eta_ascent,
                 num_ascent_steps,
                 rmsprop_beta,
@@ -1570,7 +1595,7 @@ class PiResidualTD3GRPO(Agent):
                 self.critic.apply_fn,
                 self.critic.params,
                 vlm_output_final,
-                best_action_flat,
+                best_action_no_grip,
                 eta_ascent,
                 num_ascent_steps,
                 adam_beta1,
@@ -1580,8 +1605,9 @@ class PiResidualTD3GRPO(Agent):
         else:
             raise ValueError(f"Unknown optimizer_type: {optimizer_type}. Must be one of: gradient_ascent, rmsprop, adam")
 
-        # Reshape back to (action_horizon, action_dim)
-        final_action = final_action_flat.reshape(self.action_horizon, self.action_dim // self.action_horizon)
+        # Restore gripper from base action
+        final_no_grip = final_action_flat.reshape(self.action_horizon, -1)  # (10, 6)
+        final_action = jnp.concatenate([final_no_grip, best_gripper], axis=-1)  # (10, 7)
 
         # Unnormalize actions before returning
         final_action = self.actor.unnorm_actions(final_action)
@@ -1617,10 +1643,11 @@ class PiResidualTD3GRPO(Agent):
         if vlm_output.ndim == 1:
             vlm_output = vlm_output.reshape(1, -1)
         
-        # Normalize base actions
-        base_actions = base_actions.reshape(-1, self.action_horizon, self.action_dim // self.action_horizon)
+        # Normalize base actions and strip gripper
+        per_step = self.action_dim // self.action_horizon  # 7
+        base_actions = base_actions.reshape(-1, self.action_horizon, per_step)
         base_actions_norm = self.actor.norm_actions(base_actions)
-        base_actions_norm = base_actions_norm.reshape(-1, self.action_dim)
+        base_actions_norm = base_actions_norm[:, :, :-1].reshape(-1, self.critic_action_dim)
         
         # Compute edit actions
         edit_actions = self.edit_actor.apply_fn(
@@ -1648,7 +1675,9 @@ class PiResidualTD3GRPO(Agent):
         base_actions = batch['diffusion_actions']
         base_actions = self.actor.norm_actions(base_actions)
         vlm_output = batch['vlm_output']
-        base_actions = base_actions.reshape(-1, self.action_dim)
+        # Strip gripper: (B, 10, 7) -> (B, 10, 6) -> (B, 60)
+        per_step = self.action_dim // self.action_horizon
+        base_actions = base_actions.reshape(-1, self.action_horizon, per_step)[:, :, :-1].reshape(-1, self.critic_action_dim)
 
         dropout_rng, rng = jax.random.split(rng)
         rng1, rng = jax.random.split(rng)
@@ -1698,8 +1727,10 @@ class PiResidualTD3GRPO(Agent):
         next_base_actions = self.actor.norm_actions(next_base_actions)
         next_vlm_output = batch['next_vlm_output']
         current_vlm_output = batch['vlm_output']
-        actions = batch["actions"].reshape(-1, self.action_dim)
-        next_base_actions = next_base_actions.reshape(-1, self.action_dim)
+        # Strip gripper from actions for critic: (B, 10, 7) -> (B, 10, 6) -> (B, 60)
+        per_step = self.action_dim // self.action_horizon
+        actions = batch["actions"].reshape(-1, self.action_horizon, per_step)[:, :, :-1].reshape(-1, self.critic_action_dim)
+        next_base_actions = next_base_actions.reshape(-1, self.action_horizon, per_step)[:, :, :-1].reshape(-1, self.critic_action_dim)
         subsample_rng, rng = jax.random.split(rng)
         target_params = subsample_ensemble(
             subsample_rng, self.target_critic.params, self.num_min_qs, self.num_qs
@@ -1711,10 +1742,11 @@ class PiResidualTD3GRPO(Agent):
         if update_calql:
             # Cal-QL warmup: use action_samples as OOD actions with constant lower bound
             action_samples = batch["action_samples"]  # (batch_size, num_samples, action_horizon, action_dim)
-            # Normalize and reshape action samples
+            # Normalize, strip gripper, and reshape action samples
             action_samples = self.actor.norm_actions(action_samples)
-            action_samples = action_samples.reshape(action_samples.shape[0], action_samples.shape[1], -1)  # (batch_size, num_samples, action_dim)
-            
+            action_samples = action_samples[:, :, :, :-1]  # Strip gripper: (B, N, H, 6)
+            action_samples = action_samples.reshape(action_samples.shape[0], action_samples.shape[1], -1)  # (B, N, 60)
+
             critic, target_critic_params, grads, info = _calql_loss_and_grad(
                 self.critic.params,
                 self.target_critic.params,
@@ -1725,7 +1757,7 @@ class PiResidualTD3GRPO(Agent):
                 self.critic.apply_fn,
                 target_params,
                 next_vlm_output,
-                batch["next_actions"].reshape(-1, self.action_dim),
+                batch["next_actions"].reshape(-1, self.action_horizon, per_step)[:, :, :-1].reshape(-1, self.critic_action_dim),
                 self.target_critic.apply_fn,
                 batch["terminals"],
                 batch["rewards"],
@@ -1750,7 +1782,7 @@ class PiResidualTD3GRPO(Agent):
                 self.critic.apply_fn,
                 target_params,
                 next_vlm_output,
-                batch["next_actions"].reshape(-1, self.action_dim),
+                batch["next_actions"].reshape(-1, self.action_horizon, per_step)[:, :, :-1].reshape(-1, self.critic_action_dim),
                 self.target_critic.apply_fn,
                 batch["terminals"],
                 batch["rewards"],
