@@ -1,84 +1,41 @@
-"""Script for offline to online RL."""
+"""Filtered behavior cloning training script.
+
+Loads an offline dataset (with optional filtering for successful trajectories
+and class-balanced sampling) and trains the base pi0 actor via supervised BC.
+No warmstart, no online data collection, no critic/edit-actor updates.
+
+Based on train_pi_residual.py template.
+"""
 
 # Try increasing the number of open files limit
 import resource
 soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
 resource.setrlimit(resource.RLIMIT_NOFILE, (min(65535, hard), hard))
 
-
 import os
-import time
-from typing import Any, Callable, Dict, List, Optional, Union
-
-import cv2
-import flax
-import gym
-import jax
-# jax.config.update("jax_log_compiles", True)
-# jax.config.update("jax_explain_cache_misses", True)
-# jax.config.update("jax_traceback_filtering", "off")  # more context in logs
-
-import jax.numpy as jnp
-import numpy as np
-import seaborn as sns
-import tensorflow as tf
-import io
-from PIL import Image
-import pickle
 import gc
+
+import jax
+import numpy as np
+import tensorflow as tf
 
 import wandb
 from absl import app, flags, logging
-from matplotlib import pyplot as plt
 from ml_collections import config_flags
-from tqdm import tqdm
-import functools
 
-from jaxrl_m.agents import agents
-from jaxrl_m.agents.continuous.action_optimization import (
-    LocalOptimizationState,
-    action_optimization_sample_actions,
-    add_base_policy_actions_to_batch,
-    local_optimization_steps as take_local_optimization_steps,
-)
-from jaxrl_m.agents.continuous.auto_regressive_transformer import (
-    AutoRegressiveTransformerAgent,
-)
-from jaxrl_m.agents.continuous.base_policy import BasePolicy, BasePolicyTypes
-from jaxrl_m.agents.continuous.ddpm_bc import DDPMBCAgent
-from jaxrl_m.agents.continuous.openvla import OpenVLAAgent
-from jaxrl_m.agents.continuous.pi_0 import PiPolicy
-from jaxrl_m.common.common import JaxRLTrainState
-from jaxrl_m.common.evaluation import evaluate_with_trajectories_vectorized, supply_rng, evaluate_with_trajectories_libero, save_rollout_gif
-from jaxrl_m.common.traj import TrajSampler, calc_return_to_go
-from jaxrl_m.common.typing import Batch, Data
 from jaxrl_m.common.wandb import WandBLogger
-from jaxrl_m.data.bridge_dataset import (
-    BridgeDataset,
-    get_task_to_initial_eep,
-    glob_to_path_list,
-)
-from jaxrl_m.data.img_replay_buffer_pi_bc import ImageReplayBufferPi, save_trajectory_as_tfrecord
-from jaxrl_m.data.replay_buffer import ReplayBuffer
-# D4RL is not needed for Libero EXPO; keep optional to avoid Mujoco dependency errors.
-# from jaxrl_m.envs.d4rl import TruncationWrapper, get_d4rl_dataset_with_mc_calculation
+from jaxrl_m.data.bridge_dataset import glob_to_path_list
+from jaxrl_m.data.img_replay_buffer_pi_bc import ImageReplayBufferPi
 from jaxrl_m.utils.timer_utils import Timer
-from jaxrl_m.utils.train_utils import concatenate_batches, load_recorded_video
-from jaxrl_m.vision import encoders
-from jaxrl_m.utils.train_utils import preprocess_action, repack_action
-from jaxrl_m.agents.continuous.expo_pi_cache import ExpoPiLearnerCache, compute_q, compute_q_all
-from jaxrl_m.utils.expo_utils import calc_mc_return_fn
-from jaxrl_m.envs.libero import StepTimeout, time_limit, STEP_TIME_LIMIT
+from jaxrl_m.agents.continuous.pi_vlm_cached import create_agent
 
 try:
     from jax_smi import initialise_tracking  # type: ignore
-
     initialise_tracking()
 except ImportError:
     pass
 
 from openpi.training.config import get_config
-
 
 print("\n\n\n IMPORTS DONE \n\n\n")
 
@@ -88,6 +45,7 @@ flags.DEFINE_string("environment_name", "", "Environment name.")
 flags.DEFINE_string("wandb_project_name", "PI-0.5-finetuning", "WandB project name.") #"PA-RL""debug"
 flags.DEFINE_string("wandb_experiment_name", "", "WandB experiment name.")
 flags.DEFINE_string("wandb_group", "", "WandB group.")
+flags.DEFINE_string("agent_name", "pi_residual_td3_grpo", "Agent name.")
 config_flags.DEFINE_config_file(
     "config",
     None,
@@ -101,13 +59,6 @@ config_flags.DEFINE_config_file(
     lock_config=False,
 )
 flags.DEFINE_integer("seed", 0, "Random seed.")
-flags.DEFINE_integer("num_offline_epochs", 100, "Number of epochs for pre-training.")
-flags.DEFINE_integer(
-    "num_online_epochs", 500, "Number of epochs for online fine-tuning."
-)
-flags.DEFINE_integer(
-    "num_train_steps_per_offline_epoch", 50, "Number of training steps per epoch."
-)
 flags.DEFINE_float("reward_scale", 1.0, "Reward scale.")
 flags.DEFINE_float("reward_bias", 0.0, "Reward bias.")
 flags.DEFINE_float("clip_action", 200.0, "Clip action.")
@@ -115,14 +66,6 @@ flags.DEFINE_integer("num_parallel_envs", 1, "Number of parallel environments.")
 flags.DEFINE_bool("debug", False, "Debug config")
 flags.DEFINE_string("resume_path", None, "Resume training from checkpoint.")
 flags.DEFINE_integer("max_episode_steps", 1000, "Maximum episode steps.")
-flags.DEFINE_string(
-    "replay_buffer_path", "", "Path to replay buffer to load (Optional)."
-)
-flags.DEFINE_string(
-    "train_on_separate_computer_mode",
-    "single_computer",  # "env_steps_only", "agent_training_only"
-    "Training on separate computer mode.",
-)
 
 # Q-diffusion pre-processing flags
 flags.DEFINE_integer(
@@ -148,7 +91,7 @@ flags.DEFINE_string(
 )
 flags.DEFINE_string(
     "task_name",
-    "put both moka pots on the stove", 
+    "put both moka pots on the stove",
     "Name of fixed task"
 )
 flags.DEFINE_bool(
@@ -177,7 +120,7 @@ flags.DEFINE_integer(
     "Frequency of online trajectory collection.",
 )
 flags.DEFINE_integer(
-    "critic_warmup_steps",
+    "warmup_steps",
     100, # Warmup critic for 100 update steps #
     "Number of steps to warmup critic.",
 )
@@ -192,9 +135,9 @@ flags.DEFINE_bool(
     "Use Wrist view camera."
 )
 flags.DEFINE_string(
-    "critic_params_path",
+    "params_path",
     None,
-    "Path to the critic parameters to load.",
+    "Path to the parameters to load.",
 )
 flags.DEFINE_bool(
     "filter_successful_trajectories",
@@ -203,284 +146,199 @@ flags.DEFINE_bool(
 )
 flags.DEFINE_float(
     "scale_success_alpha",
-    0.05,
+    -1,
     "Alpha for the reward scaling factor.",
 )
+flags.DEFINE_float(
+    "exploration_epsilon",
+    0.05,
+    "Exploration epsilon.",
+)
 flags.DEFINE_integer(
-    "num_udpates_per_step",
-    300,
-    "Number of updates to perform per step.",
+    "num_trajectories_to_collect",
+    10,
+    "Number of trajectories to collect.",
+)
+flags.DEFINE_integer(
+    "num_train_steps",
+    1000000,
+    "Number of training steps.",
+)
+flags.DEFINE_float(
+    "intermediate_reward_mul_factor",
+    1.0,
+    "Multiplier for the intermediate reward.",
+)
+flags.DEFINE_bool(
+    "balance_offline_training_data",
+    False,
+    "Balance offline training data by downsampling the more frequent trajectories among success/failed ones.",
+)
+flags.DEFINE_bool(
+    "on_policy",
+    False,
+    "Flag for whether we want to run on policy updates"
+)
+flags.DEFINE_float(
+    "critic_success_wt",
+    1.0,
+    "Weight to multiply successful trajectories in a batch to account for imbalanced data during critic training",
+)
+flags.DEFINE_float(
+    "bc_loss_coef",
+    1000.0,
+    "Weight to multiply successful trajectories in a batch with bc loss",
+)
+flags.DEFINE_bool(
+    "load_action_samples",
+    False,
+    "Flag for whether we want to load action samples for each state"
+)
+flags.DEFINE_string(
+    "critic_warmup_type",
+    "sarsa",
+    "Type of critic warmup: 'sarsa' for SARSA loss or 'calql' for Cal-QL loss with MC return lower bound."
+)
+flags.DEFINE_string(
+    "online_critic_update_type",
+    None,
+    "Critic update type during online (non-warmup) training: 'sarsa', 'calql', or None for default TD3 critic."
+)
+flags.DEFINE_float(
+    "calql_lower_bound",
+    -1000.0,
+    "Constant lower bound for Q-values in Cal-QL warmup. Used instead of MC returns."
+)
+flags.DEFINE_float(
+    "cql_alpha",
+    5.0,
+    "CQL regularization strength for Cal-QL warmup."
+)
+flags.DEFINE_float(
+    "cql_temp",
+    1.0,
+    "Temperature for logsumexp in CQL/Cal-QL loss."
+)
+flags.DEFINE_integer(
+    "calql_random_actions",
+    0,
+    "Number of random actions in [-1, 1] to sample for Cal-QL OOD pessimism loss."
+)
+flags.DEFINE_float(
+    "grpo_beta",
+    1.0,
+    "Temperature for advantage weighting in GRPO actor loss."
+)
+flags.DEFINE_float(
+    "grpo_weight_threshold",
+    0.0,
+    "Threshold for zeroing out small weights in GRPO loss (after exponentiation)."
+)
+flags.DEFINE_integer(
+    "num_diffusion_samples",
+    4,
+    "Number of action samples from base policy for GRPO training."
+)
+flags.DEFINE_integer(
+    "edit_actor_utd_ratio",
+    1,
+    "Update-to-data ratio for the edit actor."
+)
+flags.DEFINE_bool(
+    "ws_critic",
+    False,
+    "Whether to warmstart the critic during warmup phase."
+)
+flags.DEFINE_bool(
+    "ws_edit_actor",
+    False,
+    "Whether to warmstart the edit actor during warmup phase."
+)
+flags.DEFINE_string(
+    "pi_config_name",
+    None,
+    "Name of the PI config to use (required)."
+)
+flags.DEFINE_integer(
+    "num_balanced_trajectories",
+    -1,
+    "Max number of successful and failed trajectories to keep after balancing. -1 means no limit."
+)
+flags.DEFINE_bool(
+    "do_ascent",
+    False,
+    "Use gradient ascent on base actions via sample_base_actions_gradq.",
+)
+flags.DEFINE_float(
+    "eta_ascent",
+    0.01,
+    "Step size for gradient ascent.",
+)
+flags.DEFINE_integer(
+    "num_ascent_steps",
+    50,
+    "Number of gradient ascent steps.",
+)
+flags.DEFINE_bool(
+    "critic_balance_classes",
+    False,
+    "Balance successful and unsuccessful trajectories in critic loss using success ratio weighting.",
 )
 
-### Try subprocenv ###
-import multiprocessing as mp
-from multiprocessing.connection import wait
 
-def env_worker(conn, make_env_fn):
-    # Import robosuite / libero INSIDE the subprocess
-    env = make_env_fn()
-    try:
-        while True:
-            msg = conn.recv()
-            cmd = msg[0]
-            if cmd == "reset":
-                conn.send(env.reset())
-            elif cmd == "get_attr":
-                conn.send(getattr(env, "max_steps"))
-            elif cmd == "step":
-                action = msg[1]
-                conn.send(env.step(action))
-            elif cmd == "close":
-                try:
-                    env.close()
-                except Exception:
-                    pass
-                conn.send(None)
-                break
-            else:
-                raise RuntimeError(f"Unknown cmd: {cmd}")
-    finally:
-        try:
-            env.close()
-        except Exception:
-            pass
+def balance_offline_training_data(offline_dset_paths):
+    """Inspect tf records, check if trajectory is successful or not and subsample
+    the more frequent class so both classes have equal representation."""
+    success_trajectories = []
+    failed_trajectories = []
 
-class SubprocEnv:
-    def __init__(self, make_env_fn):
-        self.make_env_fn = make_env_fn
-        self._ctx = mp.get_context("spawn")
-        self._start()
-
-    def _start(self):
-        self.parent_conn, child_conn = self._ctx.Pipe()
-        self.proc = self._ctx.Process(target=env_worker, args=(child_conn, self.make_env_fn), daemon=True)
-        self.proc.start()
-
-    def _restart(self):
-        self.kill()
-        self._start()
-
-    def kill(self):
-        try:
-            if self.proc.is_alive():
-                self.proc.terminate()
-                self.proc.join(timeout=5)
-        finally:
-            try:
-                self.parent_conn.close()
-            except Exception:
-                pass
-
-    def call(self, cmd, *args, timeout_s=300):
-        self.parent_conn.send((cmd, *args))
-        ready = wait([self.parent_conn], timeout=timeout_s)
-        if not ready:
-            # hung in native code -> hard reset
-            self._restart()
-            raise TimeoutError(f"{cmd} timed out after {timeout_s}s")
-        return self.parent_conn.recv()
-
-    def reset(self, timeout_s=300):
-        return self.call("reset", timeout_s=timeout_s)
-
-    def step(self, action, timeout_s=300):
-        return self.call("step", action, timeout_s=timeout_s)
-
-    def close(self):
-        try:
-            self.call("close", timeout_s=5)
-        except Exception:
-            pass
-        self.kill()
-    
-    def get_attr(self, name: str):
-        return self.call("get_attr", name)
-
-    @property
-    def max_steps(self):
-        # assumes underlying env exposes `max_steps`
-        return self.get_attr("max_steps")
-
-def make_env(task_name):
-    from jaxrl_m.envs.libero import get_libero_env, get_libero_config
-    cfg = get_libero_config()
-    return get_libero_env(cfg=cfg, task_name=task_name, is_pi=True)
-########################################################################################################################
-
-# 2: 07 2 13
-BASE_POLICY_TYPE_TO_CLASS = {
-    BasePolicyTypes.OpenVLA: OpenVLAAgent,
-    BasePolicyTypes.DDPM: DDPMBCAgent,
-    BasePolicyTypes.AutoRegressiveTransformer: AutoRegressiveTransformerAgent,
-    BasePolicyTypes.Pi0: PiPolicy
-}
-
-devices = jax.local_devices()
-# def shard_batch(batch, sharding):
-#     return jax.tree_map(lambda x: jax.device_put(x, sharding), batch)
-def shard_batch(batch, base_sharding):
-    def shard_array(x):
-        # Build a sharding spec matching the array's rank
-        sharding_shape = (len(devices),) + (1,) * (x.ndim - 1)
-        sharding = base_sharding.reshape(sharding_shape)
-        return jax.device_put(x, sharding)
-
-    return jax.tree_map(shard_array, batch)
-
-def sanitize_obs(obs):
-    out = {}
-    for k, v in obs.items():
-        if isinstance(v, (np.ndarray, jnp.ndarray)):
-            out[k] = v
-        # skip strings, lists, python objects
-    return out
-
-
-def get_policy_fn(
-    agent: ExpoPiLearnerCache,
-    rng: jax.random.PRNGKey,
-    timer: Timer | None = None,
-    debug_mode: bool = False,
-    deterministic_actions: bool = False,
-) -> Callable[[Data], np.ndarray]:
-    def policy_fn(observations: Data, *args, **kwargs) -> np.ndarray:
-        if not isinstance(observations, dict):
-            observations = {"state": observations}
-        if "state" in observations:
-            obs_ndim = observations["state"].ndim
-        else:
-            assert "proprio" in observations
-            obs_ndim = observations["proprio"].ndim
-        
-        # breakpoint()
-        out_dict = jax.device_get(
-            agent.sample_base_actions(
-                observations, *args, **kwargs, timer=timer, output_action_chunk=True, debug_mode=debug_mode,
-            )
-        )
-        # breakpoint()
-        # print(timer.get_total_times(reset=False))
-        
-        # breakpoint()
-
-        return out_dict
-
-    policy_fn = supply_rng(policy_fn, rng=rng)
-
-    return policy_fn
-
-def get_vlm_output_fn(
-    agent: ExpoPiLearnerCache,
-    rng: jax.random.PRNGKey,
-    timer: Timer | None = None,
-    debug_mode: bool = False,
-) -> Callable[[Data], np.ndarray]:
-    def policy_fn(observations: Data, *args, **kwargs) -> np.ndarray:
-        if not isinstance(observations, dict):
-            observations = {"state": observations}
-        if "state" in observations:
-            obs_ndim = observations["state"].ndim
-        else:
-            assert "proprio" in observations
-            obs_ndim = observations["proprio"].ndim
-        
-        # breakpoint()
-        vlm_output = jax.device_get(
-            agent.get_vlm_output(
-                observations, *args, **kwargs, timer=timer, output_action_chunk=True, debug_mode=debug_mode
-            )
-        )
-        # breakpoint()
-
-        return vlm_output
-
-    policy_fn = supply_rng(policy_fn, rng=rng)
-
-    return policy_fn
-
-
-def set_batch_masks(
-    batch: Batch, environment_name: str, reward_bias: float, reward_scale: float
-) -> Batch:
-    """Environment-specific mask setting."""
-    if "maze" in environment_name or environment_name == "real_robot" or "libero" in environment_name:
-        # Assumes sparse rewards, mask should be 0 only at success
-        success_reward = 1.0 * reward_scale + reward_bias
-    elif "kitchen" in environment_name or "calvin" in environment_name:
-        # Assumes 0-4 rewards, mask should be 0 only at 4
-        success_reward = 4.0 * reward_scale + reward_bias
-    else:
-        raise NotImplementedError
-    batch["masks"] = (batch["rewards"] != success_reward).astype(np.float32)
-    return batch
-
-
-@jax.jit
-def resize_images_to_100x100(images):
-    batch_size = images.shape[0]
-    return jax.image.resize(images, (batch_size, 100, 100, 3), method="cubic")
-
-def plot_q_values_over_trajectory_time_step(
-    trajectories: List[Dict[str, List[Union[np.ndarray, Dict[str, np.ndarray]]]]],
-    critic_agent,
-    sharding: jax.sharding.Sharding,
-):
-    trajectories = [trajectories[0]]  # only plot the first trajectory
-    if isinstance(trajectories[0]["observation"][0], dict):
-        trajectories[0]['observation'][0] = sanitize_obs(trajectories[0]['observation'][0])
-        observations = [
-            {
-                key: np.array([obs[key] for obs in trajectory["observation"]])
-                for key in trajectory["observation"][0].keys()
+    for path in offline_dset_paths:
+        dataset = tf.data.TFRecordDataset(path)
+        for raw_record in dataset:
+            example = tf.train.Example()
+            example.ParseFromString(raw_record.numpy())
+            found_keys = list(example.features.feature.keys())
+            features_dict = {
+                k: tf.io.FixedLenFeature([], tf.string)
+                for k in found_keys
             }
-            for trajectory in trajectories
-        ]
-    else:
-        observations = [
-            shard_batch(jnp.array(trajectory["observation"]), sharding)
-            for trajectory in trajectories
-        ]
+            parsed_features = tf.io.parse_single_example(raw_record, features_dict)
+            raw_bytes = parsed_features["terminals"]
+            dtype = tf.float32
+            tensor = tf.io.parse_tensor(raw_bytes, out_type=dtype)
 
-    actions = [
-        shard_batch(jnp.array(trajectory["action"]), sharding)
-        for trajectory in trajectories
-    ]
+            if tensor.numpy().sum() > 0:
+                success_trajectories.append(path)
+            else:
+                failed_trajectories.append(path)
 
-    q_values = []
-    for trajectory_index in range(len(trajectories)):
-        q_values.append(
-            critic_agent.forward_critic(
-                observations[trajectory_index],
-                actions[trajectory_index],
-                jax.random.PRNGKey(0),
-            ).mean(axis=0)
-        )
-    q_values = jnp.stack(q_values, axis=0).mean(axis=0)
-    assert q_values.shape == (len(trajectories[0]["observation"]),)
+    # Downsample the more frequent trajectories among success/failed ones.
+    if len(success_trajectories) > len(failed_trajectories):
+        success_trajectories = list(np.random.choice(
+            success_trajectories, size=len(failed_trajectories), replace=False))
+    elif len(success_trajectories) < len(failed_trajectories):
+        failed_trajectories = list(np.random.choice(
+            failed_trajectories, size=len(success_trajectories), replace=False))
 
-    # Plot the q-values over the trajectory time step using seaborn, make it look nice
-    sns.set(style="whitegrid")
-    plt.figure(figsize=(10, 6))
-    plot = sns.lineplot(
-        x=np.arange(len(q_values)),
-        y=q_values,
-        color="blue",
-        linewidth=2.5,
-    )
-    plot.set_title("Q-values over trajectory time step")
-    plot.set_xlabel("Time step")
-    plot.set_ylabel("Q-value")
+    # Further limit to num_balanced_trajectories if set
+    if FLAGS.num_balanced_trajectories > 0:
+        if len(success_trajectories) > FLAGS.num_balanced_trajectories:
+            success_trajectories = list(np.random.choice(
+                success_trajectories, size=FLAGS.num_balanced_trajectories, replace=False))
+        if len(failed_trajectories) > FLAGS.num_balanced_trajectories:
+            failed_trajectories = list(np.random.choice(
+                failed_trajectories, size=FLAGS.num_balanced_trajectories, replace=False))
 
-    return plot
+    print(f"Balanced offline training data: Success: {len(success_trajectories)}, "
+          f"Failed: {len(failed_trajectories)}")
+    print("\n\n\n\n\n")
+
+    return success_trajectories + failed_trajectories
 
 
 def train_agent(_):
-    # breakpoint()
-    
-    if FLAGS.debug:
-        breakpoint()
-        # Disabling jit might be useful for debugging
-        # jax.config.update("jax_disable_jit", True)
+    # Validate required flags
+    assert FLAGS.pi_config_name is not None, "--pi_config_name must be provided"
 
     # prevent tensorflow from using GPUs
     tf.config.set_visible_devices([], "GPU")
@@ -488,18 +346,18 @@ def train_agent(_):
     os.environ["WANDB__SERVICE_WAIT"] = "300"
     os.environ["WANDB_INIT_TIMEOUT"] = "120"
     wandb.require("core")
+
     devices = jax.local_devices()
     num_devices = len(devices)
     assert FLAGS.config.batch_size % num_devices == 0
 
-    # Get PI config #
-    pi_config = get_config("pi05_libero_custom_low_mem")
-    # breakpoint()
-    pi_config.fsdp_devices = 1 # Try out with model parallel
+    # Get PI config
+    pi_config = get_config(FLAGS.pi_config_name)
+    pi_config.fsdp_devices = 1
     pi_config.exp_name = FLAGS.wandb_experiment_name
     pi_config.overwrite = True
 
-    # LOG: WANDB setup #
+    # WandB setup
     if FLAGS.wandb_project_name is not None:
         wandb_config = WandBLogger.get_default_config()
         wandb_config.update(
@@ -514,6 +372,7 @@ def train_agent(_):
             wandb_config=wandb_config,
             variant=FLAGS.config.to_dict(),
             debug=FLAGS.debug,
+            allow_val_change=True,
         )
         save_dir = tf.io.gfile.join(
             (
@@ -521,8 +380,6 @@ def train_agent(_):
                 if "gs://" not in FLAGS.config.save_dir
                 else FLAGS.config.save_dir
             ),
-            # wandb_logger.config.project,
-            # wandb_logger.config.exp_descriptor,
             f"seed_{FLAGS.seed}",
         )
     else:
@@ -532,533 +389,76 @@ def train_agent(_):
         )
         FLAGS.config.wandb_enabled = False
 
-    # breakpoint()
+    ####### Dataset setup (using img_replay_buffer_pi_bc.py) ###########
+    assert len(FLAGS.config.libero_tfrecord_regexp) > 0, \
+        "libero_tfrecord_regexp must be provided in config"
 
-    # Create environment and dataset
-    action_space = None
-    offline_dataset_size = None
+    paths = glob_to_path_list(FLAGS.config.libero_tfrecord_regexp)
+    if FLAGS.balance_offline_training_data:
+        paths = balance_offline_training_data(paths)
 
-    # breakpoint()
-    if FLAGS.scale_success_alpha > 0:
-        alpha = FLAGS.scale_success_alpha
-        scale_success_reward = True
-    else:
-        alpha = 1.0
-        scale_success_reward = False
-    
-    ####### Dataset and evironment setup ###########
-    if FLAGS.environment_name=="libero":
-        assert FLAGS.config.image_observations
-        from jaxrl_m.envs.libero import (
-            get_libero_config,
-            get_libero_env,
-            get_libero_tfrecord_dataset,
-        )
-
-        train_env = SubprocEnv(make_env_fn=functools.partial(make_env, task_name=FLAGS.task_name))
-        # if FLAGS.num_parallel_envs > 1:
-        #     num_parallel_envs = FLAGS.num_parallel_envs
-        #     task_name = FLAGS.task_name
-        #     eval_env = gym.vector.AsyncVectorEnv(
-        #         [
-        #             lambda: get_libero_env(
-        #                 cfg=libero_config, task_id = ind*num_parallel_envs, task_name=task_name, is_pi=True,
-        #             )
-        #             for ind in range(num_parallel_envs)
-        #         ],
-        #         context="forkserver", shared_memory=False, # the default "fork" is incompatible with JAX
-        #     )
-        # else:
-        #     eval_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
-        # eval_env = train_env
-        eval_env = SubprocEnv(make_env_fn=functools.partial(make_env, task_name=FLAGS.task_name))
-
-        # breakpoint()
-    else:
-       raise NotImplementedError
-
-    # if action_space is None:
-    #     action_space = train_env.action_space
-    # assert action_space.high.ndim == 1, action_space.shape
-
-    # Create replay buffer
-    # LOG: Libero comes under this for now #
-    if FLAGS.config.image_observations:
-        # tf.io.gfile.makedirs(tf.io.gfile.join(save_dir, "image_replay_buffer"))
-        # assert not tf.io.gfile.exists(
-        #     tf.io.gfile.join(save_dir, "image_replay_buffer", "episode_0.tfrecord")
-        # ), f"Image replay buffer already exists! ({tf.io.gfile.join(save_dir, 'image_replay_buffer', 'episode_0.tfrecord')})"
-        image_replay_buffer = None  # Will be created when switching to online training.
-        state_replay_buffer = None
-
-    rng = jax.random.PRNGKey(FLAGS.seed)
-    # we shard the leading dimension (batch dimension) accross all devices evenly
-    # sharding = jax.sharding.PositionalSharding(devices)
-    sharding = jax.sharding.PositionalSharding(devices)
-    # Create data iterators
-    # LOG: Offline dataset #
-    # Online dataset/buffer #
-    # Online iterators will be set when switching to online training.
-    online_train_iterator = None
-    #########################################################
-    # Dataset created now in `dataset` and environment created now in `train_env` #
-    # breakpoint()
-
-    ### Sharding Data ###
-    # example_batch = next(offline_train_iterator)
-    # example_batch = shard_batch(example_batch, sharding) # DO NOT shard here, will be handled in the expo agent forward passes
-    
-    ### Create trajectory sampler ###
-    data_collection_trajectory_sampler = TrajSampler(
-        train_env,
-        clip_action=FLAGS.clip_action,
-        reward_scale=FLAGS.reward_scale,
-        reward_bias=FLAGS.reward_bias,
-        max_traj_length=FLAGS.config.get("max_episode_steps", 1000),
-        action_horizon=pi_config.model.action_horizon,
-        # action_horizon=1,
+    dataset = ImageReplayBufferPi(
+        data_paths=paths,
+        seed=FLAGS.seed,
+        train=True,
+        task_name=FLAGS.task_name,
+        use_wrist_view=FLAGS.use_wrist_view,
+        use_language=FLAGS.use_lang,
+        config=pi_config,
+        filter_successful_trajectories=FLAGS.filter_successful_trajectories,
     )
+    train_iterator = dataset.iterator(batch_size=FLAGS.config.batch_size)
 
-    ### Create EXPO agent #
-    # LOG: sharded batch is used to calibrate batch size in `create` method of `ExpoPiLearner` class #
+    ####### Agent setup ###########
+    rng = jax.random.PRNGKey(FLAGS.seed)
+    np.random.seed(FLAGS.seed)
     rng, construct_rng = jax.random.split(rng)
-    
-    agent = ExpoPiLearnerCache.create(
+
+    # Build agent kwargs from config and flags
+    agent_kwargs = dict(FLAGS.config.agent_kwargs)
+    for key in ['config', 'seed', 'batch_size', 'rng', 'params_path']:
+        agent_kwargs.pop(key, None)
+
+    agent = create_agent(
+        agent_name=FLAGS.agent_name,
         config=pi_config,
         seed=FLAGS.seed,
-        # observations=example_batch,
         batch_size=FLAGS.config.batch_size,
         rng=construct_rng,
-        N=FLAGS.num_actions_to_sample,
-        n_edit_samples=FLAGS.num_edit_samples,
+        params_path=FLAGS.params_path,
+        **agent_kwargs,
     )
-    # breakpoint()
 
     timer = Timer()
 
-    ### Evaluation Setup ###
-    env_data_collection_policy_fn = None  # Will get set later
-    rng, eval_policy_fn_key = jax.random.split(rng)
-    eval_policy_fn = get_policy_fn(
-        agent=agent,
-        rng=eval_policy_fn_key,
-        timer=timer,
-        deterministic_actions=True,
-    )
-    #########################################################
+    ####### Training loop ###########
+    for i in range(FLAGS.num_train_steps):
+        timer.tick("total_step_time")
 
-    
+        timer.tick("sample_batch_time")
+        batch = next(train_iterator)
+        timer.tock("sample_batch_time")
 
+        timer.tick("update_actor_time")
+        agent, info = agent.update_actor(batch, timer=timer)
+        timer.tock("update_actor_time")
 
-    # TODO: Remove hardcode and init with flags appropriately #
-    num_trajectories_to_collect = 10
-    online_env_steps = 0
-    online_trajectories_added = 0
-    env_recreation_frequency = 1
-    env_recreation_count = 0
-    save_interval = 100
+        timer.tock("total_step_time")
 
-    # breakpoint()
+        # Log training metrics
+        if wandb_logger is not None:
+            wandb_logger.log(info, step=i)
 
-    ### EXPO agent training ###
-    ### Online training ###
-    for i in range(FLAGS.num_offline_epochs + FLAGS.num_online_epochs + 1):
-        online_env_steps_this_epoch = 0
-
-        if i >= FLAGS.num_offline_epochs and FLAGS.num_online_epochs > 0:
-            timer.tick("online_iter_total")
-            # logging.info("Switching to online training...")
-
-            ### Collect Trajectories ###
-            if i % FLAGS.online_trajectory_collection_frequency == 0:
-                env_recreation_count += 1
-                print("Collecting trajectories...")
-                data_collection_rng_key, rng = jax.random.split(rng)
-                
-                env_data_collection_policy_fn = get_policy_fn(
-                    agent=agent,
-                    rng=data_collection_rng_key,
-                    timer=timer,
-                    # debug_mode=debug_mode,
-                    debug_mode=False,
-                )
-                vlm_output_fn = get_vlm_output_fn(
-                    agent=agent,
-                    rng=data_collection_rng_key,
-                    timer=timer,
-                )
-
-                trajectories = []
-                q_vs_mc_returns_vals = []
-                for traj_index in range(num_trajectories_to_collect):
-                    timer.tick("trajectory_sampling_time")
-
-                    sampled_trajectories_successfully = False
-                    while not sampled_trajectories_successfully:
-                        # try:
-                        #     with time_limit(STEP_TIME_LIMIT):
-                        #         obs, reward, done, info = self.env.step(action)# may STILL not interrupt if stuck in native code
-                        # except StepTimeout:
-                        #     raise StepTimeout("env.step() timed out")
-                        # try:
-
-                        try:
-                            with time_limit(STEP_TIME_LIMIT):
-                                trajs, _q_vs_mc_returns_vals = data_collection_trajectory_sampler.sample(
-                                    env_data_collection_policy_fn,
-                                    vlm_output_fn,
-                                    num_episodes=1,
-                                    replay_buffer=state_replay_buffer,
-                                    calc_mc_return_fn=functools.partial(calc_mc_return_fn, discount=FLAGS.config.agent_kwargs.discount, reward_bias=FLAGS.reward_bias),
-                                    store_max_trajectory_reward=True,
-                                    terminate_on_success=False,
-                                )
-                                sampled_trajectories_successfully = True
-                                break
-                        # except:
-                        except (StepTimeout, TimeoutError, EOFError, BrokenPipeError) as e:
-                            print(f"Trajectory sampling failed/timed out: {type(e).__name__}: {e}")
-                            # del train_env
-                            # import gc; gc.collect()
-                            # train_env = get_libero_env(cfg=libero_config, task_name=FLAGS.task_name, is_pi=True)
-                            # data_collection_trajectory_sampler = TrajSampler(
-                            #     train_env,
-                            #     clip_action=FLAGS.clip_action,
-                            #     reward_scale=FLAGS.reward_scale,
-                            #     reward_bias=FLAGS.reward_bias,
-                            #     max_traj_length=FLAGS.config.get("max_episode_steps", 1000),
-                            #     action_horizon=pi_config.model.action_horizon,
-                            #     # action_horizon=1,
-                            # )
-                            train_env._restart()
-                            data_collection_trajectory_sampler = TrajSampler(
-                                train_env,
-                                clip_action=FLAGS.clip_action,
-                                reward_scale=FLAGS.reward_scale,
-                                reward_bias=FLAGS.reward_bias,
-                                max_traj_length=FLAGS.config.get("max_episode_steps", 1000),
-                                action_horizon=pi_config.model.action_horizon,
-                                # action_horizon=1,
-                            )
-
-
-                    traj = trajs[0]
-                    # breakpoint()
-                    _q_vs_mc_returns_vals = _q_vs_mc_returns_vals[0]
-                    timer.tock("trajectory_sampling_time")
-                    print(timer.get_total_times(reset=False))
-                    # LOG: `traj` statistics #
-                    # breakpoint()
-                    trajectories.append(traj)
-                    q_vs_mc_returns_vals.append(_q_vs_mc_returns_vals)
-                    # breakpoint()
-
-                    if FLAGS.config.image_observations:
-                        # Save trajectory as tfrecord
-                        save_trajectory_as_tfrecord(
-                            trajectory=traj,
-                            path=tf.io.gfile.join(
-                                save_dir,
-                                "image_replay_buffer",
-                                f"episode_{online_trajectories_added}.tfrecord",
-                            ),
-                        )
-                    online_trajectories_added += 1
-                    online_env_steps_this_epoch += len(traj["rewards"])
-                    
-                    # breakpoint()
-                
-                # Get trajectory statistics
-                # LOG: Log some statistics for the collected trajectories #
-                mean_trajectory_return = np.mean(
-                    [np.sum(t["rewards"]) for t in trajectories]
-                )
-                mean_trajectory_length = np.mean([len(t["rewards"]) for t in trajectories])
-                mean_max_reward = np.mean([np.max(t["rewards"]) for t in trajectories])
-                if wandb_logger is not None:
-                    wandb_logger.log(
-                        {
-                            "train_env": {
-                                "mean_trajectory_return": mean_trajectory_return,
-                                "mean_trajectory_length": mean_trajectory_length,
-                                "mean_max_reward": mean_max_reward,
-                            },
-                            "online_env_steps": online_env_steps,
-                            "online_trajectories_added": online_trajectories_added,
-                        },
-                        step=i,
-                    )
-                
-                del trajectories, q_vs_mc_returns_vals
-                import gc; gc.collect()
-                
-                # breakpoint()
-
-                # Finished collecting trajectories
-                # LOG: Construct buffers using the trajectories #
-                # LOG: Looks like two iterators are constructed, one for online trajectories and `dataset` from previous definition, for offline dataset #
-                online_env_steps += online_env_steps_this_epoch
-                # Recreate the image replay buffer iterator to include the new trajectories
-                timer.tick("recreate_image_replay_buffer_iterator")
-                data_paths = glob_to_path_list(
-                    tf.io.gfile.join(save_dir, "image_replay_buffer", "*.tfrecord")
-                )
-                #########################
-                
-                # Do some cleanups to avoid hangs #
-                online_train_iterator = None
-                image_replay_buffer = None
-                import gc; gc.collect()
-
-                #########################################################
-                # breakpoint()
-                image_replay_buffer = ImageReplayBufferPi(
-                    data_paths=data_paths,
-                    seed=FLAGS.seed,
-                    train=True,
-                    task_name=FLAGS.task_name,
-                    use_wrist_view=FLAGS.use_wrist_view, 
-                    use_language=FLAGS.use_lang, config=pi_config,
-                    filter_successful_trajectories=True, # Use success buffer #
-                    **FLAGS.config.image_replay_buffer_kwargs,
-                )
-                timer.tock("recreate_image_replay_buffer_iterator")
-                #########################################################
-
-                # Update online iterator #
-                online_train_iterator = image_replay_buffer.iterator(
-                    batch_size=FLAGS.config.agent_kwargs.batch_size
-                )
-            
-            # breakpoint()
-            # offline_batch['diffusion_actions'] = offline_batch['actions']
-            # offline_batch['next_diffusion_actions'] = offline_batch['next_actions']
-
-            rng, rng_update = jax.random.split(rng)
-
-            timer.tick("batch_sampling_time")
-            try:
-                batch = next(online_train_iterator)
-            except:
-                continue
-            timer.tock("batch_sampling_time")
-            
-            for _ in range(FLAGS.num_udpates_per_step):
-                agent, info = agent.update_actor(batch, timer=timer, seed=rng_update)
-                try:
-                    batch = next(online_train_iterator)
-                except:
-                    break
-            
-            # Log batch statistics #
-            # breakpoint()
-            batch_stats = {
-                "batch_stats/batch_size": len(batch),
-                "batch_stats/masks_mean": np.mean(batch["masks"]),
-                "batch_stats/mc_returns_mean": np.mean(batch["mc_returns"]),
-                "batch_stats/rewards_mean": np.mean(batch["rewards"]),
-                "batch_stats/rewards_min": np.min(batch["rewards"]),
-                "batch_stats/rewards_max": np.max(batch["rewards"]),
-                "batch_stats/terminals_mean": np.mean(batch["terminals"]),
-                "batch_stats/truncations_mean": np.mean(batch["truncates"]),
-            }
-            if wandb_logger is not None:
-                wandb_logger.log(batch_stats, step=i)
-            
-
-            # Log training metrics #
-            if wandb_logger is not None:
-                wandb_logger.log(info, step=i)
-            
-            # breakpoint()
-            
-            timer.tock("online_iter_total")
+        if i % 100 == 0:
+            print(f"Step {i}: {info}")
             print(timer.get_total_times(reset=True))
 
-            ### Evaluation ###
-            if (
-                (i + 1) % FLAGS.config.eval_interval == 0
-            ) and eval_env is not None:
-                # breakpoint()
-                """eval"""
-                logging.info("Evaluating...")
-                timer.tick("evaluation/total")
+        # Save checkpoint
+        if i % FLAGS.config.save_interval == 0 and FLAGS.config.save_dir:
+            logging.info(f"Saving pi0 checkpoint at step {i}")
+            agent.actor.save_checkpoint(FLAGS.config.save_dir, step=i)
+            logging.info(f"Saved pi0 checkpoint at step {i}")
 
-                if FLAGS.config.save_video:
-                    try:
-                        eval_env.start_recording(
-                            FLAGS.config.num_episodes_per_video,
-                            FLAGS.config.num_episodes_per_row,
-                        )
-                    except Exception as e:
-                        pass
-                if FLAGS.config.num_eval_episodes > 0:
-                    print("Evaluating...")
-                    q_vs_mc_returns_vals = None
-                    if "libero" not in FLAGS.environment_name: 
-                        trajectories = evaluate_with_trajectories_vectorized(
-                            eval_policy_fn,
-                            eval_env,
-                            FLAGS.config.num_eval_episodes,
-                        )
-                    else:
-                        if FLAGS.num_parallel_envs != 1:
-                            trajectories = evaluate_with_trajectories_vectorized(
-                            eval_policy_fn,
-                            eval_env,
-                            FLAGS.config.num_eval_episodes,
-                        )
-                        else:
-                            eval_policy_fn = get_policy_fn(
-                                agent=agent,
-                                rng=eval_policy_fn_key,
-                                timer=timer,
-                                debug_mode=False,
-                            )
-
-                            evaluated_trajectories_successfully = False
-                            while not evaluated_trajectories_successfully:
-                                try:
-                                    with time_limit(STEP_TIME_LIMIT):
-                                        trajectories, q_vs_mc_returns_vals = evaluate_with_trajectories_libero(
-                                            eval_policy_fn,
-                                            eval_env,
-                                            FLAGS.config.num_eval_episodes,
-                                        )
-                                        evaluated_trajectories_successfully = True
-                                        break
-                                except (StepTimeout, TimeoutError, EOFError, BrokenPipeError) as e:
-                                    print(f"Evaluation failed/timed out: {type(e).__name__}: {e}")
-                                    eval_env._restart()
-
-                            # eval_policy_fn = get_policy_fn(
-                            #     agent=agent,
-                            #     rng=eval_policy_fn_key,
-                            #     timer=timer,
-                            #     debug_mode=False,
-                            # )
-                        #     trajectories, q_vs_mc_returns_vals = evaluate_with_trajectories_libero(
-                        #     eval_policy_fn,
-                        #     eval_env,
-                        #     FLAGS.config.num_eval_episodes,
-                        #     action_horizon=pi_config.model.action_horizon,
-                        #     # action_horizon=1,
-                        #     use_full_horizon_for_refill=True, # For proper Q vs MC Returns calculation #
-                        # )
-                    
-                    # breakpoint()
-
-                    if (FLAGS.environment_name == "calvin" or FLAGS.environment_name =='libero') and FLAGS.config.save_video:
-                        trajectories_to_save = trajectories[
-                            : FLAGS.config.num_episodes_per_video
-                        ]
-                        frames = []
-                        ind_traj = []
-                        for j, traj in enumerate(trajectories_to_save):
-                            trajectory_return = 0
-                            for transition, reward in zip(
-                                traj["observation"], traj["reward"]
-                            ):
-                                assert transition["image"].shape[-1] == 3
-                                if len(transition["image"].shape) == 4:
-                                    transition["image"] = transition["image"][0]
-                                image = transition["image"]  # .transpose(2, 0, 1)
-                                # Add text for reward and return so far
-                                trajectory_return += reward
-                                # image = np.flipud(image)
-                                image = np.ascontiguousarray(image) 
-                                frame = cv2.putText(
-                                    image,
-                                    f"reward: {reward}. return: {trajectory_return}",
-                                    (10, 10),
-                                    cv2.FONT_HERSHEY_SIMPLEX,
-                                    0.3,
-                                    (0, 0, 0),
-                                    1,
-                                )
-                                ind_traj.append(frame)
-                                frame = frame.transpose(2, 0, 1)
-                                frames.append(frame)
-                            
-                            save_rollout_gif(ind_traj, save_dir, step_i=i, rollout_j=j)
-                            ind_traj = []
-                        
-                        del ind_traj, frames
-                        import gc; gc.collect()
-
-                    eval_metrics = {
-                        "eval/average_return": np.mean(
-                            [np.sum(t["reward"]) for t in trajectories]
-                        ),
-                        "eval/average_episode_length": np.mean(
-                            [len(t["reward"]) for t in trajectories]
-                        ),
-                        **(
-                            {
-                                "eval/average_normalized_return": np.mean(
-                                    [
-                                        eval_env.get_normalized_score(np.sum(t["reward"]))
-                                        for t in trajectories
-                                    ]
-                                ),
-                                "eval/min_normalized_return": np.min(
-                                    [
-                                        eval_env.get_normalized_score(np.sum(t["reward"]))
-                                        for t in trajectories
-                                    ]
-                                ),
-                                "eval/max_normalized_return": np.max(
-                                    [
-                                        eval_env.get_normalized_score(np.sum(t["reward"]))
-                                        for t in trajectories
-                                    ]
-                                ),
-                            }
-                            if hasattr(eval_env, "get_normalized_score")
-                            else {}
-                        ),
-                        "eval/average_max_reward": np.mean(
-                            [np.max(t["reward"]) for t in trajectories]
-                        ),
-                    }
-
-                    if wandb_logger is not None:
-                        wandb_logger.log(eval_metrics, step=i)
-                    
-                    del trajectories
-                    import gc; gc.collect()
-                timer.tock("evaluation/total")
-
-            if i % save_interval == 0:
-                if FLAGS.config.save_dir:
-                    os.makedirs(FLAGS.config.save_dir, exist_ok=True)
-                    final_checkpoint_path = os.path.join(FLAGS.config.save_dir, f"checkpoint_{i}.pkl")
-                    logging.info(f"Saving final checkpoint to {final_checkpoint_path}")
-                    with open(final_checkpoint_path, 'wb') as f:
-                        pickle.dump({
-                            'critic_params': agent.critic.params,
-                            'target_critic_params': agent.target_critic.params,
-                            'edit_actor_params': agent.edit_actor.params,
-                            'temp_params': agent.temp.params,
-                            'step': i,
-                        }, f)
-        
-        ### Offline training ###
-        # Not really expo style as of now, but keep it here in case need to do this paradigm later #
-        else:
-            # Sample an offline batch and do an update #
-            batch = next(offline_train_iterator)
-            # breakpoint()
-            # batch = shard_batch(batch, sharding)
-            batch = set_batch_masks(
-                batch, FLAGS.environment_name, FLAGS.reward_bias, FLAGS.reward_scale
-            )
-            agent, info = agent.update(batch, utd_ratio=FLAGS.config.utd_ratio, timer=timer)
-            print(timer.get_total_times(reset=True))
-
-            
-
-        # breakpoint()
 
 if __name__ == "__main__":
     app.run(train_agent)

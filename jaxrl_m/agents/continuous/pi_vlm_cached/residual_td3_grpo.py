@@ -93,8 +93,8 @@ def _gradient_ascent_actions(critic_fn, critic_params, vlm_output, start_action,
     def q_scalar(action):
         # Compute Q-value for a single action
         q = compute_q(critic_fn, critic_params, vlm_output, action.reshape(1, -1))
-        # return q[0]
-        return q.mean(axis=0)
+        return q[0]
+        # return q.mean(axis=0)
 
     grad_fn = jax.grad(q_scalar)
 
@@ -1709,6 +1709,12 @@ class PiResidualTD3GRPO(Agent):
         actor_info["target_entropy"] = self.target_entropy
 
         return self.replace(edit_actor=edit_actor, rng=rng), actor_info
+
+    def update_actor(self, batch: Batch, *args, **kwargs) -> Tuple[Agent, Dict[str, float]]:
+        """Update the base pi0 actor using supervised BC loss via PiPolicy.update()."""
+        timer = kwargs.pop("timer", None)
+        info = self.actor.update(batch, timer=timer)
+        return self, info
 
     def update_critic(self, batch, *args, **kwargs) -> Tuple[TrainState, Dict[str, float]]:
         seed = kwargs.pop("seed", None)

@@ -595,9 +595,9 @@ class ImageReplayBufferPi:
                 tf.float32,  # state
                 tf.float32,  # actions
 
-                tf.float32,  # base_0_rgb
-                tf.float32,  # left_wrist_0_rgb
-                tf.float32,  # right_wrist_0_rgb
+                tf.uint8,  # base_0_rgb
+                tf.uint8,  # left_wrist_0_rgb
+                tf.uint8,  # right_wrist_0_rgb
 
                 tf.bool,     # mask base
                 tf.bool,     # mask left
@@ -614,8 +614,8 @@ class ImageReplayBufferPi:
         idx = 0
         out['observations'] = {}
         out['observations']["proprio"] = outputs[idx]; idx += 1
-        # out["actions"] = outputs[idx]; idx += 1 #drop the last action to align dimensions
-        out["actions"] = actions_tf; idx += 1
+        out["actions"] = outputs[idx]; idx += 1 #drop the last action to align dimensions
+        # out["actions"] = actions_tf; idx += 1
 
         
         out['observations']["image"] = outputs[idx]; idx += 1
