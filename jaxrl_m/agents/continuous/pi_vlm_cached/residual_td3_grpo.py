@@ -100,9 +100,6 @@ def _gradient_ascent_actions(critic_fn, critic_params, vlm_output, start_action,
 
     def ascent_step(i, action):
         g = grad_fn(action)
-        g = g.reshape(10, 7)
-        g = g.at[:, -1].set(g[:, -1] * (1.0 - zero_grad_gripper))
-        g = g.reshape(-1)
         action = action + eta_ascent * g
         # action = jnp.clip(action, -1.0, 1.0)
         return action
@@ -239,9 +236,6 @@ def _edit_actor_loss_and_grad_residual_q(
     def loss_fn(actor_params):
         edit_actions = edit_actor_apply_fn(
             {"params": actor_params}, vlm_output, batch_actions)
-        edit_actions = edit_actions.reshape(-1, 10, 7)
-        edit_actions = edit_actions.at[:, :, -1].set(0.0)
-        edit_actions = edit_actions.reshape(batch_actions.shape)
         actions = batch_actions + edit_action_scale * edit_actions
         actions = jnp.clip(actions, -1.0, 1.0)
 
@@ -1044,9 +1038,6 @@ class PiResidualTD3GRPO(Agent):
         
         edit_actions = _sample_deterministic_actions(
             self.edit_actor.apply_fn, self.edit_actor.params, r_observations, actions)
-        edit_actions = edit_actions.reshape(-1, 10, 7)
-        edit_actions = edit_actions.at[:, :, -1].set(0.0)
-        edit_actions = edit_actions.reshape(actions.shape)
 
         if not use_deterministic_actions:
             rng, rng_exploration = jax.random.split(rng)
